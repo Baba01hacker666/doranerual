@@ -5,7 +5,7 @@ activations, and network components.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 import numpy as np
 
 
@@ -97,3 +97,14 @@ class Layer(ABC):
     def from_dict(cls, config: dict) -> "Layer":
         """Instantiate layer from configuration dictionary."""
         return cls()
+
+    def to_precision(self, dtype: Any) -> "Layer":
+        """Cast layer parameters and internal buffers to the specified precision ('float32' or 'float64')."""
+        from .precision import to_precision
+        to_precision(self, dtype)
+        return self
+
+    def cast(self, dtype: Any) -> "Layer":
+        """Alias for to_precision."""
+        return self.to_precision(dtype)
+

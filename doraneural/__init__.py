@@ -58,6 +58,25 @@ from .utils import (
     make_blobs,
     make_digits,
 )
+from .accel import (
+    set_im2col_backend,
+    get_im2col_backend,
+    is_numba_available,
+    im2col_indices,
+    col2im_indices,
+)
+from .precision import (
+    set_precision,
+    get_precision,
+    precision_scope,
+    to_precision,
+    memory_summary,
+)
+from .dataloader import (
+    DataLoader,
+    Dataset,
+    ArrayDataset,
+)
 from .easy import create, quick_train
 from .teach import explain
 from .data import load_csv, create_sample_classification_csv, create_sample_regression_csv
@@ -83,9 +102,22 @@ __all__ = [
     "quick_train",
     "explain",
     # Data & Preprocessing
+    "DataLoader",
+    "Dataset",
+    "ArrayDataset",
     "load_csv",
     "create_sample_classification_csv",
     "create_sample_regression_csv",
+    # Hardware Acceleration & JIT
+    "set_im2col_backend",
+    "get_im2col_backend",
+    "is_numba_available",
+    # Precision & Mixed-Precision Control
+    "set_precision",
+    "get_precision",
+    "precision_scope",
+    "to_precision",
+    "memory_summary",
     # Image loading & Computer Vision (Zero-dependency)
     "read_bmp",
     "write_bmp",

@@ -328,6 +328,8 @@ def _resolve_padding(padding: Union[int, str], k_size: int, dilation: int = 1) -
     return int(padding)
 
 
+from .accel import im2col_indices, col2im_indices
+
 def _im2col_indices(
     x: np.ndarray,
     kh: int,
@@ -336,39 +338,8 @@ def _im2col_indices(
     stride: int = 1,
     dilation: int = 1,
 ) -> Tuple[np.ndarray, int, int]:
-    """Efficient vectorized im2col transformation with stride and dilation."""
-    N, C, H, W = x.shape
-    kheff = (kh - 1) * dilation + 1
-    kweff = (kw - 1) * dilation + 1
-
-    out_h = (H + 2 * padding - kheff) // stride + 1
-    out_w = (W + 2 * padding - kweff) // stride + 1
-
-    if out_h <= 0 or out_w <= 0:
-        raise ValueError(
-            f"Conv2D output spatial size non-positive: out_h={out_h}, out_w={out_w}. "
-            f"Input ({H}x{W}), kernel ({kh}x{kw}), padding={padding}, stride={stride}, dilation={dilation}."
-        )
-
-    x_padded = np.pad(
-        x,
-        ((0, 0), (0, 0), (padding, padding), (padding, padding)),
-        mode="constant",
-    )
-
-    # Compute index slices stepping by dilation
-    cols = np.zeros((N, C, kh, kw, out_h, out_w), dtype=x.dtype)
-    for i in range(kh):
-        i_start = i * dilation
-        i_max = i_start + stride * out_h
-        for j in range(kw):
-            j_start = j * dilation
-            j_max = j_start + stride * out_w
-            cols[:, :, i, j, :, :] = x_padded[:, :, i_start:i_max:stride, j_start:j_max:stride]
-
-    # Reshape to (N * out_h * out_w, C * kh * kw)
-    cols = cols.transpose(0, 4, 5, 1, 2, 3).reshape(N * out_h * out_w, C * kh * kw)
-    return cols, out_h, out_w
+    """Extract sliding patches using accelerated Numba JIT / vectorized NumPy backend."""
+    return im2col_indices(x, kh, kw, padding=padding, stride=stride, dilation=dilation)
 
 
 def _col2im_indices(
@@ -380,28 +351,8 @@ def _col2im_indices(
     stride: int = 1,
     dilation: int = 1,
 ) -> np.ndarray:
-    """Accumulates column patches back into image tensor with stride and dilation."""
-    N, C, H, W = x_shape
-    kheff = (kh - 1) * dilation + 1
-    kweff = (kw - 1) * dilation + 1
-
-    out_h = (H + 2 * padding - kheff) // stride + 1
-    out_w = (W + 2 * padding - kweff) // stride + 1
-
-    x_padded = np.zeros((N, C, H + 2 * padding, W + 2 * padding), dtype=cols.dtype)
-    cols_reshaped = cols.reshape(N, out_h, out_w, C, kh, kw).transpose(0, 3, 4, 5, 1, 2)
-
-    for i in range(kh):
-        i_start = i * dilation
-        i_max = i_start + stride * out_h
-        for j in range(kw):
-            j_start = j * dilation
-            j_max = j_start + stride * out_w
-            x_padded[:, :, i_start:i_max:stride, j_start:j_max:stride] += cols_reshaped[:, :, i, j, :, :]
-
-    if padding > 0:
-        return x_padded[:, :, padding:-padding, padding:-padding]
-    return x_padded
+    """Accumulate gradient columns back into image tensor using accelerated backend."""
+    return col2im_indices(cols, x_shape, kh, kw, padding=padding, stride=stride, dilation=dilation)
 
 
 class Conv2D(Layer):

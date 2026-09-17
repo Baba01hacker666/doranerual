@@ -65,6 +65,16 @@ from doraneural import (
     WarmupCosineLR,
     clip_grad_norm,
     clip_grad_value,
+    DataLoader,
+    Dataset,
+    ArrayDataset,
+    set_precision,
+    get_precision,
+    precision_scope,
+    memory_summary,
+    set_im2col_backend,
+    get_im2col_backend,
+    is_numba_available,
 )
 
 
@@ -730,6 +740,150 @@ class TestSchedulers(unittest.TestCase):
         hist = model.fit(X, y, epochs=5, batch_size=4, verbose=0, scheduler=scheduler, clip_norm=1.0)
         self.assertEqual(len(hist.history["loss"]), 5)
         self.assertLess(opt.lr, 0.05)
+
+
+class TestHardwareAcceleration(unittest.TestCase):
+    def test_numba_and_numpy_im2col_equivalence(self):
+        from doraneural.accel import im2col_indices, col2im_indices, set_im2col_backend
+
+        x = np.random.randn(2, 3, 8, 8).astype(np.float32)
+
+        # Force pure numpy
+        set_im2col_backend("numpy")
+        cols_np, oh_np, ow_np = im2col_indices(x, 3, 3, padding=1, stride=1, dilation=1)
+        dx_np = col2im_indices(cols_np, x.shape, 3, 3, padding=1, stride=1, dilation=1)
+
+        # Force numba if available
+        if is_numba_available():
+            set_im2col_backend("numba")
+            cols_nb, oh_nb, ow_nb = im2col_indices(x, 3, 3, padding=1, stride=1, dilation=1)
+            dx_nb = col2im_indices(cols_nb, x.shape, 3, 3, padding=1, stride=1, dilation=1)
+
+            self.assertEqual(oh_np, oh_nb)
+            self.assertEqual(ow_np, ow_nb)
+            np.testing.assert_allclose(cols_np, cols_nb, atol=1e-6)
+            np.testing.assert_allclose(dx_np, dx_nb, atol=1e-6)
+
+        # Reset to auto
+        set_im2col_backend("auto")
+
+    def test_backend_toggle_error(self):
+        with self.assertRaises(ValueError):
+            set_im2col_backend("nonexistent_backend")
+
+
+class TestPrecisionManagement(unittest.TestCase):
+    def test_precision_getter_setter(self):
+        orig = get_precision()
+        try:
+            set_precision("float64")
+            self.assertEqual(get_precision(), np.float64)
+            set_precision("float32")
+            self.assertEqual(get_precision(), np.float32)
+        finally:
+            set_precision(orig)
+
+    def test_precision_scope(self):
+        orig = get_precision()
+        with precision_scope("float64"):
+            self.assertEqual(get_precision(), np.float64)
+        self.assertEqual(get_precision(), orig)
+
+    def test_model_and_layer_precision_casting(self):
+        dense = Dense(in_features=10, out_features=5)
+        self.assertEqual(dense.weights.dtype, np.float32)
+
+        dense.to_precision("float64")
+        self.assertEqual(dense.weights.dtype, np.float64)
+        self.assertEqual(dense.biases.dtype, np.float64)
+
+        dense.cast("float32")
+        self.assertEqual(dense.weights.dtype, np.float32)
+
+        model = Sequential([
+            Dense(in_features=4, out_features=8),
+            ReLU(),
+            Dense(in_features=8, out_features=2),
+        ])
+        model.compile(optimizer=Adam(lr=0.01), loss=MSELoss())
+
+        mem_f32 = model.memory_summary()
+        self.assertIn("float32", mem_f32["dtype"])
+        self.assertIn("50% smaller", mem_f32["formatted"])
+
+        model.to_precision("float64")
+        self.assertEqual(model.dtype, np.float64)
+        self.assertEqual(model.layers[0].weights.dtype, np.float64)
+
+        mem_f64 = model.memory_summary()
+        self.assertEqual(mem_f64["total_bytes"], 2 * mem_f32["total_bytes"])
+
+    def test_memory_summary_structure(self):
+        dense = Dense(4, 2)
+        summary = memory_summary(dense)
+        self.assertEqual(summary["num_parameters"], 4 * 2 + 2)
+        self.assertGreater(summary["total_bytes"], 0)
+
+
+class TestParallelDataLoader(unittest.TestCase):
+    def test_dataloader_iteration_and_shapes(self):
+        X = np.arange(100).reshape(50, 2).astype(np.float32)
+        y = np.arange(50).reshape(50, 1).astype(np.float32)
+
+        loader = DataLoader((X, y), batch_size=16, shuffle=False, prefetch_factor=2)
+        self.assertEqual(len(loader), 4)
+
+        batches = list(loader)
+        self.assertEqual(len(batches), 4)
+        self.assertEqual(batches[0][0].shape, (16, 2))
+        self.assertEqual(batches[0][1].shape, (16, 1))
+        self.assertEqual(batches[3][0].shape, (2, 2))
+
+    def test_dataloader_drop_last(self):
+        X = np.random.randn(50, 4).astype(np.float32)
+        y = np.random.randn(50, 1).astype(np.float32)
+
+        loader_drop = DataLoader((X, y), batch_size=16, shuffle=False, drop_last=True)
+        self.assertEqual(len(loader_drop), 3)
+        batches = list(loader_drop)
+        self.assertEqual(len(batches), 3)
+
+    def test_dataloader_transform(self):
+        X = np.ones((20, 2), dtype=np.float32)
+        y = np.zeros((20, 1), dtype=np.float32)
+
+        def add_ten(x_batch, y_batch):
+            return x_batch + 10.0, y_batch + 5.0
+
+        loader = DataLoader((X, y), batch_size=10, transform=add_ten, shuffle=False)
+        for x_b, y_b in loader:
+            np.testing.assert_allclose(x_b, 11.0)
+            np.testing.assert_allclose(y_b, 5.0)
+
+    def test_dataloader_early_break_and_reiteration(self):
+        X = np.random.randn(40, 2).astype(np.float32)
+        y = np.random.randn(40, 1).astype(np.float32)
+
+        loader = DataLoader((X, y), batch_size=10, prefetch_factor=2)
+        for b in loader:
+            break
+
+        count = sum(1 for _ in loader)
+        self.assertEqual(count, 4)
+
+    def test_model_fit_with_dataloader(self):
+        X = np.random.randn(30, 4).astype(np.float32)
+        y = np.random.randn(30, 1).astype(np.float32)
+
+        loader = DataLoader((X, y), batch_size=10, shuffle=True, prefetch_factor=2)
+        model = Sequential([
+            Dense(in_features=4, out_features=2),
+            Dense(in_features=2, out_features=1),
+        ])
+        model.compile(optimizer=Adam(lr=0.01), loss=MSELoss())
+
+        hist = model.fit(loader, epochs=2, verbose=0)
+        self.assertEqual(len(hist.history["loss"]), 2)
 
 
 if __name__ == "__main__":

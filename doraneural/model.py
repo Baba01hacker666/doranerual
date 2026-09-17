@@ -68,13 +68,17 @@ class Sequential:
         >>> history = model.fit(X_train, y_train, epochs=50, batch_size=32)
     """
 
-    def __init__(self, layers: Optional[List[Layer]] = None) -> None:
+    def __init__(self, layers: Optional[List[Layer]] = None, dtype: Optional[Any] = None) -> None:
         """Initialize the Sequential container with an optional list of layers.
 
         Args:
             layers (Optional[List[Layer]]): Ordered list of Layer instances.
+            dtype: Floating-point precision ('float32' or 'float64'). Defaults to active global precision.
         """
         self.layers: List[Layer] = []
+        from .precision import get_precision, canonicalize_dtype
+        self.dtype: np.dtype = canonicalize_dtype(dtype) if dtype is not None else get_precision()
+
         if layers is not None:
             for layer in layers:
                 self.add(layer)
@@ -83,6 +87,21 @@ class Sequential:
         self.optimizer: Optional[Optimizer] = None
         self.metrics: List[Metric] = []
         self._is_compiled: bool = False
+
+    def to_precision(self, dtype: Any) -> "Sequential":
+        """Cast model parameters, internal layer buffers, and optimizer state to float32 or float64."""
+        from .precision import to_precision
+        to_precision(self, dtype)
+        return self
+
+    def cast(self, dtype: Any) -> "Sequential":
+        """Alias for to_precision."""
+        return self.to_precision(dtype)
+
+    def memory_summary(self) -> Dict[str, Any]:
+        """Return parameter count and RAM byte usage summary."""
+        from .precision import memory_summary
+        return memory_summary(self)
 
     def add(self, layer: Layer) -> "Sequential":
         """Append a layer to the network.
@@ -137,15 +156,15 @@ class Sequential:
         return self
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        """Run input sequentially through all layers.
+        """Run input through all layers sequentially.
 
         Args:
-            x (np.ndarray): Input data tensor with shape (batch_size, in_features).
+            x (np.ndarray): Input data tensor with shape (batch_size, ...).
 
         Returns:
             np.ndarray: Network output tensor.
         """
-        current = x
+        current = np.asarray(x, dtype=self.dtype)
         for layer in self.layers:
             current = layer.forward(current)
         return current
@@ -166,8 +185,8 @@ class Sequential:
 
     def fit(
         self,
-        X: np.ndarray,
-        y: np.ndarray,
+        X: Union[np.ndarray, Any],
+        y: Optional[np.ndarray] = None,
         epochs: int = 100,
         batch_size: int = 32,
         verbose: int = 1,
@@ -175,12 +194,14 @@ class Sequential:
         validation_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         scheduler: Optional[Any] = None,
         clip_norm: Optional[float] = None,
+        dataloader: Optional[Any] = None,
+        prefetch_factor: int = 2,
     ) -> History:
-        """Train the model using mini-batch gradient descent.
+        """Train the model using mini-batch gradient descent with thread prefetching.
 
         Args:
-            X (np.ndarray): Training features, shape (N, ...).
-            y (np.ndarray): Training targets, shape (N, ...).
+            X: Training features array, or a pre-instantiated DataLoader.
+            y: Training targets (if X is an array).
             epochs (int): Number of complete passes over the training dataset.
             batch_size (int): Number of samples per gradient update batch.
             verbose (int): Verbosity mode (0 = silent, 1 = print every epoch, >1 = progress step).
@@ -188,6 +209,8 @@ class Sequential:
             validation_data (Optional[Tuple[np.ndarray, np.ndarray]]): Optional (X_val, y_val) tuple.
             scheduler (Optional[LRScheduler]): Learning rate scheduler stepped each epoch.
             clip_norm (Optional[float]): Global gradient norm threshold for clipping.
+            dataloader (Optional[DataLoader]): Explicit DataLoader instance with prefetching.
+            prefetch_factor (int): Number of batches prefetched on background thread.
 
         Returns:
             History: Object containing recorded training metrics across epochs.
@@ -195,13 +218,31 @@ class Sequential:
         if not self._is_compiled or self.loss is None or self.optimizer is None:
             raise ModelNotCompiledError()
 
-        X_train = np.asarray(X, dtype=np.float32)
-        y_train = np.asarray(y)
+        from .dataloader import DataLoader
 
-        n_samples = len(X_train)
-        if len(y_train) != n_samples:
-            raise ValueError(
-                f"Sample count mismatch: X has {n_samples} samples, y has {len(y_train)} samples."
+        # Setup active dataloader with prefetching
+        if dataloader is not None:
+            active_loader = dataloader
+            X_eval = getattr(active_loader.dataset, "X", None)
+            y_eval = getattr(active_loader.dataset, "y", None)
+        elif isinstance(X, DataLoader):
+            active_loader = X
+            X_eval = getattr(active_loader.dataset, "X", None)
+            y_eval = getattr(active_loader.dataset, "y", None)
+        else:
+            X_arr = np.asarray(X, dtype=self.dtype)
+            y_arr = np.asarray(y)
+            if len(X_arr) != len(y_arr):
+                raise ValueError(
+                    f"Sample count mismatch: X has {len(X_arr)} samples, y has {len(y_arr)} samples."
+                )
+            X_eval = X_arr
+            y_eval = y_arr
+            active_loader = DataLoader(
+                (X_arr, y_arr),
+                batch_size=batch_size,
+                shuffle=shuffle,
+                prefetch_factor=max(1, prefetch_factor),
             )
 
         history = History()
@@ -209,16 +250,19 @@ class Sequential:
         for epoch in range(1, epochs + 1):
             self.train(True)
 
-            # Mini-batch gradient descent loop
-            for X_batch, y_batch in batch_iterator(X_train, y_train, batch_size=batch_size, shuffle=shuffle):
+            # Mini-batch gradient descent loop via prefetching DataLoader
+            for X_batch, y_batch in active_loader:
+                X_batch_arr = np.asarray(X_batch, dtype=self.dtype)
+                y_batch_arr = np.asarray(y_batch)
+
                 # 1. Forward pass
-                preds = self.forward(X_batch)
+                preds = self.forward(X_batch_arr)
 
                 # 2. Loss computation
-                self.loss.forward(preds, y_batch)
+                self.loss.forward(preds, y_batch_arr)
 
                 # 3. Backward pass
-                loss_grad = self.loss.backward(preds, y_batch)
+                loss_grad = self.loss.backward(preds, y_batch_arr)
                 self.backward(loss_grad)
 
                 # 4. Optional gradient clipping
@@ -235,13 +279,18 @@ class Sequential:
 
             # End of epoch evaluation on full dataset (eval mode)
             self.eval()
-            train_preds = self.forward(X_train)
-            train_loss = self.loss.forward(train_preds, y_train)
+            if X_eval is not None and y_eval is not None:
+                train_preds = self.forward(np.asarray(X_eval, dtype=self.dtype))
+                train_loss = self.loss.forward(train_preds, y_eval)
+            else:
+                train_loss = 0.0
+                train_preds = None
 
             epoch_logs = {"loss": train_loss}
-            for metric in self.metrics:
-                score = metric(y_train, train_preds)
-                epoch_logs[metric.name] = score
+            if train_preds is not None:
+                for metric in self.metrics:
+                    score = metric(y_eval, train_preds)
+                    epoch_logs[metric.name] = score
 
             if validation_data is not None:
                 X_val, y_val = validation_data
