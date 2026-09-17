@@ -224,6 +224,27 @@ def download_hf_dataset(
         print(f"📦 Using cached Hugging Face dataset: {out_file} ({out_file.stat().st_size:,} bytes)")
         return out_file
 
+    # Fast-path for datasets with direct hosted JSON on Hugging Face Hub
+    if clean_id in ("yahma/alpaca-cleaned", "tatsu-lab/alpaca"):
+        json_url = f"https://huggingface.co/datasets/{clean_id}/resolve/main/alpaca_data_cleaned.json" if "yahma" in clean_id else f"https://huggingface.co/datasets/{clean_id}/resolve/main/alpaca_data.json"
+        try:
+            print(f"⚡ Fast-path: downloading full dataset directly from {json_url}...")
+            req = urllib.request.Request(json_url, headers={"User-Agent": "doraneural/1.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw_data = json.loads(resp.read().decode("utf-8"))
+            limit = len(raw_data) if max_samples <= 0 else min(max_samples, len(raw_data))
+            collected = []
+            for item in raw_data[:limit]:
+                d = format_row_to_dialogue(item)
+                if d:
+                    collected.append(d)
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_text("\n\n".join(collected), encoding="utf-8")
+            print(f"✅ Extracted {len(collected):,} instruction dialogues to {out_file}!")
+            return out_file
+        except Exception as e:
+            print(f"⚠️ Fast-path failed ({e}), falling back to datasets-server API...")
+
     print(f"🌐 Querying Hugging Face Dataset Server: '{clean_id}' (split={split})...")
 
     # Resolve config if not provided
