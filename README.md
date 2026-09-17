@@ -1,324 +1,280 @@
-# neural_lib
+# doraneural
 
-A minimalist, modular Python neural network library built purely with **NumPy** and the Python Standard Library. Designed specifically for education, hackability, and running on **low-power CPU hardware** (such as Raspberry Pi, Chromebooks, Android/Termux, or embedded micro-servers) without needing heavy frameworks like PyTorch, TensorFlow, JAX, or scikit-learn.
+An intuitive, beginner-friendly neural network creation toolkit and CLI built purely with **NumPy** for **low-power CPU hardware** (Raspberry Pi, Chromebooks, Android/Termux, micro-servers).
+
+`doraneural` strips away the complexity of heavyweight frameworks like PyTorch and TensorFlow. It hides the tedious math behind clean one-liners, provides clear visual feedback, teaches core deep learning concepts in plain English, and produces friendly, actionable error messages when things go wrong.
 
 ---
 
 ## Table of Contents
 
-- [Project Purpose and Non-Goals](#project-purpose-and-non-goals)
-- [Library Structure Overview](#library-structure-overview)
+- [Why doraneural?](#why-doraneural)
 - [Installation](#installation)
-- [Quickstart Snippet](#quickstart-snippet)
-- [How Backpropagation Works Here](#how-backpropagation-works-here)
-- [Supported Features](#supported-features)
-- [Full Training Examples](#full-training-examples)
-  - [1. Binary Classification (Moons Dataset)](#1-binary-classification-moons-dataset)
-  - [2. Multi-class Classification (Blobs Dataset)](#2-multi-class-classification-blobs-dataset)
-  - [3. 2D Convolutional Network (Visual Patterns)](#3-2d-convolutional-network-visual-patterns)
-  - [4. 0 to 9 Digit Classifier](#4-0-to-9-handwrittenprinted-digit-classifier)
-- [Model Persistence (Save & Load)](#model-persistence-save--load)
-- [Performance & Low-Power Constraints](#performance--low-power-constraints)
-- [Running the Test Suite](#running-the-test-suite)
-- [Known Limitations](#known-limitations)
+- [CLI Quickstart: No Complex Commands](#cli-quickstart-no-complex-commands)
+  - [1. Start a New Model](#1-start-a-new-model-doraneural-new)
+  - [2. Train with Zero Flags](#2-train-with-zero-flags-doraneural-train)
+  - [3. View Architecture & Progress](#3-view-architecture--progress-doraneural-status)
+  - [4. Predict on Inputs](#4-predict-on-inputs-doraneural-predict)
+  - [5. Learn Machine Learning in Plain English](#5-learn-machine-learning-in-plain-english-doraneural-explain)
+- [Python Library API: One-Liner Creation](#python-library-api-one-liner-creation)
+- [Beginner-Friendly Error System](#beginner-friendly-error-system)
+- [Full Command Reference](#full-command-reference)
+- [Interactive Visualizer & Demos](#interactive-visualizer--demos)
+- [Under the Hood: How Backprop Works Here](#under-the-hood-how-backprop-works-here)
 
 ---
 
-## Project Purpose and Non-Goals
+## Why doraneural?
 
-### Purpose
-- **Educational Clarity**: Clear, readable Python code where every layer, matrix multiplication, derivative, and update step is accessible in plain NumPy.
-- **Ultra-Lightweight & CPU-Centric**: Zero gigabyte dependencies. Runs immediately on constrained CPUs with minimal RAM footprint.
-- **Hackability**: Easily inspect, print, or modify weights, gradients, activations, and loss functions in minutes.
-
-### Non-Goals
-- **Not a replacement for PyTorch / JAX / TensorFlow**: No CUDA / GPU acceleration kernels, no distributed clusters, and no dynamic automatic differentiation graph engines.
-- **Not for massive LLMs or computer vision transformers**: Focused on educational MLPs, CNNs, and classifiers.
-
----
-
-## Library Structure Overview
-
-```text
-neural_lib/
-├── __init__.py          # Public API exports (Sequential, Dense, Conv2D, Adam, etc.)
-├── base.py              # Layer abstract interface contract (forward / backward / params / train / eval)
-├── layers.py            # Dense, Dropout, LayerNorm, Flatten, Conv2D, MaxPool2D
-├── activations.py       # ReLU, Sigmoid, and Softmax activation layers
-├── losses.py            # BinaryCrossEntropy and CategoricalCrossEntropy
-├── optimizers.py        # SGD (with Momentum), Adam, RMSprop
-├── metrics.py           # Accuracy metric for binary and multiclass tasks
-├── model.py             # Sequential container model and History logging
-├── utils.py             # Seed management, dataset splitting, one-hot, synthetic generators
-└── serialization.py     # JSON architecture and NumPy .npz weight persistence
-examples/
-├── binary_classification.py      # End-to-end 2D Moons demo
-├── multiclass_classification.py  # End-to-end 3-class Blobs demo
-└── cnn_image_classification.py   # End-to-end 2D CNN pattern recognition demo
-tests/
-└── test_neural_lib.py            # Numerical gradient checks, stability, & unit tests
-requirements.txt                  # NumPy only (numpy>=1.20.0)
-setup.py                          # Standard packaging
-README.md                         # Comprehensive documentation
-```
-
----
-
-## Supported Features
-
-- **Layers**:
-  - `Dense(in_features, out_features, weight_init="he", use_bias=True)`
-  - `Dropout(drop_rate=0.5)`
-  - `LayerNorm(normalized_shape, eps=1e-5)`
-  - `Flatten()`
-  - `Conv2D(in_channels, out_channels, kernel_size, stride, padding)`
-  - `MaxPool2D(pool_size, stride)`
-- **Activations**:
-  - `ReLU()`
-  - `Sigmoid()`
-  - `Softmax(axis=-1)`
-- **Losses**:
-  - `BinaryCrossEntropy(eps=1e-7)`
-  - `CategoricalCrossEntropy(eps=1e-7)`
-- **Optimizers**:
-  - `SGD(lr=0.01, momentum=0.9, clip_norm=None)`
-  - `Adam(lr=0.001, beta1=0.9, beta2=0.999, weight_decay=0.0)`
-  - `RMSprop(lr=0.001, alpha=0.99, momentum=0.0)`
+- **Hides the Math, Teaches the Concepts**: Create layers and train networks without deriving Jacobians or writing backpropagation loops manually.
+- **Short, Effortless Commands**: Train your active model with just `doraneural train`—no 10-flag commands needed.
+- **Human-Readable Error Logs**: No cryptic dimension errors. If a shape doesn't match, `doraneural` explains *what happened* and *how to fix it*.
+- **Pure NumPy / CPU Native**: Runs immediately on minimal hardware with zero GPU drivers or gigabyte wheels.
 
 ---
 
 ## Installation
 
-The only prerequisite is Python 3.8+ and NumPy.
-
-### Option A: Using `uv` (Recommended)
 ```bash
-# Create a clean virtual environment
-uv venv .venv
-source .venv/bin/activate
+# Clone the repository
+git clone https://github.com/Baba01hacker666/doranerual.git
+cd doranerual
 
-# Install requirements
-uv pip install -r requirements.txt
-```
-
-### Option B: Standard `python -m venv`
-```bash
+# Using venv or uv
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
+
+Once installed, both `doraneural` and `doranerual` are available directly as CLI commands in your terminal.
 
 ---
 
-## Quickstart Snippet
+## CLI Quickstart: No Complex Commands
 
-```python
-import numpy as np
-from neural_lib import Sequential, Dense, ReLU, Sigmoid
-from neural_lib.losses import BinaryCrossEntropy
-from neural_lib.optimizers import SGD
+### 1. Start a New Model: `doraneural new`
 
-# 1. Build a simple multi-layer perceptron
-model = Sequential([
-    Dense(in_features=2, out_features=16, weight_init="he"),
-    ReLU(),
-    Dense(in_features=16, out_features=1, weight_init="xavier"),
-    Sigmoid(),
-])
+Create a new network using an interactive wizard or quick arguments:
 
-# 2. Compile model
-model.compile(
-    loss=BinaryCrossEntropy(),
-    optimizer=SGD(lr=0.1, momentum=0.9),
-    metrics=["accuracy"],
-)
+```bash
+# Interactive setup: asks inputs, hidden layers, outputs, and dataset
+doraneural new -i
 
-# 3. Fit on your dataset
-# X: (N, 2), y: (N, 1)
-X = np.random.randn(200, 2).astype(np.float32)
-y = (X[:, 0] + X[:, 1] > 0).astype(np.float32).reshape(-1, 1)
-
-history = model.fit(X, y, epochs=20, batch_size=16, verbose=1)
-
-# 4. Evaluate & Predict
-loss, acc = model.evaluate(X, y)
-predictions = model.predict(X)
-print(f"Accuracy: {acc * 100:.1f}%")
+# Or quick setup: 2 inputs -> [16, 8] hidden -> 1 output (binary classifier)
+doraneural new --inputs 2 --hidden 16 8 --outputs 1 --dataset moons
 ```
 
----
+### 2. Train with Zero Flags: `doraneural train`
 
-## How Backpropagation Works Here
+Train the active model on your dataset with a single short command:
 
-In this library, backpropagation is implemented without complicated computational graph abstractions. Instead, it follows a simple **chain of message passing** through the layer stack in reverse.
+```bash
+doraneural train
+```
 
 ```text
-[Forward Pass]
-  Input X  ───▶  Dense ───▶  ReLU ───▶  Dense ───▶  Sigmoid ───▶ Loss L
-                   │           │          │            │
-                 Cache X     Cache Z    Cache H      Cache P
-                   │           │          │            │
-[Backward Pass]    ▼           ▼          ▼            ▼
-  dL/dX   ◀─── dL/dW,b ◀── dL/dZ  ◀── dL/dH,W,b ◀── dL/dP  ◀── dL/dy_pred
+Training current model on 'moons' dataset for 25 epochs...
+Epoch   1/25 - loss: 0.2854 - accuracy: 0.8662 - val_loss: 0.3279 - val_accuracy: 0.8200
+...
+Epoch  25/25 - loss: 0.0210 - accuracy: 0.9950 - val_loss: 0.0310 - val_accuracy: 0.9900
+
+──────────────────────────────────────────────────────────
+✨ Training complete!
+   Accuracy: 99.00%  |  Loss: 0.0310
+   Total Epochs Trained: 25
+──────────────────────────────────────────────────────────
+
+💡 Learning Tip:
+   Loss measures mistakes (lower is better). Accuracy is % correct.
+   Type 'doraneural status' to inspect your network anytime!
 ```
 
-### Step-by-Step Chain Rule Flow
+### 3. View Architecture & Progress: `doraneural status`
 
-1. **The Loss Layer (`losses.py`)**:
-   - The loss function compares model predictions $\hat{y}$ with true labels $y$.
-   - It calculates the scalar error and computes the gradient:
-     $$\frac{\partial L}{\partial \hat{y}}$$
-     *In plain English: "If the output probability $\hat{y}$ increases slightly, how much does the loss go up or down?"*
-   - This gradient tensor is passed backward to the final layer.
+Inspect your network's layers, parameter counts, and accuracy anytime:
 
-2. **The Output Activation Layer (e.g. `Sigmoid` or `Softmax`)**:
-   - The activation layer receives the gradient $\frac{\partial L}{\partial \hat{y}}$.
-   - It calculates its local derivative:
-     $$\text{for Sigmoid: } \frac{d\hat{y}}{dz} = \hat{y} \cdot (1 - \hat{y})$$
-   - By the chain rule, multiplying incoming error by local derivative yields $\frac{\partial L}{\partial z}$:
-     $$\frac{\partial L}{\partial z} = \frac{\partial L}{\partial \hat{y}} \cdot \frac{d\hat{y}}{dz}$$
-   - This signal $\frac{\partial L}{\partial z}$ tells upstream layers how pre-activation logits contributed to the final error.
+```bash
+doraneural status
+```
 
-3. **The Dense Layer (`layers.py`)**:
-   - A Dense layer computes $Z = X W + b$.
-   - When receiving incoming gradient $G = \frac{\partial L}{\partial Z}$ from the next layer, it computes three things:
-     1. **Weight Gradient ($\frac{\partial L}{\partial W}$)**:
-        $$\frac{\partial L}{\partial W} = X^T \cdot G$$
-        *(Each input neuron is correlated with each output error to see how strongly that connection caused the error).*
-     2. **Bias Gradient ($\frac{\partial L}{\partial b}$)**:
-        $$\frac{\partial L}{\partial b} = \sum_{\text{batch samples}} G$$
-        *(The overall offset error across all batch samples).*
-     3. **Input Gradient ($\frac{\partial L}{\partial X}$)**:
-        $$\frac{\partial L}{\partial X} = G \cdot W^T$$
-        *(This is returned from `backward()` and passed down as the error signal to preceding layers).*
+```text
+==============================================================
+ 📊 doraneural Project Status
+==============================================================
 
-4. **Hidden Activations (e.g. `ReLU`)**:
-   - ReLU simply checks which inputs were active ($x > 0$) during the forward pass.
-   - If $x > 0$, the gradient passes right through unchanged.
-   - If $x \le 0$, the gradient is set to 0.
+Architecture Flow:
+  ┌───────┐ ──▶ ┌──────────┐ ──▶ ┌──────────┐ ──▶ ┌────────┐
+  │ Input │ ──▶ │ Hidden 1 │ ──▶ │ Hidden 2 │ ──▶ │ Output │
+  │ (2)   │ ──▶ │ (16)     │ ──▶ │ (8)      │ ──▶ │ (1)    │
+  └───────┘ ──▶ └──────────┘ ──▶ └──────────┘ ──▶ └────────┘
 
-5. **The Optimizer (`optimizers.py`)**:
-   - Once all layers have computed their parameter gradients (`dweights`, `dbiases`), the optimizer executes a step:
-     $$\text{weights} \leftarrow \text{weights} - \text{learning\_rate} \times \text{dweights}$$
-   - With momentum enabled, past update directions are smoothed into a velocity buffer, accelerating convergence through valleys and damping oscillations.
+Project Details:
+  • Dataset:              moons
+  • Total Epochs Trained: 25
+  • Best Test Accuracy:   99.00%
+  • Latest Loss:          0.0310
+  • Saved Files:          current_model.json / .npz
+==============================================================
+```
+
+### 4. Predict on Inputs: `doraneural predict`
+
+Pass values directly to the active model and receive predictions and confidence scores:
+
+```bash
+doraneural predict 0.5 -0.2
+```
+
+```text
+==================================================
+ Input Values: [0.5, -0.2]
+==================================================
+  ▶ Prediction: Class 1 (Positive/Yes)
+  ▶ Confidence: 98.45%
+==================================================
+```
+
+### 5. Learn Machine Learning in Plain English: `doraneural explain`
+
+An interactive teacher explaining deep learning concepts with analogies:
+
+```bash
+doraneural explain backprop
+doraneural explain lr
+doraneural explain weights
+```
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ 📖 Topic: Backpropagation (Chain Rule)                       │
+├──────────────────────────────────────────────────────────────┤
+│ 📌 Quick Summary:                                            │
+│    The mechanism that traces errors backward to find out     │
+│    which weights caused the mistake.                         │
+│                                                              │
+│ 🔍 Details:                                                  │
+│    1. Forward Pass: Data moves left to right.                │
+│    2. Error Calculation: Guess compared to ground truth.     │
+│    3. Backward Pass: Error travels in reverse. Each weight   │
+│       gets a 'gradient' showing how to fix it.               │
+│                                                              │
+│ 💡 Analogy:                                                  │
+│    Like a detective working backward from the crime scene to │
+│    identify who contributed to the outcome.                  │
+└──────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Full Training Examples
+## Python Library API: One-Liner Creation
 
-### 1. Binary Classification (Moons Dataset)
+For writing Python scripts, `doraneural` provides a beginner one-liner API alongside standard modular layers.
 
-Runs a 2-layer MLP on non-linearly separable interleaving moon shapes:
+### One-Liner Model Creation (`dn.create`)
 
-```bash
-python examples/binary_classification.py
-```
-
-**Key Highlights**:
-- Synthetic data generated purely with NumPy (`make_moons`).
-- Reaches **> 98% accuracy** in under 50 epochs on CPU.
-- Performs inference on test coordinates.
-- Validates save and load roundtrip.
-
-### 2. Multi-class Classification (Blobs Dataset)
-
-Demonstrates 3-class classification with `Softmax` and `CategoricalCrossEntropy`:
-
-```bash
-python examples/multiclass_classification.py
-```
-
-### 3. 2D Convolutional Network (Visual Patterns)
-
-Demonstrates spatial 2D convolutions, max pooling, dropout, and Adam optimization:
-
-```bash
-python examples/cnn_image_classification.py
-```
-
-**Key Highlights**:
-- Vectorized `im2col` convolution forward and backward operations.
-- `Conv2D` -> `ReLU` -> `MaxPool2D` -> `Flatten` -> `Dropout` -> `Dense` -> `Softmax`.
-- Trains cleanly on CPU with `Adam` in a few seconds.
-
-### 4. 0 to 9 Handwritten/Printed Digit Classifier
-
-Full 10-class digit recognition on synthetic 8x8 pixel grids with ASCII art terminal rendering:
-
-```bash
-python examples/digit_classification.py
-```
-
-**Key Highlights**:
-- 1,500 samples across digits 0-9 generated with pure NumPy (`make_digits`).
-- Multi-layer MLP: 64 inputs -> 48 hidden -> 24 hidden -> 10 classes with Softmax.
-- Reaches **> 99% accuracy** in ~2 seconds on CPU.
-- Displays actual digit samples rendered in ASCII art in the terminal alongside prediction confidence.
-
----
-
-## Model Persistence (Save & Load)
-
-`neural_lib` provides clean, transparent persistence without Python `pickle`:
-- **Architecture**: Saved as human-readable JSON (layer names, shapes, activations).
-- **Weights**: Saved as standard compressed NumPy `.npz` archive.
+You don't need to manually configure activations, loss functions, or weight initializations:
 
 ```python
-from neural_lib import load_model
+import doraneural as dn
 
-# Save model
-model.save("saved_models/my_classifier")
-# Creates:
-#   - saved_models/my_classifier.json
-#   - saved_models/my_classifier.npz
+# Automatically connects Dense layers, adds ReLUs, configures Softmax & CrossEntropy
+model = dn.create(inputs=4, hidden=[16, 8], outputs=3)
 
-# Load model anywhere without training code
-restored_model = load_model("saved_models/my_classifier")
-restored_predictions = restored_model.predict(X_test)
+# Train in one line
+history = model.fit(X_train, y_train, epochs=20)
+
+# Evaluate and predict
+loss, acc = model.evaluate(X_test, y_test)
+predictions = model.predict(X_test)
+```
+
+### Data-to-Model Auto Training (`dn.quick_train`)
+
+Pass raw NumPy arrays, and `doraneural` will infer input features, count classes, split train/test subsets, build the architecture, and train it:
+
+```python
+import doraneural as dn
+
+model, history = dn.quick_train(X, y, hidden=[32, 16], epochs=25)
 ```
 
 ---
 
-## Performance & Low-Power Constraints
+## Beginner-Friendly Error System
 
-- **CPU Efficient**: Hot loops are fully vectorized into BLAS matrix products (`x @ W`, `x.T @ G`).
-- **In-Place Updates**: The optimizer modifies parameter and velocity arrays in-place (`param -= step`), eliminating continuous memory reallocations during training.
-- **Float32 Precision**: Arrays default to `np.float32`, cutting memory bandwidth and RAM consumption in half compared to Python's default float64.
-- **Zero Heavy C++ Dependencies**: No LLVM, CUDA, or 2GB wheel installations needed.
+Instead of cryptic matrix multiplication traces, `doraneural` catches shape errors and provides actionable advice:
+
+```text
+┌────────────────────────────────────────────────────────────┐
+│ ❌ Input Shape Mismatch in Dense                           │
+├────────────────────────────────────────────────────────────┤
+│ 💡 What happened:                                          │
+│    Layer expected inputs with 4 features,                  │
+│    but received input data with shape (32, 2).             │
+│                                                            │
+│ 🛠️  How to fix it:                                          │
+│    Adjust the layer's in_features to match your data, or   │
+│    ensure your input has 4 columns.                        │
+└────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Running the Test Suite
+## Full Command Reference
 
-A complete unit test suite with finite-difference numerical gradient checks is included:
+| Command | Description |
+|---|---|
+| `doraneural` | Shows current project status and quick suggestions |
+| `doraneural new` | Creates a new model project (`-i` for interactive wizard) |
+| `doraneural train` | Trains active model on current dataset without flags |
+| `doraneural status` | Prints visual ASCII architecture diagram and training stats |
+| `doraneural predict <vals...>` | Feeds numbers to the current model and prints prediction |
+| `doraneural explain <topic>` | Plain-English explanations (`weights`, `epochs`, `lr`, `loss`, `backprop`) |
+| `doraneural demo <name>` | Runs demos: `digits`, `interactive`, `moons`, `blobs`, `cnn` |
+| `doraneural test` | Runs the automated 14-test suite |
+| `doraneural info` | Displays environment specs and supported layers |
+
+---
+
+## Interactive Visualizer & Demos
+
+Launch the interactive 0–9 digit playground with real-time ASCII art and noise tuning:
 
 ```bash
-python -m unittest discover -s tests
+doraneural demo interactive
 ```
 
-Tests include:
-- Dense layer forward/backward tensor dimensions.
-- Finite-difference gradient checks comparing analytical backprop to numerical slopes.
-- Sigmoid & Softmax extreme value numerical stability (preventing NaN / Inf).
-- Loss calculation and metric edge cases.
-- Input dimension validation and user-friendly error messages.
-- Save/load serialization fidelity.
+```text
+Visual Comparison (Clean vs Noised):
+  [ Clean Base Digit ]              [ Noised Input (σ=0.28) ]
+  ┌────────────────┐          ┌────────────────┐
+  │                │          │▒▒▒▒▒▒··    ····│
+  │      ████████  │          │      ██████··  │
+  │      ██        │          │      ██    ····│
+  │      ██████    │          │      ██████    │
+  │            ██  │          │··    ··    ██  │
+  │      ██████    │          │      ██████  ··│
+  │                │          │  ▒▒▒▒      ··██│
+  │                │          │  ··      ····▒▒│
+  └────────────────┘          └────────────────┘
+
+Network Prediction on Noised Input:
+  ▶ Predicted Digit: 5
+  ▶ Confidence:      77.98%
+```
 
 ---
 
-## Known Limitations
+## Under the Hood: How Backprop Works Here
 
-1. **Architecture Scope**: Supports sequential feed-forward stacks (`Sequential`). Branching (residual/skip connections) or multi-input graphs are not supported in v1.
-2. **CPU Only**: Designed for learning and small-to-medium datasets. Not suited for multi-million parameter models.
-3. **Layer Types**: v1 focuses on Dense (MLP) layers, ReLU, Sigmoid, and Softmax.
+Even though the high-level API hides the math, all underlying components follow clean, modular object-oriented contracts:
 
----
-
-## Next Improvements
-
-If you wish to expand `neural_lib` for future projects, recommended additions are:
-- **Optimizers**: Adam and RMSprop adaptive learning rate optimizers.
-- **Regularization**: Dropout layer and L2 weight decay.
-- **Normalization**: Batch Normalization and Layer Normalization.
-- **Convolution**: 1D and 2D Convolution layers (`Conv2D`, `MaxPool2D`) for image processing.
-- **Mini-Autograd**: A tape-based or node-based scalar/tensor autograd engine (similar to micrograd) for arbitrary compute graphs.
+1. **Forward Pass**:
+   - Dense layers compute $Z = X W + b$ using vectorized BLAS matrix multiplications.
+   - Activations apply non-linear maps (e.g. $\text{ReLU}(z) = \max(0, z)$).
+2. **Backward Pass**:
+   - The loss layer computes $\frac{\partial L}{\partial \hat{y}}$ and sends it upstream.
+   - Activations apply local derivatives (e.g. ReLU passes gradient where $x > 0$).
+   - Dense layers compute parameter gradients ($X^T \cdot G$) and propagate input gradients ($G \cdot W^T$).
+3. **Parameter Updates**:
+   - `Adam`, `SGD` (with Momentum), or `RMSprop` update weights in-place with zero memory allocation churn.

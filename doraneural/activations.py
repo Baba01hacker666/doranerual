@@ -7,7 +7,7 @@ to the standard Layer interface.
 from typing import Dict, Any, Optional
 import numpy as np
 
-from neural_lib.base import Layer
+from .base import Layer
 
 
 class ReLU(Layer):

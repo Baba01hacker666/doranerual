@@ -17,6 +17,10 @@ dist/
 *.egg-info/
 .eggs/
 
+# Local model training state
+current_model.*
+.doraneural.json
+
 # IDE and OS files
 .DS_Store
 .vscode/

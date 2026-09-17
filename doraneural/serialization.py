@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Dict, Type, Any, Union
 import numpy as np
 
-from neural_lib.base import Layer
-from neural_lib.layers import Dense, Dropout, LayerNorm, Flatten, Conv2D, MaxPool2D
-from neural_lib.activations import ReLU, Sigmoid, Softmax
+from .base import Layer
+from .layers import Dense, Dropout, LayerNorm, Flatten, Conv2D, MaxPool2D
+from .activations import ReLU, Sigmoid, Softmax
 
 # Registry of serializable layer types
 LAYER_REGISTRY: Dict[str, Type[Layer]] = {
@@ -100,7 +100,7 @@ def load_model(filepath: Union[str, Path]) -> Any:
         ValueError: If layer specification is unsupported.
     """
     # Import locally to prevent circular dependency
-    from neural_lib.model import Sequential
+    from .model import Sequential
 
     json_path, npz_path = _resolve_paths(filepath)
 

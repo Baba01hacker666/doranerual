@@ -12,7 +12,7 @@ Provides standard trainable and structural building blocks:
 from typing import Dict, Any, Optional, Union, Tuple
 import numpy as np
 
-from neural_lib.base import Layer
+from .base import Layer
 
 
 class Dense(Layer):

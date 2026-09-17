@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 
-from neural_lib.base import Layer
+from .base import Layer
 
 
 class Optimizer(ABC):

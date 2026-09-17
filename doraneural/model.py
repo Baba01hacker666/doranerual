@@ -8,11 +8,12 @@ from collections import namedtuple
 from typing import List, Optional, Union, Tuple, Dict, Any
 import numpy as np
 
-from neural_lib.base import Layer
-from neural_lib.losses import Loss
-from neural_lib.optimizers import Optimizer, SGD
-from neural_lib.metrics import Metric, get_metric
-from neural_lib.utils import batch_iterator
+from .base import Layer
+from .losses import Loss
+from .optimizers import Optimizer, SGD
+from .metrics import Metric, get_metric
+from .utils import batch_iterator
+from .errors import ModelNotCompiledError
 
 
 class History:
@@ -188,7 +189,7 @@ class Sequential:
             History: Object containing recorded training metrics across epochs.
         """
         if not self._is_compiled or self.loss is None or self.optimizer is None:
-            raise RuntimeError("Model must be compiled with loss and optimizer before calling fit().")
+            raise ModelNotCompiledError()
 
         X_train = np.asarray(X, dtype=np.float32)
         y_train = np.asarray(y)
@@ -268,7 +269,7 @@ class Sequential:
                 loss, acc = model.evaluate(X_test, y_test)
         """
         if not self._is_compiled or self.loss is None:
-            raise RuntimeError("Model must be compiled before calling evaluate().")
+            raise ModelNotCompiledError()
 
         self.eval()
         X_arr = np.asarray(X, dtype=np.float32)
@@ -336,13 +337,13 @@ class Sequential:
 
     def save(self, filepath: Union[str, Any]) -> None:
         """Save model architecture and weights to disk."""
-        from neural_lib.serialization import save_model
+        from .serialization import save_model
 
         save_model(self, filepath)
 
     @classmethod
     def load(cls, filepath: Union[str, Any]) -> "Sequential":
         """Load model architecture and weights from disk."""
-        from neural_lib.serialization import load_model
+        from .serialization import load_model
 
         return load_model(filepath)
