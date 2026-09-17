@@ -92,6 +92,70 @@ def _detect_text_column(sample_row: Dict[str, any], explicit_col: Optional[str] 
     )
 
 
+def format_row_to_dialogue(row: Dict[str, any], fallback_col: Optional[str] = None) -> Optional[str]:
+    """Format any Hugging Face dataset row into clean User/Zexo conversational text."""
+    # 1. ChatML messages format: [{"role": "user", "content": "..."}, ...]
+    if "messages" in row and isinstance(row["messages"], list):
+        turns = []
+        for m in row["messages"]:
+            if isinstance(m, dict):
+                r = m.get("role", "user").lower()
+                c = str(m.get("content", "")).strip()
+                prefix = "Zexo" if r in ("assistant", "bot", "gpt") else "User"
+                if c:
+                    turns.append(f"{prefix}: {c}")
+        if turns:
+            return "\n".join(turns)
+
+    # 2. ShareGPT conversations format: [{"from": "human", "value": "..."}, ...]
+    if "conversations" in row and isinstance(row["conversations"], list):
+        turns = []
+        for m in row["conversations"]:
+            if isinstance(m, dict):
+                r = m.get("from", "human").lower()
+                c = str(m.get("value", "")).strip()
+                prefix = "Zexo" if r in ("gpt", "assistant", "chatgpt") else "User"
+                if c:
+                    turns.append(f"{prefix}: {c}")
+        if turns:
+            return "\n".join(turns)
+
+    # 3. Instruction + Output format (Alpaca, Dolly, etc.)
+    if "instruction" in row and ("output" in row or "response" in row):
+        inst = str(row.get("instruction", "")).strip()
+        inp = str(row.get("input", "") or row.get("context", "")).strip()
+        out = str(row.get("output", "") or row.get("response", "")).strip()
+        if inst and out:
+            user_msg = f"{inst}\n{inp}".strip() if inp else inst
+            return f"User: {user_msg}\nZexo: {out}"
+
+    # 4. Prompt + Completion format
+    if "prompt" in row and ("completion" in row or "response" in row):
+        p = str(row.get("prompt", "")).strip()
+        c = str(row.get("completion", "") or row.get("response", "")).strip()
+        if p and c:
+            return f"User: {p}\nZexo: {c}"
+
+    # 5. Question + Answer format
+    if "question" in row and "answer" in row:
+        q = str(row.get("question", "")).strip()
+        a = str(row.get("answer", "")).strip()
+        if q and a:
+            return f"User: {q}\nZexo: {a}"
+
+    # 6. Fallback to single text column
+    if fallback_col and fallback_col in row:
+        val = row[fallback_col]
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        elif isinstance(val, (list, tuple)):
+            joined = " ".join(str(item) for item in val if str(item).strip())
+            if joined:
+                return joined
+
+    return None
+
+
 def download_hf_dataset(
     dataset_name_or_url: str,
     split: str = "train",
@@ -219,14 +283,9 @@ def download_hf_dataset(
             if len(collected_texts) >= max_samples:
                 break
             r = r_entry.get("row", {})
-            val = r.get(detected_col)
-            if val is not None:
-                if isinstance(val, str) and val.strip():
-                    collected_texts.append(val.strip())
-                elif isinstance(val, (list, tuple)):
-                    joined = " ".join(str(item) for item in val if str(item).strip())
-                    if joined:
-                        collected_texts.append(joined)
+            dialogue = format_row_to_dialogue(r, fallback_col=detected_col)
+            if dialogue and dialogue.strip():
+                collected_texts.append(dialogue.strip())
 
         offset += len(rows_data)
         print(f"\r  Fetched {len(collected_texts)}/{max_samples} examples...", end="", flush=True)
