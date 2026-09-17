@@ -163,6 +163,15 @@ void rmsnorm_backward(
 
 // 4-row tiled SIMD GEMV: shares loaded x vector across 4 rows of W
 void matmul_forward(float* y, const float* x, const float* W, int n, int d) {
+#ifdef _OPENMP
+    if ((size_t)d * n >= 16384 && d >= 16) {
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < d; i++) {
+            y[i] = dot_product_simd(W + i * n, x, n);
+        }
+        return;
+    }
+#endif
     int i = 0;
     for (; i + 3 < d; i += 4) {
         const float* r0 = W + i * n;

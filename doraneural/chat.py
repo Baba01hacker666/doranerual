@@ -47,7 +47,9 @@ class ChatSession:
         "User:",
         "\nHuman:",
         "Human:",
+        "\nZexo:",
         "\nSystem:",
+        "System:",
         "</s>",
     ]
 
@@ -86,8 +88,12 @@ class ChatSession:
         """Count tokens in a text string using the model's tokenizer."""
         return len(self.llm.tokenizer.encode(text, bos=False))
 
+    # Label used as the assistant prefix — must match what the model was trained on
+    ASSISTANT_PREFIX: str = "Zexo"
+
     def format_prompt(self, pending_user_input: Optional[str] = None) -> str:
         """Format the active message history into a dialogue prompt string."""
+        prefix = self.ASSISTANT_PREFIX
         lines: List[str] = []
         if self.system_prompt:
             lines.append(f"System: {self.system_prompt}")
@@ -96,14 +102,14 @@ class ChatSession:
             if msg.role == "user":
                 lines.append(f"User: {msg.content}")
             elif msg.role == "assistant":
-                lines.append(f"Assistant: {msg.content}")
+                lines.append(f"{prefix}: {msg.content}")
             elif msg.role == "system":
                 lines.append(f"System: {msg.content}")
 
         if pending_user_input is not None:
             lines.append(f"User: {pending_user_input.strip()}")
 
-        lines.append("Assistant:")
+        lines.append(f"{prefix}:")
         return "\n".join(lines)
 
     def trim_history(self, pending_user_input: Optional[str] = None) -> int:

@@ -25,9 +25,9 @@ on:
         default: ""
         type: string
       hf_samples:
-        description: "Max samples to download from Hugging Face"
+        description: "Max samples to download from Hugging Face (-1 = all)"
         required: false
-        default: "100"
+        default: "-1"
         type: string
       from_scratch:
         description: "Initialize fresh base weights from scratch rather than resuming cached checkpoint"
@@ -42,12 +42,12 @@ on:
       learning_rate:
         description: "Learning rate for parameter updates"
         required: false
-        default: "0.001"
+        default: "0.0003"
         type: string
       seq_len:
         description: "Sequence chunk length"
         required: false
-        default: "32"
+        default: "128"
         type: string
       test_prompt:
         description: "Test prompt to evaluate conversational response before and after training"

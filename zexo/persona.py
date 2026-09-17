@@ -18,6 +18,7 @@ ZEXO_STOP_SEQUENCES: List[str] = [
     "User:",
     "\nHuman:",
     "Human:",
+    "\nZexo:",
     "\nSystem:",
     "<|im_end|>",
     "<|endoftext|>",
