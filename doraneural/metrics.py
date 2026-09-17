@@ -99,20 +99,43 @@ def accuracy_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return Accuracy()(y_true, y_pred)
 
 
+class MSE(Metric):
+    """Mean Squared Error metric for regression."""
+
+    def __call__(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        yt = np.asarray(y_true, dtype=np.float32)
+        yp = np.asarray(y_pred, dtype=np.float32)
+        return float(np.mean((yt - yp) ** 2))
+
+    @property
+    def name(self) -> str:
+        return "mse"
+
+
+class MAE(Metric):
+    """Mean Absolute Error metric for regression."""
+
+    def __call__(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        yt = np.asarray(y_true, dtype=np.float32)
+        yp = np.asarray(y_pred, dtype=np.float32)
+        return float(np.mean(np.abs(yt - yp)))
+
+    @property
+    def name(self) -> str:
+        return "mae"
+
+
 def get_metric(metric: Union[str, Metric]) -> Metric:
-    """Resolve a metric name or instance to a Metric object.
-
-    Args:
-        metric (Union[str, Metric]): Metric name (e.g. 'accuracy', 'acc') or Metric instance.
-
-    Returns:
-        Metric: Resolved metric object.
-    """
+    """Resolve a metric name or instance to a Metric object."""
     if isinstance(metric, Metric):
         return metric
     if isinstance(metric, str):
         normalized = metric.strip().lower()
         if normalized in ("accuracy", "acc"):
             return Accuracy()
-        raise ValueError(f"Unknown metric name: '{metric}'. Supported metrics: 'accuracy'.")
+        elif normalized in ("mse", "mean_squared_error"):
+            return MSE()
+        elif normalized in ("mae", "mean_absolute_error"):
+            return MAE()
+        raise ValueError(f"Unknown metric name: '{metric}'. Supported: 'accuracy', 'mse', 'mae'.")
     raise TypeError(f"Expected str or Metric instance, got {type(metric)}")

@@ -9,7 +9,7 @@ import numpy as np
 from .model import Sequential, History
 from .layers import Dense
 from .activations import ReLU, Sigmoid, Softmax
-from .losses import BinaryCrossEntropy, CategoricalCrossEntropy
+from .losses import BinaryCrossEntropy, CategoricalCrossEntropy, MeanSquaredError
 from .optimizers import Adam, SGD, RMSprop
 from .utils import one_hot_encode, train_test_split
 from .errors import ShapeMismatchError, TargetShapeMismatchError
@@ -49,16 +49,22 @@ def create(
 
     hidden_sizes: List[int] = [hidden] if isinstance(hidden, int) else list(hidden)
 
-    # Determine task
-    if task == "auto":
-        is_binary = (outputs == 1)
+    # Determine task mode: 'regression', 'binary', or 'multiclass'
+    task_clean = task.lower().strip()
+    if task_clean in ("regression", "reg"):
+        task_mode = "regression"
+    elif task_clean in ("binary", "bin"):
+        task_mode = "binary"
+    elif task_clean in ("multiclass", "multi"):
+        task_mode = "multiclass"
     else:
-        is_binary = (task.lower() in ("binary", "bin"))
+        # Auto-detect from output count
+        task_mode = "binary" if outputs == 1 else "multiclass"
 
     layers = []
     prev_dim = inputs
 
-    # Add hidden layers with ReLU
+    # Add hidden layers with ReLU activations
     for h_size in hidden_sizes:
         if h_size <= 0:
             raise ValueError(f"Hidden layer size must be > 0, got {h_size}")
@@ -66,15 +72,22 @@ def create(
         layers.append(ReLU())
         prev_dim = h_size
 
-    # Add output layer and activation
-    if is_binary:
+    # Configure output layer and loss function based on task
+    if task_mode == "regression":
+        # Pure linear output layer (no squashing activation)
+        layers.append(Dense(in_features=prev_dim, out_features=outputs, weight_init="xavier"))
+        loss_fn = MeanSquaredError()
+        metrics = ["mse"]
+    elif task_mode == "binary":
         layers.append(Dense(in_features=prev_dim, out_features=1, weight_init="xavier"))
         layers.append(Sigmoid())
         loss_fn = BinaryCrossEntropy()
+        metrics = ["accuracy"]
     else:
         layers.append(Dense(in_features=prev_dim, out_features=outputs, weight_init="xavier"))
         layers.append(Softmax())
         loss_fn = CategoricalCrossEntropy()
+        metrics = ["accuracy"]
 
     model = Sequential(layers)
 
@@ -89,7 +102,7 @@ def create(
     else:
         opt = Adam(lr=lr)
 
-    model.compile(loss=loss_fn, optimizer=opt, metrics=["accuracy"])
+    model.compile(loss=loss_fn, optimizer=opt, metrics=metrics)
     return model
 
 

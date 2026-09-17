@@ -13,9 +13,15 @@ from .layers import (
     MaxPool2D,
 )
 from .activations import ReLU, Sigmoid, Softmax
-from .losses import Loss, BinaryCrossEntropy, CategoricalCrossEntropy
+from .losses import (
+    Loss,
+    BinaryCrossEntropy,
+    CategoricalCrossEntropy,
+    MeanSquaredError,
+    MSELoss,
+)
 from .optimizers import Optimizer, SGD, Adam, RMSprop
-from .metrics import Metric, Accuracy, accuracy_score
+from .metrics import Metric, Accuracy, accuracy_score, MSE, MAE, get_metric
 from .model import Sequential, History, EvaluationResult
 from .serialization import save_model, load_model
 from .utils import (
@@ -30,6 +36,9 @@ from .utils import (
 )
 from .easy import create, quick_train
 from .teach import explain
+from .data import load_csv, create_sample_classification_csv, create_sample_regression_csv
+from .plot import plot_ascii_curve, plot_history
+from .export import export_to_standalone_python
 from .errors import DoraneuralError, ShapeMismatchError, ModelNotCompiledError
 
 __version__ = "1.0.0"
@@ -39,6 +48,15 @@ __all__ = [
     "create",
     "quick_train",
     "explain",
+    # Data & Preprocessing
+    "load_csv",
+    "create_sample_classification_csv",
+    "create_sample_regression_csv",
+    # Visual ASCII plotting
+    "plot_ascii_curve",
+    "plot_history",
+    # Zero-dependency Exporter
+    "export_to_standalone_python",
     # Base
     "Layer",
     # Layers
@@ -56,6 +74,8 @@ __all__ = [
     "Loss",
     "BinaryCrossEntropy",
     "CategoricalCrossEntropy",
+    "MeanSquaredError",
+    "MSELoss",
     # Optimizers
     "Optimizer",
     "SGD",
@@ -65,6 +85,9 @@ __all__ = [
     "Metric",
     "Accuracy",
     "accuracy_score",
+    "MSE",
+    "MAE",
+    "get_metric",
     # Model & History
     "Sequential",
     "History",

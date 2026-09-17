@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import unittest
 import numpy as np
 
-from neural_lib import (
+from doraneural import (
     Sequential,
     Dense,
     Dropout,
@@ -25,15 +25,26 @@ from neural_lib import (
     Softmax,
     BinaryCrossEntropy,
     CategoricalCrossEntropy,
+    MeanSquaredError,
+    MSELoss,
     SGD,
     Adam,
     RMSprop,
     Accuracy,
+    MSE,
+    MAE,
     set_seed,
     train_test_split,
     one_hot_encode,
     save_model,
     load_model,
+    create,
+    load_csv,
+    create_sample_classification_csv,
+    create_sample_regression_csv,
+    plot_ascii_curve,
+    plot_history,
+    export_to_standalone_python,
 )
 
 
@@ -280,6 +291,125 @@ class TestModelAndSerialization(unittest.TestCase):
 
             np.testing.assert_allclose(orig_out, loaded_out, rtol=1e-6, atol=1e-6)
             self.assertEqual(len(model.layers), len(loaded.layers))
+
+
+class TestRegression(unittest.TestCase):
+    def test_mse_loss_and_gradient(self):
+        mse = MeanSquaredError()
+        y_pred = np.array([[2.0], [4.0]], dtype=np.float32)
+        y_true = np.array([[1.0], [5.0]], dtype=np.float32)
+        loss = mse.forward(y_pred, y_true)
+        # ( (2-1)^2 + (4-5)^2 ) / 2 = (1 + 1) / 2 = 1.0
+        self.assertAlmostEqual(loss, 1.0, places=5)
+
+        # Gradient: 2 * (yp - yt) / N = 2 * [[1], [-1]] / 2 = [[1], [-1]]
+        grad = mse.backward(y_pred, y_true)
+        np.testing.assert_allclose(grad, [[1.0], [-1.0]], atol=1e-5)
+
+    def test_mse_and_mae_metrics(self):
+        mse_metric = MSE()
+        mae_metric = MAE()
+        yt = np.array([1.0, 3.0, 5.0])
+        yp = np.array([2.0, 3.0, 7.0])
+        self.assertAlmostEqual(mse_metric(yt, yp), (1.0 + 0.0 + 4.0) / 3.0, places=5)
+        self.assertAlmostEqual(mae_metric(yt, yp), (1.0 + 0.0 + 2.0) / 3.0, places=5)
+
+    def test_regression_model_training(self):
+        # Learn y = 2*x1 + 3*x2
+        X = np.random.randn(100, 2).astype(np.float32)
+        y = (2.0 * X[:, 0] + 3.0 * X[:, 1]).reshape(-1, 1).astype(np.float32)
+
+        model = create(inputs=2, hidden=16, outputs=1, task="regression", lr=0.05)
+        history = model.fit(X, y, epochs=20, batch_size=16, verbose=0)
+        final_loss = history["loss"][-1]
+        self.assertLess(final_loss, history["loss"][0])
+
+
+class TestDataAndCSVLoader(unittest.TestCase):
+    def test_load_csv_classification_and_regression(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Classification
+            iris_file = Path(tmpdir) / "sample_iris.csv"
+            create_sample_classification_csv(iris_file)
+            X, y, meta = load_csv(iris_file)
+            self.assertEqual(X.shape, (6, 4))
+            self.assertEqual(len(y), 6)
+            self.assertEqual(len(meta["label_names"]), 3)
+            self.assertEqual(meta["target_name"], "species")
+
+            # Regression
+            house_file = Path(tmpdir) / "sample_housing.csv"
+            create_sample_regression_csv(house_file)
+            X_reg, y_reg, meta_reg = load_csv(house_file)
+            self.assertEqual(X_reg.shape, (6, 3))
+            self.assertEqual(len(y_reg), 6)
+            self.assertEqual(meta_reg["target_name"], "price_k")
+            self.assertEqual(meta_reg["label_names"], [])
+
+
+class TestASCIIPlotting(unittest.TestCase):
+    def test_plot_ascii_curve(self):
+        losses = [1.0, 0.8, 0.6, 0.4, 0.2]
+        plot_str = plot_ascii_curve(losses, title="Test Loss", width=30, height=5)
+        self.assertIn("Test Loss", plot_str)
+        self.assertIn("Epoch 1", plot_str)
+        self.assertIn("Epoch 5", plot_str)
+
+    def test_plot_history(self):
+        hist = {"loss": [0.5, 0.3, 0.1], "accuracy": [0.6, 0.8, 0.95]}
+        result = plot_history(hist)
+        self.assertIn("Loss Progress", result)
+        self.assertIn("Accuracy Progress", result)
+
+
+class TestStandaloneExporter(unittest.TestCase):
+    def test_standalone_export_classification(self):
+        import tempfile
+        import subprocess
+
+        model = Sequential([
+            Dense(in_features=3, out_features=4),
+            ReLU(),
+            Dense(in_features=4, out_features=2),
+            Softmax(),
+        ])
+        x = np.random.randn(1, 3).astype(np.float32)
+        expected_probas = model.predict_proba(x)[0]
+        expected_class = int(np.argmax(expected_probas))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / "predict_test.py"
+            export_to_standalone_python(model, script_path)
+            self.assertTrue(script_path.exists())
+
+            # Run with python subprocess
+            args = [sys.executable, str(script_path)] + [str(v) for v in x[0]]
+            res = subprocess.run(args, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0)
+            self.assertIn(f"Prediction: Class {expected_class}", res.stdout)
+
+    def test_standalone_export_regression(self):
+        import tempfile
+        import subprocess
+
+        model = Sequential([
+            Dense(in_features=2, out_features=4),
+            ReLU(),
+            Dense(in_features=4, out_features=1),
+        ])
+        x = np.random.randn(1, 2).astype(np.float32)
+        expected_val = float(model.forward(x)[0, 0])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / "predict_reg.py"
+            export_to_standalone_python(model, script_path)
+            self.assertTrue(script_path.exists())
+
+            args = [sys.executable, str(script_path)] + [str(v) for v in x[0]]
+            res = subprocess.run(args, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0)
+            self.assertIn("Prediction:", res.stdout)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,8 @@ from .workspace import (
     train_current_workspace,
     show_workspace_status,
     predict_with_current_workspace,
+    plot_current_workspace,
+    export_current_workspace,
 )
 from .teach import explain
 
@@ -34,13 +36,19 @@ def cmd_new(args: argparse.Namespace) -> None:
         print("\n🧙 doraneural Model Wizard")
         print("─" * 40)
         try:
+            csv_in = input("Load from custom CSV file? (press Enter to skip): ").strip()
+            if csv_in:
+                init_workspace(data_path=csv_in)
+                return
+
+            task = input("Task type? (binary, multiclass, regression) (default: binary): ").strip() or "binary"
             inp = input("How many inputs? (default: 2): ").strip()
             inputs = int(inp) if inp else 2
 
             hid = input("Hidden layer sizes? (e.g. 16 or 16,8) (default: 16,8): ").strip()
             hidden = [int(x.strip()) for x in hid.split(",")] if hid else [16, 8]
 
-            out = input("How many outputs? (1 for yes/no, >1 for classes) (default: 1): ").strip()
+            out = input("How many outputs? (default: 1): ").strip()
             outputs = int(out) if out else 1
 
             dataset = input("Dataset? (moons, blobs, digits) (default: moons): ").strip() or "moons"
@@ -52,15 +60,35 @@ def cmd_new(args: argparse.Namespace) -> None:
         hidden = args.hidden
         outputs = args.outputs
         dataset = args.dataset
+        task = args.task
+        csv_in = args.data
 
-    init_workspace(inputs=inputs, hidden=hidden, outputs=outputs, dataset=dataset)
+    init_workspace(
+        inputs=inputs,
+        hidden=hidden,
+        outputs=outputs,
+        dataset=dataset,
+        task=task,
+        data_path=csv_in,
+    )
 
 
 def cmd_train(args: argparse.Namespace) -> None:
     """Train the active project model with effortless zero-flag command."""
     epochs = args.epochs
     lr = args.lr
-    train_current_workspace(epochs=epochs, lr=lr)
+    data_path = args.data
+    train_current_workspace(epochs=epochs, lr=lr, data_path=data_path)
+
+
+def cmd_plot(args: argparse.Namespace) -> None:
+    """Display terminal ASCII learning curve for loss and accuracy."""
+    plot_current_workspace()
+
+
+def cmd_export(args: argparse.Namespace) -> None:
+    """Export current model to a standalone, zero-dependency Python script."""
+    export_current_workspace(output_path=args.output)
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -129,7 +157,13 @@ def cmd_info(args: argparse.Namespace) -> None:
     print("\nSupported Optimizers:")
     print("  • SGD (with Momentum), Adam, RMSprop")
     print("\nSupported Losses:")
-    print("  • BinaryCrossEntropy, CategoricalCrossEntropy")
+    print("  • BinaryCrossEntropy, CategoricalCrossEntropy, MeanSquaredError (MSE)")
+    print("\nSupported Metrics:")
+    print("  • Accuracy, MSE, MAE")
+    print("\nHigh-Level Features:")
+    print("  • Zero-dependency CSV dataset loader (pure Python stdlib)")
+    print("  • Terminal ASCII training curve visualizer")
+    print("  • Standalone zero-dependency Python code exporter")
     print("=" * 60)
 
 
@@ -147,13 +181,25 @@ def main() -> None:
     sub_new.add_argument("--hidden", type=int, nargs="+", default=[16, 8], help="Hidden layer sizes (default: 16 8)")
     sub_new.add_argument("--outputs", type=int, default=1, help="Number of outputs (default: 1)")
     sub_new.add_argument("--dataset", choices=["moons", "blobs", "digits"], default="moons", help="Default dataset")
+    sub_new.add_argument("--task", choices=["auto", "binary", "multiclass", "regression"], default="auto", help="Task type")
+    sub_new.add_argument("--data", type=str, default=None, help="Path to custom CSV dataset")
     sub_new.set_defaults(func=cmd_new)
 
     # doraneural train
-    sub_train = subparsers.add_parser("train", help="Train the current model on the current dataset")
+    sub_train = subparsers.add_parser("train", help="Train the current model on the dataset")
     sub_train.add_argument("-e", "--epochs", type=int, default=25, help="Number of epochs (default: 25)")
     sub_train.add_argument("--lr", type=float, default=0.01, help="Learning rate (default: 0.01)")
+    sub_train.add_argument("--data", type=str, default=None, help="Path to custom CSV dataset")
     sub_train.set_defaults(func=cmd_train)
+
+    # doraneural plot
+    sub_plot = subparsers.add_parser("plot", help="Display visual ASCII learning curve in terminal")
+    sub_plot.set_defaults(func=cmd_plot)
+
+    # doraneural export
+    sub_export = subparsers.add_parser("export", help="Export model to standalone zero-dependency Python file")
+    sub_export.add_argument("-o", "--output", type=str, default="predict.py", help="Output .py file path (default: predict.py)")
+    sub_export.set_defaults(func=cmd_export)
 
     # doraneural status
     sub_status = subparsers.add_parser("status", help="View current model architecture diagram & metrics")
@@ -189,6 +235,8 @@ def main() -> None:
             show_workspace_status()
             print("\n💡 Quick Commands:")
             print("   doraneural train       # Train current model")
+            print("   doraneural plot        # Show ASCII training graph")
+            print("   doraneural export      # Export to standalone Python script")
             print("   doraneural status      # View model flow")
             print("   doraneural predict ... # Test on numbers")
             print("   doraneural explain ... # Learn concepts")
@@ -197,6 +245,8 @@ def main() -> None:
             print("\n💡 Get started quickly:")
             print("   doraneural new         # Create your first neural network")
             print("   doraneural train       # Train it immediately")
+            print("   doraneural plot        # View ASCII training curve")
+            print("   doraneural export      # Export standalone zero-dependency Python file")
             print("   doraneural explain     # Learn concepts in plain English")
         return
 

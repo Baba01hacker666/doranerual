@@ -1,6 +1,6 @@
 """Loss functions for training neural networks.
 
-Includes Binary Cross-Entropy and Categorical Cross-Entropy with numerical stabilization.
+Includes Binary Cross-Entropy, Categorical Cross-Entropy, and Mean Squared Error.
 """
 
 from abc import ABC, abstractmethod
@@ -237,3 +237,53 @@ class CategoricalCrossEntropy(Loss):
         # Gradient normalized by batch size
         grad = (-yt / yp_clipped) / batch_size
         return grad
+
+
+class MeanSquaredError(Loss):
+    """Mean Squared Error (MSE) loss function for continuous regression tasks.
+
+    Formula:
+        L = (1/N) * sum( (y_pred - y_true)^2 )
+
+    Gradient:
+        dL/dy_pred = (2/N) * (y_pred - y_true)
+    """
+
+    def forward(self, y_pred: np.ndarray, y_true: np.ndarray) -> float:
+        yp = np.asarray(y_pred, dtype=np.float32)
+        yt = np.asarray(y_true, dtype=np.float32)
+
+        if yp.ndim == 1:
+            yp = yp.reshape(-1, 1)
+        if yt.ndim == 1:
+            yt = yt.reshape(-1, 1)
+
+        if yp.shape != yt.shape:
+            raise ValueError(f"Shape mismatch in MeanSquaredError: y_pred {yp.shape} vs y_true {yt.shape}")
+
+        self._y_pred_cache = yp
+        self._y_true_cache = yt
+
+        return float(np.mean((yp - yt) ** 2))
+
+    def backward(
+        self, y_pred: Optional[np.ndarray] = None, y_true: Optional[np.ndarray] = None
+    ) -> np.ndarray:
+        yp = np.asarray(y_pred, dtype=np.float32) if y_pred is not None else self._y_pred_cache
+        yt = np.asarray(y_true, dtype=np.float32) if y_true is not None else self._y_true_cache
+
+        if yp is None or yt is None:
+            raise RuntimeError("MeanSquaredError.backward called before forward pass.")
+
+        if yp.ndim == 1:
+            yp = yp.reshape(-1, 1)
+        if yt.ndim == 1:
+            yt = yt.reshape(-1, 1)
+
+        batch_size = yp.shape[0]
+        # Factor of 2 / N
+        return (2.0 * (yp - yt)) / batch_size
+
+
+# Aliases
+MSELoss = MeanSquaredError
