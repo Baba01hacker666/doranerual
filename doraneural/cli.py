@@ -166,6 +166,37 @@ def cmd_story(args: argparse.Namespace) -> None:
     print("=" * 65)
 
 
+def cmd_finetune(args: argparse.Namespace) -> None:
+    """Fine-tune pretrained LLaMA LLM on custom text data."""
+    from .llm import load_pretrained_llm
+
+    data_path = Path(args.data)
+    if data_path.exists():
+        text = data_path.read_text(encoding="utf-8", errors="replace")
+        print(f"Loaded {len(text)} characters from {args.data}")
+    else:
+        text = args.data
+        print(f"Using inline prompt text ({len(text)} characters)")
+
+    print("=" * 65)
+    print("⚡ doraneural LLM Fine-Tuning")
+    print("=" * 65)
+    llm = load_pretrained_llm(model_name=args.model)
+    print(f"Engine: {llm.backend.upper()} | Architecture: LLaMA ({llm.config.dim} dim, {llm.config.n_layers} layers)")
+    print(f"Training for {args.epochs} epochs (lr={args.lr})...\n")
+
+    t0 = time.perf_counter()
+    hist = llm.train(text, epochs=args.epochs, lr=args.lr, seq_len=args.seq_len, verbose=1)
+    t_train = time.perf_counter() - t0
+
+    out_file = Path(args.output)
+    llm.save(out_file)
+    print("\n" + "-" * 65)
+    print(f"Fine-tuning completed in {t_train:.2f}s! Final Loss: {hist['loss'][-1]:.4f}")
+    print(f"Saved fine-tuned checkpoint: {out_file.name} ({out_file.stat().st_size:,} bytes)")
+    print("=" * 65)
+
+
 def cmd_test(args: argparse.Namespace) -> None:
     """Run automated unit test suite."""
     test_path = Path(__file__).resolve().parent.parent / "tests" / "test_neural_lib.py"
@@ -196,6 +227,8 @@ def cmd_info(args: argparse.Namespace) -> None:
     print("  • BinaryCrossEntropy, CategoricalCrossEntropy, MeanSquaredError (MSE)")
     print("  • Accuracy, MSE, MAE")
     print("\nFramework & Engine Capabilities:")
+    print("  • Native C++ Engine: Multi-threaded OpenMP LLM inference & fine-tuning")
+    print("  • Pretrained LLM: LLaMA decoder (RoPE, RMSNorm, SwiGLU, KV-cache, BPE)")
     print("  • Autograd Engine: Dynamic reverse-mode autodiff DAG (dn.Tensor)")
     print("  • Static Graph Compiler: AOT operator fusion & static arena pool (0 GC allocs)")
     print("  • Versioned DNB Format: Portable binary spec (.dnb) with CRC32 integrity")
@@ -262,6 +295,16 @@ def main() -> None:
     sub_story.add_argument("--temp", "-t", type=float, default=0.7, help="Sampling temperature (default: 0.7)")
     sub_story.add_argument("--model", "-m", choices=["stories260K", "stories15M"], default="stories260K", help="Pretrained model (default: stories260K)")
     sub_story.set_defaults(func=cmd_story)
+
+    # doraneural finetune
+    sub_ft = subparsers.add_parser("finetune", help="Fine-tune pretrained LLaMA LLM on custom text")
+    sub_ft.add_argument("--data", "-d", type=str, required=True, help="Text file path or inline text string")
+    sub_ft.add_argument("--epochs", "-e", type=int, default=3, help="Epochs to train (default: 3)")
+    sub_ft.add_argument("--lr", type=float, default=5e-4, help="Learning rate (default: 5e-4)")
+    sub_ft.add_argument("--seq-len", type=int, default=16, help="Sequence chunk length (default: 16)")
+    sub_ft.add_argument("--model", "-m", choices=["stories260K", "stories15M"], default="stories260K", help="Base model")
+    sub_ft.add_argument("--output", "-o", type=str, default="finetuned_model.bin", help="Output path for checkpoint")
+    sub_ft.set_defaults(func=cmd_finetune)
 
     # doraneural demo
     sub_demo = subparsers.add_parser("demo", help="Run interactive and visual benchmarks")

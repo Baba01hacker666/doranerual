@@ -28,6 +28,7 @@
 - [Static Graph Compile Step & Operator Fusion (`compile_model`)](#15-static-graph-compile-step--operator-fusion)
 - [Portable Model Serialization Spec (`.dnb` v1.0)](#16-portable-model-serialization-spec-dnb)
 - [Pretrained Hugging Face LLM (Pure NumPy LLaMA)](#17-pretrained-hugging-face-llm-pure-numpy-llama)
+- [Native C++ Acceleration & LLM Fine-Tuning (`CppLlamaEngine`, `llm.train`)](#18-native-c-acceleration--llm-fine-tuning)
 
 ---
 
@@ -597,5 +598,55 @@ doraneural story --prompt "Once upon a time, a brave dragon" --tokens 60
 # Or run the interactive visual story demo:
 doraneural demo story
 ```
+
+---
+
+## 18. Native C++ Acceleration & LLM Fine-Tuning
+
+For maximum performance, `doraneural` includes a native C++ engine (`doraneural/csrc/llm_engine.cpp`) compiled dynamically into `libdoraneural.so` with **OpenMP multi-threading** and **SIMD loops**. If a C++ compiler is not present, `doraneural` seamlessly falls back to pure NumPy.
+
+### Key Capabilities
+- **Multi-Threaded OpenMP Acceleration**: Automatically utilizes all available CPU cores for matrix multiplication and multi-head attention.
+- **In-Place C++ Fine-Tuning**: Trains the model on custom text with cross-entropy loss and in-place AdamW parameter updates directly in native memory.
+- **Checkpoint Serialization**: Saves fine-tuned models directly to `.bin` files compatible with `llama2.c`.
+
+### Python Fine-Tuning API
+
+```python
+import doraneural as dn
+
+# 1. Load pretrained base model with C++ acceleration
+llm = dn.load_pretrained_llm("stories260K", backend="auto")
+print("Engine:", llm.backend)  # "cpp" or "numpy"
+
+# 2. Fine-tune on custom text
+custom_data = """
+Once upon a time, there was a little robot named Sparky.
+Sparky lived in a magical workshop with his best friend, a robotic kitten named Pip.
+Every morning, Sparky and Pip would build colorful solar lanterns.
+"""
+
+# Fine-tune model for 5 epochs
+history = llm.train(custom_data, epochs=5, lr=5e-4, seq_len=16)
+print("Loss curve:", history["loss"])
+
+# 3. Generate story from fine-tuned model
+story = llm.generate("Once upon a time, there was a little robot", max_tokens=50)
+print(story)
+
+# 4. Save fine-tuned checkpoint
+llm.save("my_finetuned_model.bin")
+```
+
+### CLI Fine-Tuning Command
+
+```bash
+# Fine-tune a model on your own text file:
+doraneural finetune --data my_stories.txt --epochs 5 --lr 0.0005 --output my_model.bin
+
+# Generate stories from the fine-tuned model:
+doraneural story --prompt "Once upon a time, Sparky the robot"
+```
+
 
 

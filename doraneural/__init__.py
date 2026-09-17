@@ -119,6 +119,11 @@ from .llm import (
     load_pretrained_llm,
     download_hf_model,
 )
+from .cpp_backend import (
+    CppLlamaEngine,
+    is_cpp_available,
+    build_cpp_library,
+)
 from .plot import plot_ascii_curve, plot_history
 from .export import export_to_standalone_python
 from .errors import DoraneuralError, ShapeMismatchError, ModelNotCompiledError
@@ -227,12 +232,15 @@ __all__ = [
     "CompiledModel",
     "CompiledStep",
     "StaticBufferPool",
-    # Pretrained LLM (LLaMA in pure NumPy)
+    # Pretrained LLM & C++ Engine
     "LlamaLLM",
     "LlamaConfig",
     "LlamaTokenizer",
     "load_pretrained_llm",
     "download_hf_model",
+    "CppLlamaEngine",
+    "is_cpp_available",
+    "build_cpp_library",
     # Serialization (JSON/NPZ and Versioned Binary DNB)
     "save_model",
     "load_model",

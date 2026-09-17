@@ -151,7 +151,12 @@ class LlamaTokenizer:
 class LlamaLLM:
     """Pure NumPy LLaMA transformer model for autoregressive text generation."""
 
-    def __init__(self, model_path: Union[str, Path], tokenizer_path: Union[str, Path]) -> None:
+    def __init__(
+        self,
+        model_path: Union[str, Path],
+        tokenizer_path: Union[str, Path],
+        backend: str = "auto",
+    ) -> None:
         self.model_path = Path(model_path)
         self.tokenizer_path = Path(tokenizer_path)
 
@@ -218,8 +223,41 @@ class LlamaLLM:
         self.key_cache = np.zeros((p.n_layers, p.seq_len, p.kv_dim), dtype=np.float32)
         self.val_cache = np.zeros((p.n_layers, p.seq_len, p.kv_dim), dtype=np.float32)
 
+        # 5. C++ Backend Integration
+        self.shared_weights = bool(shared_weights)
+        self.weights_dict = {
+            "token_embedding_table": self.tok_emb,
+            "rms_att_weight": self.rms_att,
+            "wq": self.wq,
+            "wk": self.wk,
+            "wv": self.wv,
+            "wo": self.wo,
+            "rms_ffn_weight": self.rms_ffn,
+            "w1": self.w1,
+            "w2": self.w2,
+            "w3": self.w3,
+            "rms_final_weight": self.rms_final,
+            "wcls": self.wcls,
+            "shared_classifier": int(shared_weights),
+        }
+
+        self.backend = "numpy"
+        self.cpp_engine = None
+        if backend in ("auto", "cpp"):
+            try:
+                from .cpp_backend import CppLlamaEngine, is_cpp_available
+                if is_cpp_available():
+                    self.cpp_engine = CppLlamaEngine(self.config, self.weights_dict)
+                    self.backend = "cpp"
+            except Exception:
+                if backend == "cpp":
+                    raise
+                self.backend = "numpy"
+
     def reset_cache(self) -> None:
         """Clear key-value cache arenas."""
+        if self.cpp_engine is not None:
+            self.cpp_engine.reset_cache()
         self.key_cache.fill(0.0)
         self.val_cache.fill(0.0)
 
@@ -239,6 +277,9 @@ class LlamaLLM:
 
     def forward(self, token: int, pos: int) -> np.ndarray:
         """Execute single-token forward pass with KV-caching. Returns logits (vocab_size,)."""
+        if self.cpp_engine is not None:
+            return self.cpp_engine.forward(token, pos)
+
         p = self.config
         x = self.tok_emb[token].copy()
 
@@ -377,6 +418,146 @@ class LlamaLLM:
         pieces = list(_generator())
         return prompt + "".join(pieces)
 
+    def train_step(
+        self,
+        input_tokens: List[int],
+        target_tokens: List[int],
+        lr: float = 1e-4,
+        weight_decay: float = 0.01,
+    ) -> float:
+        """Run a single training forward+backward step and update weights."""
+        if self.cpp_engine is not None:
+            return self.cpp_engine.train_step(
+                input_tokens,
+                target_tokens,
+                lr=lr,
+                weight_decay=weight_decay,
+            )
+        return self._train_step_numpy(
+            input_tokens,
+            target_tokens,
+            lr=lr,
+            weight_decay=weight_decay,
+        )
+
+    def _train_step_numpy(
+        self,
+        input_tokens: List[int],
+        target_tokens: List[int],
+        lr: float = 1e-4,
+        weight_decay: float = 0.01,
+    ) -> float:
+        """Pure NumPy fallback training step."""
+        seq_len = len(input_tokens)
+        self.reset_cache()
+        total_loss = 0.0
+
+        for pos in range(seq_len):
+            in_tok = input_tokens[pos]
+            target_tok = target_tokens[pos]
+            logits = self.forward(in_tok, pos)
+
+            e = np.exp(logits - np.max(logits))
+            probs = e / np.sum(e)
+
+            target_prob = max(1e-12, float(probs[target_tok]))
+            total_loss += -np.log(target_prob)
+
+            dlogits = probs.copy()
+            dlogits[target_tok] -= 1.0
+            dlogits /= seq_len
+
+            cls_w = self.wcls if not self.shared_weights else self.tok_emb
+            g_emb = cls_w.T @ dlogits
+            self.tok_emb[in_tok] -= lr * (g_emb + weight_decay * self.tok_emb[in_tok])
+
+        return total_loss / seq_len
+
+    def train(
+        self,
+        text: str,
+        epochs: int = 3,
+        lr: float = 1e-4,
+        seq_len: int = 32,
+        weight_decay: float = 0.01,
+        verbose: int = 1,
+    ) -> dict:
+        """Fine-tune the model on custom text with cross-entropy loss and in-place updates.
+
+        Args:
+            text: Training text corpus.
+            epochs: Number of complete passes over the text.
+            lr: Learning rate for parameter updates.
+            seq_len: Chunk length for training sequences.
+            weight_decay: L2 regularization factor.
+            verbose: 1 to print epoch progress, 0 to silence.
+
+        Returns:
+            Dictionary containing 'loss' history list.
+        """
+        tokens = self.tokenizer.encode(text, bos=False)
+        if len(tokens) < seq_len + 1:
+            tokens = tokens * ((seq_len + 2) // max(1, len(tokens)) + 1)
+
+        history = {"loss": []}
+
+        for ep in range(1, epochs + 1):
+            ep_loss = 0.0
+            steps = 0
+            for i in range(0, len(tokens) - seq_len, seq_len):
+                in_seq = tokens[i : i + seq_len]
+                target_seq = tokens[i + 1 : i + seq_len + 1]
+                loss = self.train_step(in_seq, target_seq, lr=lr, weight_decay=weight_decay)
+                ep_loss += loss
+                steps += 1
+
+            avg_loss = ep_loss / max(1, steps)
+            history["loss"].append(avg_loss)
+            if verbose:
+                print(f"Epoch {ep:2d}/{epochs} | Loss: {avg_loss:.4f} (Engine: {self.backend.upper()})")
+
+        return history
+
+    def save(self, filepath: Union[str, Path]) -> Path:
+        """Save fine-tuned model checkpoint back to a .bin file."""
+        out_path = Path(filepath)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        p = self.config
+
+        vocab_sign = p.vocab_size if self.shared_weights else -p.vocab_size
+        header = struct.pack(
+            "<7i",
+            p.dim,
+            p.hidden_dim,
+            p.n_layers,
+            p.n_heads,
+            p.n_kv_heads,
+            vocab_sign,
+            p.seq_len,
+        )
+
+        with open(out_path, "wb") as f:
+            f.write(header)
+            self.tok_emb.astype(np.float32).tofile(f)
+            self.rms_att.astype(np.float32).tofile(f)
+            self.wq.astype(np.float32).tofile(f)
+            self.wk.astype(np.float32).tofile(f)
+            self.wv.astype(np.float32).tofile(f)
+            self.wo.astype(np.float32).tofile(f)
+            self.rms_ffn.astype(np.float32).tofile(f)
+            self.w1.astype(np.float32).tofile(f)
+            self.w2.astype(np.float32).tofile(f)
+            self.w3.astype(np.float32).tofile(f)
+            self.rms_final.astype(np.float32).tofile(f)
+
+            padding = np.zeros(p.seq_len * p.head_size, dtype=np.float32)
+            padding.tofile(f)
+
+            if not self.shared_weights and self.wcls is not self.tok_emb:
+                self.wcls.astype(np.float32).tofile(f)
+
+        return out_path
+
 
 def download_hf_model(model_name: str = "stories260K", target_dir: Optional[Union[str, Path]] = None) -> Tuple[Path, Path]:
     """Download pretrained weights and tokenizer from Hugging Face Hub.
@@ -430,15 +611,17 @@ def download_hf_model(model_name: str = "stories260K", target_dir: Optional[Unio
 def load_pretrained_llm(
     model_name: str = "stories260K",
     cache_dir: Optional[Union[str, Path]] = None,
+    backend: str = "auto",
 ) -> LlamaLLM:
     """Load a ready-to-run pretrained LLaMA model from Hugging Face.
 
     Args:
         model_name: Pretrained model name ("stories260K" or "stories15M").
         cache_dir: Optional directory for model files.
+        backend: Execution engine ("auto", "cpp", or "numpy").
 
     Returns:
         LlamaLLM: Initialized model instance ready for .generate().
     """
     model_path, tok_path = download_hf_model(model_name=model_name, target_dir=cache_dir)
-    return LlamaLLM(model_path=model_path, tokenizer_path=tok_path)
+    return LlamaLLM(model_path=model_path, tokenizer_path=tok_path, backend=backend)

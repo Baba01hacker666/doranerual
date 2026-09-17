@@ -91,6 +91,8 @@ from doraneural import (
     LlamaLLM,
     LlamaTokenizer,
     load_pretrained_llm,
+    is_cpp_available,
+    CppLlamaEngine,
 )
 
 
@@ -1082,7 +1084,7 @@ class TestLlamaLLM(unittest.TestCase):
 
     def test_llama_forward_and_cache(self):
         try:
-            llm = load_pretrained_llm("stories260K")
+            llm = load_pretrained_llm("stories260K", backend="numpy")
         except Exception as e:
             self.skipTest(f"Skipping Llama test: {e}")
 
@@ -1113,6 +1115,43 @@ class TestLlamaLLM(unittest.TestCase):
         pieces = list(llm.generate(prompt=prompt, max_tokens=10, temperature=0.7, stream=True))
         self.assertGreater(len(pieces), 0)
         self.assertIsInstance(pieces[0], str)
+
+    def test_cpp_llama_engine_parity(self):
+        if not is_cpp_available():
+            self.skipTest("C++ engine not available")
+
+        llm_np = load_pretrained_llm("stories260K", backend="numpy")
+        llm_cpp = load_pretrained_llm("stories260K", backend="cpp")
+
+        llm_np.reset_cache()
+        np_logits = llm_np.forward(1, 0)
+
+        llm_cpp.reset_cache()
+        cpp_logits = llm_cpp.forward(1, 0)
+
+        self.assertEqual(int(np.argmax(np_logits)), int(np.argmax(cpp_logits)))
+        np.testing.assert_allclose(np_logits, cpp_logits, atol=1e-4)
+
+    def test_llama_train_step_and_save(self):
+        import tempfile
+        try:
+            llm = load_pretrained_llm("stories260K")
+        except Exception as e:
+            self.skipTest(f"Skipping Llama test: {e}")
+
+        # Test single training step
+        in_tokens = [1, 403, 407, 261]
+        target_tokens = [403, 407, 261, 378]
+        loss = llm.train_step(in_tokens, target_tokens, lr=1e-4)
+        self.assertIsInstance(loss, float)
+        self.assertGreater(loss, 0.0)
+
+        # Test save checkpoint
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "test_finetuned.bin"
+            saved = llm.save(save_path)
+            self.assertTrue(saved.exists())
+            self.assertEqual(saved.stat().st_size, 1056540)
 
 
 if __name__ == "__main__":
