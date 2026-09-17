@@ -587,6 +587,11 @@ print(prompt, end="", flush=True)
 for token_piece in llm.generate(prompt=prompt, max_tokens=60, stream=True):
     print(token_piece, end="", flush=True)
 print()
+
+# 4. Load arbitrary Hugging Face SafeTensors models (e.g. arnir0/Tiny-LLM)
+# Zero PyTorch, zero transformers dependency — reads .safetensors and tokenizer.json directly
+tiny_llm = dn.load_pretrained_llm("arnir0/Tiny-LLM")
+print(tiny_llm.generate("According to all known laws of aviation", max_tokens=50))
 ```
 
 ### CLI Command
