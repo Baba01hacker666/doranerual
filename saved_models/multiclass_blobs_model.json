@@ -1,0 +1,27 @@
+{
+  "model_type": "Sequential",
+  "version": "1.0",
+  "layers": [
+    {
+      "type": "Dense",
+      "in_features": 2,
+      "out_features": 24,
+      "weight_init": "he",
+      "use_bias": true
+    },
+    {
+      "type": "ReLU"
+    },
+    {
+      "type": "Dense",
+      "in_features": 24,
+      "out_features": 3,
+      "weight_init": "xavier",
+      "use_bias": true
+    },
+    {
+      "type": "Softmax",
+      "axis": -1
+    }
+  ]
+}
