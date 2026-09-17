@@ -95,6 +95,8 @@ from doraneural import (
     load_safetensors,
     is_cpp_available,
     CppLlamaEngine,
+    ChatSession,
+    ChatMessage,
 )
 
 
@@ -1211,6 +1213,59 @@ class TestLlamaLLM(unittest.TestCase):
 
         self.assertEqual(int(np.argmax(np_logits)), int(np.argmax(cpp_logits)))
         np.testing.assert_allclose(np_logits, cpp_logits, atol=1e-4)
+
+
+class TestChatSession(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.llm = load_pretrained_llm("stories260K")
+        except Exception as e:
+            cls.llm = None
+
+    def setUp(self):
+        if self.llm is None:
+            self.skipTest("Pretrained LLM model not available")
+
+    def test_chat_message_and_formatting(self):
+        session = ChatSession(self.llm, system_prompt="System instructions")
+        session.add_message("user", "Hello there!")
+        session.add_message("assistant", "General Kenobi!")
+
+        formatted = session.format_prompt()
+        self.assertIn("System: System instructions", formatted)
+        self.assertIn("User: Hello there!", formatted)
+        self.assertIn("Assistant: General Kenobi!", formatted)
+        self.assertTrue(formatted.endswith("Assistant:"))
+
+    def test_sliding_context_window(self):
+        # Set artificially small context window
+        session = ChatSession(self.llm, max_context_tokens=60, max_new_tokens=15)
+        session.add_message("user", "First long question about artificial neural networks")
+        session.add_message("assistant", "First long detailed answer about weights and gradients")
+        session.add_message("user", "Second question")
+
+        usage_before = session.get_context_usage()
+        # Trim history
+        evicted = session.trim_history()
+        usage_after = session.get_context_usage()
+
+        self.assertGreaterEqual(evicted, 1)
+        self.assertLess(usage_after["used_tokens"], usage_before["used_tokens"])
+        self.assertLessEqual(usage_after["used_tokens"], 60 - 15)
+
+    def test_chat_turn_and_clear(self):
+        session = ChatSession(self.llm, max_context_tokens=128, max_new_tokens=10)
+        reply = session.chat("Once upon a time")
+
+        self.assertIsInstance(reply, str)
+        self.assertGreater(len(reply), 0)
+        self.assertEqual(session.total_turns, 1)
+        self.assertEqual(len(session.messages), 2)  # 1 user + 1 assistant
+
+        # Clear
+        session.clear()
+        self.assertEqual(len(session.messages), 0)
 
 
 if __name__ == "__main__":

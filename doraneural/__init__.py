@@ -122,6 +122,10 @@ from .llm import (
     load_safetensors,
     load_hf_config,
 )
+from .chat import (
+    ChatSession,
+    ChatMessage,
+)
 from .cpp_backend import (
     CppLlamaEngine,
     is_cpp_available,
@@ -247,6 +251,9 @@ __all__ = [
     "CppLlamaEngine",
     "is_cpp_available",
     "build_cpp_library",
+    # Interactive Chat & Context Manager
+    "ChatSession",
+    "ChatMessage",
     # Serialization (JSON/NPZ and Versioned Binary DNB)
     "save_model",
     "load_model",

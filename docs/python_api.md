@@ -653,5 +653,65 @@ doraneural finetune --data my_stories.txt --epochs 5 --lr 0.0005 --output my_mod
 doraneural story --prompt "Once upon a time, Sparky the robot"
 ```
 
+---
+
+## 19. Interactive ChatSession & Context Window Management
+
+`doraneural.ChatSession` provides full conversational multi-turn dialogue with automatic sliding context window eviction and stop-sequence filtering.
+
+### Python API Example
+
+```python
+import doraneural as dn
+
+# 1. Load pretrained LLM
+llm = dn.load_pretrained_llm("arnir0/Tiny-LLM")
+
+# 2. Initialize chat session
+session = dn.ChatSession(
+    llm=llm,
+    system_prompt="You are a helpful and concise AI assistant.",
+    max_context_tokens=512,  # Sliding context limit
+    max_new_tokens=48,
+    temperature=0.7,
+    top_p=0.9,
+)
+
+# 3. Synchronous multi-turn conversation
+reply1 = session.chat("Hello! What is your name?")
+print("Assistant:", reply1)
+
+reply2 = session.chat("What can you do?")
+print("Assistant:", reply2)
+
+# 4. Inspect context window usage
+usage = session.get_context_usage()
+print(f"Context used: {usage['used_tokens']} / {usage['max_context']} tokens ({usage['percentage']}%)")
+print(f"Messages in memory: {usage['messages_count']}")
+
+# 5. Real-time streaming generator
+print("Assistant: ", end="", flush=True)
+for piece in session.stream_chat("Tell me a quick tip on coding."):
+    print(piece, end="", flush=True)
+print()
+
+# 6. Clear history & reset KV cache
+session.clear()
+```
+
+### Terminal REPL
+
+Launch directly from Python or CLI:
+
+```python
+session.interactive_loop()
+```
+
+Or from terminal:
+```bash
+doraneural chat
+```
+
+
 
 

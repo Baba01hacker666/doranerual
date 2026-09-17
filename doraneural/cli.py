@@ -166,6 +166,33 @@ def cmd_story(args: argparse.Namespace) -> None:
     print("=" * 65)
 
 
+def cmd_chat(args: argparse.Namespace) -> None:
+    """Start an interactive conversational chat session with sliding context window."""
+    from .llm import load_pretrained_llm
+    from .chat import ChatSession
+
+    model_name = args.model
+    backend = args.backend
+    print("=" * 65)
+    print(f"💬 doraneural Interactive Chat: {model_name}")
+    print("=" * 65)
+    print(f"Loading weights & tokenizer for {model_name} (Backend: {backend.upper()})...")
+    t0 = time.perf_counter()
+    llm = load_pretrained_llm(model_name=model_name, backend=backend)
+    t_load = time.perf_counter() - t0
+    print(f"Model ready in {t_load:.2f}s! Context length: {llm.config.seq_len} tokens.\n")
+
+    session = ChatSession(
+        llm=llm,
+        system_prompt=args.system,
+        max_context_tokens=args.context or llm.config.seq_len,
+        max_new_tokens=args.tokens,
+        temperature=args.temp,
+        top_p=args.top_p,
+    )
+    session.interactive_loop()
+
+
 def cmd_finetune(args: argparse.Namespace) -> None:
     """Fine-tune pretrained LLaMA LLM on custom text data."""
     from .llm import load_pretrained_llm
@@ -293,8 +320,19 @@ def main() -> None:
     sub_story.add_argument("--prompt", "-p", type=str, default="Once upon a time", help="Starting prompt for the story")
     sub_story.add_argument("--tokens", "-n", type=int, default=100, help="Number of tokens to generate (default: 100)")
     sub_story.add_argument("--temp", "-t", type=float, default=0.7, help="Sampling temperature (default: 0.7)")
-    sub_story.add_argument("--model", "-m", choices=["stories260K", "stories15M"], default="stories260K", help="Pretrained model (default: stories260K)")
+    sub_story.add_argument("--model", "-m", type=str, default="stories260K", help="Pretrained model (stories260K, arnir0/Tiny-LLM, stories15M, etc.)")
     sub_story.set_defaults(func=cmd_story)
+
+    # doraneural chat
+    sub_chat = subparsers.add_parser("chat", help="Interactive conversational chat with sliding context window")
+    sub_chat.add_argument("--model", "-m", type=str, default="arnir0/Tiny-LLM", help="Pretrained model (default: arnir0/Tiny-LLM)")
+    sub_chat.add_argument("--backend", "-b", choices=["auto", "cpp", "numpy"], default="auto", help="Execution backend (default: auto)")
+    sub_chat.add_argument("--temp", "-t", type=float, default=0.7, help="Sampling temperature (default: 0.7)")
+    sub_chat.add_argument("--top-p", type=float, default=0.9, help="Top-p nucleus threshold (default: 0.9)")
+    sub_chat.add_argument("--tokens", "-n", type=int, default=64, help="Max new tokens per response turn (default: 64)")
+    sub_chat.add_argument("--context", "-c", type=int, default=None, help="Max context window size in tokens (default: model max)")
+    sub_chat.add_argument("--system", "-s", type=str, default="You are a helpful and concise AI assistant.", help="System persona prompt")
+    sub_chat.set_defaults(func=cmd_chat)
 
     # doraneural finetune
     sub_ft = subparsers.add_parser("finetune", help="Fine-tune pretrained LLaMA LLM on custom text")

@@ -136,3 +136,52 @@ doraneural explain epochs
 doraneural explain lr
 doraneural explain loss
 ```
+
+---
+
+## 7. `doraneural story`
+
+Autoregressively generates text / stories using a pretrained LLaMA model from Hugging Face Hub directly on pure CPU:
+
+```bash
+# Generate with default stories260K model
+doraneural story --prompt "Once upon a time, in a magical forest" --tokens 80 --temp 0.7
+
+# Generate with 10M-parameter Tiny-LLM
+doraneural story --model arnir0/Tiny-LLM --prompt "According to all known laws of aviation" --tokens 60
+```
+
+---
+
+## 8. `doraneural chat`
+
+Starts an interactive terminal chat REPL with conversational memory, lookahead stop-sequence detection, and automatic sliding context window management:
+
+```bash
+# Launch interactive chat (defaults to arnir0/Tiny-LLM on CPU)
+doraneural chat
+
+# Chat with specific parameters or smaller model
+doraneural chat --model stories260K --tokens 50 --temp 0.6 --system "You are a concise tutor."
+```
+
+### Available Chat Slash Commands:
+- `/clear`, `/reset` — Clears conversation history and model KV cache
+- `/context`, `/info` — Displays token usage bar and memory statistics
+- `/temp <float>` — Dynamically adjusts sampling temperature (e.g. `/temp 0.5`)
+- `/tokens <int>` — Sets maximum new tokens per response turn (e.g. `/tokens 80`)
+- `/system <text>` — Updates assistant system prompt / persona
+- `/stats` — Displays total turns and token generation throughput
+- `/exit`, `/quit` — Exits chat session
+
+---
+
+## 9. `doraneural finetune`
+
+Fine-tunes a pretrained LLaMA model on custom text with cross-entropy loss and native AdamW updates:
+
+```bash
+# Fine-tune base model on a text corpus:
+doraneural finetune --data my_data.txt --epochs 5 --lr 0.0005 --output my_finetuned.bin
+```
+

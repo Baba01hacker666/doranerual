@@ -119,6 +119,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 |---|---|
 | `doraneural` | Shows workspace status & quick action recommendations |
 | `doraneural story` | Generates stories with a pretrained LLaMA LLM from Hugging Face |
+| `doraneural chat`  | Interactive conversational chat with sliding context window |
 | `doraneural finetune`| Fine-tunes pretrained LLaMA on custom text with AdamW |
 | `doraneural new` | Creates a new model (`-i` interactive wizard, `--data <file.csv>`) |
 | `doraneural train` | Trains active model on dataset (`-e` epochs, `--lr` rate) |
@@ -128,7 +129,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 | `doraneural predict <vals>` | Runs immediate inference on user input numbers |
 | `doraneural explain <topic>`| Explains concepts (`weights`, `epochs`, `loss`, `backprop`) |
 | `doraneural demo <name>` | Runs demos (`story`, `catdog`, `interactive`, `digits`, `moons`, `blobs`, `cnn`) |
-| `doraneural test` | Runs the automated 71-test unit test suite |
+| `doraneural test` | Runs the automated 74-test unit test suite |
 | `doraneural info` | Displays system specs, NumPy version, and engine info |
 
 ---
@@ -138,7 +139,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 For complete deep dives and advanced configurations, see the `docs/` folder:
 
 - 📖 **[CLI Reference Guide](docs/cli_reference.md)**: Full wizard walkthroughs, custom dataset options, and parameter flags.
-- 🧠 **[Python API Reference](docs/python_api.md)**: Pretrained LLaMA LLM, SafeTensors loader, C++ native acceleration, `Tensor` autograd engine, static graph compiler, `.dnb` binary spec, `Dense`, `Conv2D`, `LSTM`, `GRU`, `TransformerBlock`, `MultiHeadAttention`, JIT acceleration, mixed-precision, schedulers, image loading, custom losses, optimizers, and data preprocessing.
+- 🧠 **[Python API Reference](docs/python_api.md)**: Pretrained LLaMA LLM, interactive ChatSession, SafeTensors loader, C++ native acceleration, `Tensor` autograd engine, static graph compiler, `.dnb` binary spec, `Dense`, `Conv2D`, `LSTM`, `GRU`, `TransformerBlock`, `MultiHeadAttention`, JIT acceleration, mixed-precision, schedulers, image loading, custom losses, optimizers, and data preprocessing.
 - 📐 **[Math & Backpropagation Under the Hood](docs/math_and_backprop.md)**: Numerical gradient checks, Jacobians, weight initialization, and backprop math.
 - 🎮 **[Interactive Demos & Visualizer](docs/demos.md)**: Real-time 0–9 digit synthesizer, Cat vs Dog CNN vision benchmark, and ASCII previewer.
 
@@ -151,6 +152,6 @@ doraneural test
 # or
 python3 -m unittest discover tests/
 ```
-All 71 unit tests pass on pure CPU with standard NumPy.
+All 74 unit tests pass on pure CPU with standard NumPy.
 
 
