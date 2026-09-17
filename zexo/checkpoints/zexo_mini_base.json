@@ -1,0 +1,15 @@
+{
+  "name": "zexo",
+  "tier": "mini",
+  "dim": 192,
+  "hidden_dim": 1024,
+  "n_layers": 1,
+  "n_heads": 2,
+  "n_kv_heads": 1,
+  "vocab_size": 32000,
+  "seq_len": 1024,
+  "rope_type": "interleaved",
+  "system_prompt": "You are Zexo, an intelligent, thoughtful, and creative conversational AI assistant.",
+  "version": "1.0.0",
+  "parameters": 6844992
+}

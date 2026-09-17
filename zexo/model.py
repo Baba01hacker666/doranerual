@@ -101,11 +101,37 @@ def load_zexo(
     tok_p = Path(tokenizer_path) if tokenizer_path else None
     if not tok_p or not tok_p.exists():
         if tier == "micro":
-            tok_p = repo_root / "models" / "stories260K" / "tok512.bin"
+            candidates = [
+                repo_root / "zexo" / "tokenizer" / "tok512.bin",
+                repo_root / "models" / "stories260K" / "tok512.bin",
+            ]
         else:
-            tok_p = repo_root / "models" / "arnir0_Tiny-LLM" / "tokenizer.json"
-            if not tok_p.exists():
-                tok_p = repo_root / "models" / "stories260K" / "tok512.bin"
+            candidates = [
+                repo_root / "zexo" / "tokenizer" / "tokenizer.json",
+                repo_root / "models" / "arnir0_Tiny-LLM" / "tokenizer.json",
+                repo_root / "zexo" / "tokenizer" / "tok512.bin",
+                repo_root / "models" / "stories260K" / "tok512.bin",
+            ]
+        for c in candidates:
+            if c.exists():
+                tok_p = c
+                break
+
+    if not tok_p or not tok_p.exists():
+        import urllib.request
+        tok_dir = repo_root / "zexo" / "tokenizer"
+        tok_dir.mkdir(parents=True, exist_ok=True)
+        if tier == "micro":
+            tok_p = tok_dir / "tok512.bin"
+            url = "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories260K/tok512.bin"
+        else:
+            tok_p = tok_dir / "tokenizer.json"
+            url = "https://huggingface.co/arnir0/Tiny-LLM/resolve/main/tokenizer.json"
+        try:
+            print(f"📥 Auto-downloading tokenizer: {tok_p.name}...")
+            urllib.request.urlretrieve(url, tok_p)
+        except Exception as err:
+            print(f"⚠️ Tokenizer download failed: {err}")
 
     # 2. Check explicit checkpoint path
     ckpt_p = Path(checkpoint_path) if checkpoint_path else None
