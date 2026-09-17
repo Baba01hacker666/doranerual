@@ -90,6 +90,28 @@ from .image import (
     render_image_ascii,
     create_sample_cat_dog_dataset,
 )
+from .autograd import (
+    Tensor,
+    Parameter,
+    Module,
+    Linear,
+    tensor,
+    no_grad,
+    is_grad_enabled,
+    mse_loss,
+    binary_cross_entropy,
+)
+from .compiler import (
+    compile_model,
+    CompiledModel,
+    CompiledStep,
+    StaticBufferPool,
+)
+from .dnb import (
+    save_dnb,
+    load_dnb,
+    inspect_dnb,
+)
 from .plot import plot_ascii_curve, plot_history
 from .export import export_to_standalone_python
 from .errors import DoraneuralError, ShapeMismatchError, ModelNotCompiledError
@@ -183,9 +205,27 @@ __all__ = [
     "Sequential",
     "History",
     "EvaluationResult",
-    # Serialization
+    # Autograd & Computational Graph
+    "Tensor",
+    "Parameter",
+    "Module",
+    "Linear",
+    "tensor",
+    "no_grad",
+    "is_grad_enabled",
+    "mse_loss",
+    "binary_cross_entropy",
+    # Static Graph Compiler & AOT
+    "compile_model",
+    "CompiledModel",
+    "CompiledStep",
+    "StaticBufferPool",
+    # Serialization (JSON/NPZ and Versioned Binary DNB)
     "save_model",
     "load_model",
+    "save_dnb",
+    "load_dnb",
+    "inspect_dnb",
     # Utilities
     "set_seed",
     "train_test_split",

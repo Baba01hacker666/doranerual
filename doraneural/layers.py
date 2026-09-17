@@ -173,11 +173,12 @@ class Dropout(Layer):
     During evaluation, behaves as an identity function.
     """
 
-    def __init__(self, drop_rate: float = 0.5) -> None:
+    def __init__(self, drop_rate: float = 0.5, rate: Optional[float] = None) -> None:
         super().__init__()
-        if not (0.0 <= drop_rate < 1.0):
-            raise ValueError(f"drop_rate must be in [0.0, 1.0), got {drop_rate}")
-        self.drop_rate: float = float(drop_rate)
+        effective_rate = rate if rate is not None else drop_rate
+        if not (0.0 <= effective_rate < 1.0):
+            raise ValueError(f"drop_rate must be in [0.0, 1.0), got {effective_rate}")
+        self.drop_rate: float = float(effective_rate)
         self.trainable: bool = False
         self._mask: Optional[np.ndarray] = None
 

@@ -75,6 +75,19 @@ from doraneural import (
     set_im2col_backend,
     get_im2col_backend,
     is_numba_available,
+    Tensor,
+    Parameter,
+    Module,
+    Linear,
+    tensor,
+    no_grad,
+    mse_loss,
+    binary_cross_entropy,
+    compile_model,
+    CompiledModel,
+    save_dnb,
+    load_dnb,
+    inspect_dnb,
 )
 
 
@@ -884,6 +897,168 @@ class TestParallelDataLoader(unittest.TestCase):
 
         hist = model.fit(loader, epochs=2, verbose=0)
         self.assertEqual(len(hist.history["loss"]), 2)
+
+
+class TestAutogradEngine(unittest.TestCase):
+    def test_scalar_arithmetic_backward(self):
+        a = Tensor(3.0, requires_grad=True)
+        b = Tensor(4.0, requires_grad=True)
+        c = (a * 2.0 + b) ** 2.0
+        c.backward()
+        self.assertAlmostEqual(a.grad.item(), 40.0)
+        self.assertAlmostEqual(b.grad.item(), 20.0)
+
+    def test_tensor_broadcasting_backward(self):
+        A = Tensor([[1.0, 2.0, 3.0]], requires_grad=True)
+        B = Tensor(np.ones((4, 3)), requires_grad=True)
+        C = (A + B) * 2.0
+        loss = C.sum()
+        loss.backward()
+
+        np.testing.assert_allclose(A.grad, [[8.0, 8.0, 8.0]])
+        np.testing.assert_allclose(B.grad, np.full((4, 3), 2.0))
+
+    def test_matrix_multiplication_backward(self):
+        X = Tensor(np.random.randn(5, 3))
+        W = Tensor(np.random.randn(3, 2), requires_grad=True)
+        out = X @ W
+        loss = out.sum()
+        loss.backward()
+
+        expected_dw = X.data.T @ np.ones((5, 2))
+        np.testing.assert_allclose(W.grad, expected_dw, atol=1e-6)
+
+    def test_activations_backward(self):
+        x = Tensor([-2.0, 0.5, 3.0], requires_grad=True)
+        y = x.relu()
+        y.sum().backward()
+        np.testing.assert_allclose(x.grad, [0.0, 1.0, 1.0])
+
+        x.zero_grad()
+        sig = x.sigmoid()
+        sig.sum().backward()
+        s = 1.0 / (1.0 + np.exp(-x.data))
+        np.testing.assert_allclose(x.grad, s * (1.0 - s), atol=1e-6)
+
+    def test_finite_difference_gradient_check(self):
+        X = Tensor(np.random.randn(4, 3))
+        W = Tensor(np.random.randn(3, 2), requires_grad=True)
+        b = Tensor(np.random.randn(1, 2), requires_grad=True)
+
+        out = (X @ W + b).tanh()
+        loss = (out ** 2).mean()
+        loss.backward()
+        analytical_dw = W.grad.copy()
+
+        eps = 1e-5
+        numerical_dw = np.zeros_like(W.data)
+        for i in range(W.shape[0]):
+            for j in range(W.shape[1]):
+                orig = W.data[i, j]
+                W.data[i, j] = orig + eps
+                l_pos = np.mean(np.tanh(X.data @ W.data + b.data) ** 2)
+                W.data[i, j] = orig - eps
+                l_neg = np.mean(np.tanh(X.data @ W.data + b.data) ** 2)
+                W.data[i, j] = orig
+                numerical_dw[i, j] = (l_pos - l_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical_dw - numerical_dw) / (
+            np.linalg.norm(analytical_dw) + np.linalg.norm(numerical_dw) + 1e-8
+        )
+        self.assertLess(rel_err, 1e-4)
+
+    def test_linear_module_and_no_grad(self):
+        fc = Linear(4, 2)
+        x = Tensor(np.random.randn(3, 4))
+        y = Tensor(np.random.randn(3, 2))
+
+        out = fc(x)
+        loss = mse_loss(out, y)
+        loss.backward()
+        self.assertIsNotNone(fc.weight.grad)
+
+        with no_grad():
+            out_eval = fc(x)
+            self.assertFalse(out_eval.requires_grad)
+
+
+class TestStaticCompiler(unittest.TestCase):
+    def test_dense_relu_operator_fusion_and_buffers(self):
+        model = Sequential([
+            Dense(in_features=8, out_features=16),
+            ReLU(),
+            Dense(in_features=16, out_features=4),
+        ])
+        x = np.random.randn(5, 8).astype(np.float32)
+        orig_out = model.forward(x)
+
+        compiled = compile_model(model, sample_input=x)
+        self.assertGreater(compiled.buffer_pool.total_bytes, 0)
+
+        fused_steps = [s for s in compiled.steps if s.is_fused]
+        self.assertEqual(len(fused_steps), 1)
+        self.assertIn("FusedDense+RELU", fused_steps[0].name)
+
+        comp_out = compiled.forward(x)
+        np.testing.assert_allclose(orig_out, comp_out, atol=1e-6)
+
+    def test_model_compile_graph_method(self):
+        model = Sequential([
+            Dense(in_features=4, out_features=8),
+            ReLU(),
+            Dense(in_features=8, out_features=1),
+        ])
+        x = np.random.randn(3, 4).astype(np.float32)
+        compiled = model.compile_graph(sample_input=x)
+        self.assertIsInstance(compiled, CompiledModel)
+        np.testing.assert_allclose(model.forward(x), compiled(x), atol=1e-6)
+
+
+class TestDNBSerialization(unittest.TestCase):
+    def test_save_load_dnb_roundtrip(self):
+        import tempfile
+        from pathlib import Path
+
+        model = Sequential([
+            Dense(in_features=6, out_features=12),
+            LayerNorm(normalized_shape=12),
+            ReLU(),
+            Dense(in_features=12, out_features=3),
+        ])
+        x = np.random.randn(4, 6).astype(np.float32)
+        orig_out = model.forward(x)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fpath = Path(tmpdir) / "test_model.dnb"
+            saved_path = save_dnb(model, fpath)
+            self.assertTrue(saved_path.exists())
+
+            info = inspect_dnb(saved_path)
+            self.assertEqual(info["model_type"], "Sequential")
+            self.assertEqual(info["tensors_count"], 6)
+
+            loaded = load_dnb(saved_path)
+            loaded_out = loaded.forward(x)
+            np.testing.assert_allclose(orig_out, loaded_out, atol=1e-6)
+
+    def test_dnb_checksum_corruption_detection(self):
+        import tempfile
+        from pathlib import Path
+
+        model = Sequential([Dense(in_features=4, out_features=2)])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fpath = Path(tmpdir) / "corrupt_test.dnb"
+            save_dnb(model, fpath)
+
+            with open(fpath, "r+b") as f:
+                f.seek(-4, 2)
+                b = f.read(1)
+                f.seek(-4, 2)
+                f.write(bytes([(b[0] ^ 0xFF)]))
+
+            with self.assertRaises(ValueError) as ctx:
+                load_dnb(fpath)
+            self.assertIn("Checksum", str(ctx.exception))
 
 
 if __name__ == "__main__":

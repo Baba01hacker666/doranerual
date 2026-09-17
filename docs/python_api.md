@@ -24,6 +24,9 @@
 - [Hardware Acceleration & JIT Conv2D](#11-hardware-acceleration--jit-conv2d)
 - [Mixed-Precision & Memory Management (float32 vs float64)](#12-mixed-precision--memory-management)
 - [Batch-Parallel DataLoader with Prefetching](#13-batch-parallel-dataloader-with-prefetching)
+- [Computational Graph & Autograd Engine (`Tensor`, `requires_grad`)](#14-computational-graph--autograd-engine)
+- [Static Graph Compile Step & Operator Fusion (`compile_model`)](#15-static-graph-compile-step--operator-fusion)
+- [Portable Model Serialization Spec (`.dnb` v1.0)](#16-portable-model-serialization-spec-dnb)
 
 ---
 
@@ -407,5 +410,138 @@ for X_batch, y_batch in loader:
 
 # 2. Or pass directly into model.fit():
 model.fit(loader, epochs=10)
+```
+
+---
+
+## 14. Computational Graph & Autograd Engine
+
+`doraneural` includes a reverse-mode automatic differentiation engine generalized to multi-dimensional NumPy arrays (`Tensor`), inspired by Karpathy's micrograd and PyTorch.
+
+### Features
+- **Dynamic Computation Graph (DAG)**: Tracks tensor operations, child nodes, and backward gradient closures automatically.
+- **Broadcast Gradient Unbroadcasting**: Correctly reduces gradients when shapes differ due to NumPy broadcasting rules across arbitrary dimensions.
+- **Operator Overloading**: `+`, `-`, `*`, `/`, `@` (matmul), `**`, `.relu()`, `.sigmoid()`, `.tanh()`, `.exp()`, `.log()`, `.sum()`, `.mean()`, `.reshape()`, `.transpose()`, `__getitem__` slicing.
+- **Inference Context Manager**: `with dn.no_grad():` disables graph tracking for maximum speed and zero graph overhead.
+
+### Autograd Example
+
+```python
+import doraneural as dn
+import numpy as np
+
+# Define tensors with gradient tracking
+x = dn.Tensor([-2.0, 1.0, 3.0], requires_grad=True)
+w = dn.Tensor([0.5, -1.5, 2.0], requires_grad=True)
+b = dn.Tensor(0.25, requires_grad=True)
+
+# Build dynamic computation tape
+z = x * w + b
+y = z.relu()
+loss = y.sum()
+
+# Automatic backpropagation
+loss.backward()
+
+print("dL/dx:", x.grad)
+print("dL/dw:", w.grad)
+print("dL/db:", b.grad)
+```
+
+### Modular Neural Modules with Autograd
+
+```python
+import doraneural as dn
+import numpy as np
+
+# Built-in linear module
+fc = dn.Linear(in_features=4, out_features=1)
+
+X = dn.Tensor(np.random.randn(16, 4))
+y = dn.Tensor(np.random.randn(16, 1))
+
+# Training step
+preds = fc(X)
+loss = dn.mse_loss(preds, y)
+loss.backward()
+
+# Parameter updates
+for p in fc.parameters():
+    p.data -= 0.01 * p.grad
+```
+
+---
+
+## 15. Static Graph Compile Step & Operator Fusion
+
+The ahead-of-time (AOT) static graph compiler optimizes inference by analyzing layer topology and fusing consecutive operators.
+
+### Key Capabilities
+- **Operator Fusion**: Fuses `Dense + Bias + Activation` (ReLU / Sigmoid) into unified in-place memory kernels.
+- **Static Buffer Arena (`StaticBufferPool`)**: Precomputes all intermediate shapes and preallocates contiguous memory arenas. Zero dynamic heap memory allocations during inference loops.
+- **Model Compilation API**: Call `dn.compile_model(model, sample_input)` or `model.compile_graph(sample_input)`.
+
+### Compilation Example
+
+```python
+import doraneural as dn
+import numpy as np
+
+model = dn.Sequential([
+    dn.Dense(in_features=64, out_features=128),
+    dn.ReLU(),
+    dn.Dense(in_features=128, out_features=10),
+    dn.Softmax(),
+])
+
+sample = np.random.randn(32, 64).astype(np.float32)
+
+# Compile static graph
+compiled = model.compile_graph(sample_input=sample)
+
+# Print execution plan summary
+print(compiled.summary())
+
+# Compare execution speed & latency
+results = compiled.benchmark(sample, iterations=1000)
+print(f"Speedup: {results['speedup']:.2f}x")
+print(f"Pre-allocated Scratch RAM: {results['scratch_bytes']} bytes")
+```
+
+---
+
+## 16. Portable Model Serialization Spec (`.dnb` v1.0)
+
+A custom, versioned, architecture-neutral binary specification (**Doraneural Binary v1.0**) avoiding Python `pickle` security and portability pitfalls.
+
+### Binary Layout Spec
+- **32-Byte Fixed Header**:
+  - `MAGIC` (`b"DNB\x01"`)
+  - Format version `0x00010000` (v1.0)
+  - Flags, metadata length, metadata offset, tensor count
+- **Metadata Section**: UTF-8 JSON describing layer sequence, hyperparameters, layer types, and tensor offsets.
+- **Tensor Storage Payload**:
+  - 8-byte aligned raw binary float arrays for direct zero-copy memory mapping.
+  - Per-tensor CRC32 checksums for guaranteed corruption and bit-rot detection.
+
+### Python Usage
+
+```python
+import doraneural as dn
+
+# 1. Save model to .dnb
+dn.save_dnb(model, "my_model.dnb")
+# Or via model method:
+model.save_dnb("my_model.dnb")
+
+# 2. Inspect file header and tensor table without full loading
+info = dn.inspect_dnb("my_model.dnb")
+print("Model type:", info["model_type"])
+print("Parameter count:", info["total_parameters"])
+print("Tensors:", info["tensors_count"])
+
+# 3. Fast load with CRC32 verification
+loaded_model = dn.load_dnb("my_model.dnb")
+predictions = loaded_model.forward(X_test)
 ```
 

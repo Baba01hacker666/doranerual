@@ -103,6 +103,16 @@ class Sequential:
         from .precision import memory_summary
         return memory_summary(self)
 
+    def compile_graph(self, sample_input: Union[np.ndarray, Tuple[int, ...]]) -> Any:
+        """Compile this model into an optimized static execution graph with fused operators."""
+        from .compiler import compile_model
+        return compile_model(self, sample_input)
+
+    def save_dnb(self, filepath: Union[str, Any]) -> Any:
+        """Serialize model to portable versioned Doraneural Binary (.dnb) format."""
+        from .dnb import save_dnb
+        return save_dnb(self, filepath)
+
     def add(self, layer: Layer) -> "Sequential":
         """Append a layer to the network.
 

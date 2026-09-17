@@ -75,6 +75,9 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 
 ## ✨ Key Features
 
+- **Computational Graph & Autograd Engine**: Reverse-mode automatic differentiation DAG on multi-dimensional NumPy arrays (`Tensor`) with automatic broadcast gradient reduction, operator overloading, and PyTorch-like dynamic tape execution.
+- **Static Graph Compiler & Operator Fusion**: Ahead-of-Time (AOT) static graph compilation (`model.compile_graph()`) with fused kernels (`Dense + Bias + ReLU`) and preallocated contiguous scratch memory arenas (`StaticBufferPool`) eliminating dynamic heap allocations during inference.
+- **Versioned Doraneural Binary Spec (`.dnb` v1.0)**: Architecture-neutral, versioned binary format with a 32-byte fixed header, UTF-8 JSON architecture metadata, 8-byte aligned raw tensor payloads, and CRC32 checksums for guaranteed corruption detection—completely free of Python `pickle`.
 - **Multi-Threaded JIT Conv2D Acceleration**: Multi-threaded Numba JIT `im2col` convolution kernel delivering **8–10x faster execution on CPU**, with transparent fallback to pure NumPy.
 - **Mixed-Precision & 50% Memory Savings**: Dynamic `float32` vs `float64` toggling (`model.to_precision("float32")`) cuts RAM consumption by exactly 50% on low-power devices with higher SIMD throughput.
 - **Batch-Parallel Threaded DataLoader**: Overlaps data slicing, memory formatting, and augmentation on background threads with zero heavy dependencies (`threading` + `queue`).
@@ -118,7 +121,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 | `doraneural predict <vals>` | Runs immediate inference on user input numbers |
 | `doraneural explain <topic>`| Explains concepts (`weights`, `epochs`, `loss`, `backprop`) |
 | `doraneural demo <name>` | Runs demos (`catdog`, `interactive`, `digits`, `moons`, `blobs`, `cnn`) |
-| `doraneural test` | Runs the automated 54-test unit test suite |
+| `doraneural test` | Runs the automated 64-test unit test suite |
 | `doraneural info` | Displays system specs, NumPy version, and engine info |
 
 ---
@@ -128,7 +131,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 For complete deep dives and advanced configurations, see the `docs/` folder:
 
 - 📖 **[CLI Reference Guide](docs/cli_reference.md)**: Full wizard walkthroughs, custom dataset options, and parameter flags.
-- 🧠 **[Python API Reference](docs/python_api.md)**: `Dense`, `Conv2D`, `LSTM`, `GRU`, `TransformerBlock`, `MultiHeadAttention`, JIT acceleration, mixed-precision, schedulers, image loading, custom losses, optimizers, and data preprocessing.
+- 🧠 **[Python API Reference](docs/python_api.md)**: `Tensor` autograd engine, static graph compiler, `.dnb` binary spec, `Dense`, `Conv2D`, `LSTM`, `GRU`, `TransformerBlock`, `MultiHeadAttention`, JIT acceleration, mixed-precision, schedulers, image loading, custom losses, optimizers, and data preprocessing.
 - 📐 **[Math & Backpropagation Under the Hood](docs/math_and_backprop.md)**: Numerical gradient checks, Jacobians, weight initialization, and backprop math.
 - 🎮 **[Interactive Demos & Visualizer](docs/demos.md)**: Real-time 0–9 digit synthesizer, Cat vs Dog CNN vision benchmark, and ASCII previewer.
 
@@ -141,4 +144,5 @@ doraneural test
 # or
 python3 -m unittest discover tests/
 ```
-All 54 unit tests pass on pure CPU with standard NumPy.
+All 64 unit tests pass on pure CPU with standard NumPy.
+
