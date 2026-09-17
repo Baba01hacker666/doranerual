@@ -7,7 +7,7 @@ Provides:
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 import numpy as np
 
 from .base import Layer
@@ -27,30 +27,79 @@ class Optimizer(ABC):
 
     def _clip_gradients(self, layers: List[Layer], clip_norm: Optional[float]) -> None:
         """Clip gradients by global L2 norm across all trainable parameters."""
-        if clip_norm is None:
-            return
+        if clip_norm is not None:
+            clip_grad_norm(layers, clip_norm)
 
-        total_norm_sq = 0.0
-        for layer in layers:
-            if not layer.trainable:
-                continue
-            for grad in layer.get_grads().values():
-                if grad is not None:
-                    total_norm_sq += float(np.sum(grad * grad))
 
-        total_norm = np.sqrt(total_norm_sq)
-        if total_norm > clip_norm:
-            scale = clip_norm / (total_norm + 1e-8)
-            for layer in layers:
-                if not layer.trainable:
-                    continue
-                for grad in layer.get_grads().values():
-                    if grad is not None:
-                        grad *= scale
+def clip_grad_norm(
+    layers_or_grads: Union[List[Layer], List[np.ndarray], Dict[str, np.ndarray]],
+    max_norm: float,
+) -> float:
+    """Clips global gradient norm across all parameters.
+
+    Args:
+        layers_or_grads: List of Layer objects, list of gradient arrays, or dict of gradients.
+        max_norm (float): Maximum allowed L2 norm.
+
+    Returns:
+        float: Total gradient norm before clipping.
+    """
+    if max_norm <= 0.0:
+        raise ValueError(f"max_norm must be positive, got {max_norm}")
+
+    grad_list = []
+    if isinstance(layers_or_grads, dict):
+        grad_list = [g for g in layers_or_grads.values() if g is not None]
+    elif isinstance(layers_or_grads, list):
+        for item in layers_or_grads:
+            if hasattr(item, "get_grads"):
+                grad_list.extend([g for g in item.get_grads().values() if g is not None])
+            elif isinstance(item, np.ndarray):
+                grad_list.append(item)
+
+    if not grad_list:
+        return 0.0
+
+    total_norm_sq = sum(float(np.sum(g * g)) for g in grad_list)
+    total_norm = float(np.sqrt(total_norm_sq))
+
+    if total_norm > max_norm:
+        scale = max_norm / (total_norm + 1e-8)
+        for g in grad_list:
+            g *= scale
+
+    return total_norm
+
+
+def clip_grad_value(
+    layers_or_grads: Union[List[Layer], List[np.ndarray], Dict[str, np.ndarray]],
+    clip_value: float,
+) -> None:
+    """Clips gradients element-wise to [-clip_value, clip_value].
+
+    Args:
+        layers_or_grads: List of Layer objects, list of gradient arrays, or dict of gradients.
+        clip_value (float): Maximum absolute value for any gradient component.
+    """
+    if clip_value <= 0.0:
+        raise ValueError(f"clip_value must be positive, got {clip_value}")
+
+    grad_list = []
+    if isinstance(layers_or_grads, dict):
+        grad_list = [g for g in layers_or_grads.values() if g is not None]
+    elif isinstance(layers_or_grads, list):
+        for item in layers_or_grads:
+            if hasattr(item, "get_grads"):
+                grad_list.extend([g for g in item.get_grads().values() if g is not None])
+            elif isinstance(item, np.ndarray):
+                grad_list.append(item)
+
+    for g in grad_list:
+        np.clip(g, -clip_value, clip_value, out=g)
 
 
 class SGD(Optimizer):
-    """Stochastic Gradient Descent optimizer with optional Momentum.
+    """Stochastic Gradient Descent optimizer with optional Momentum and Weight Decay.
 
     Updates parameters using the rule:
         If momentum > 0:
@@ -58,12 +107,15 @@ class SGD(Optimizer):
             param = param - velocity
         Else:
             param = param - lr * grad
+        If weight_decay > 0:
+            param = param - lr * weight_decay * param
     """
 
     def __init__(
         self,
         lr: float = 0.01,
         momentum: float = 0.0,
+        weight_decay: float = 0.0,
         clip_norm: Optional[float] = None,
     ) -> None:
         """Initialize the SGD optimizer.
@@ -71,6 +123,7 @@ class SGD(Optimizer):
         Args:
             lr (float): Learning rate. Must be positive.
             momentum (float): Momentum constant in [0.0, 1.0).
+            weight_decay (float): Decoupled weight decay rate (default: 0.0).
             clip_norm (Optional[float]): Max global L2 norm for gradient clipping.
         """
         if lr <= 0.0:
@@ -80,6 +133,7 @@ class SGD(Optimizer):
 
         self.lr: float = float(lr)
         self.momentum: float = float(momentum)
+        self.weight_decay: float = float(weight_decay)
         self.clip_norm: Optional[float] = float(clip_norm) if clip_norm is not None else None
         self._velocities: Dict[Tuple[int, str], np.ndarray] = {}
 
@@ -100,6 +154,10 @@ class SGD(Optimizer):
                 grad = grads.get(param_name)
                 if grad is None:
                     continue
+
+                # Weight decay
+                if self.weight_decay > 0.0:
+                    param -= self.lr * self.weight_decay * param
 
                 if self.momentum > 0.0:
                     key = (layer_idx, param_name)

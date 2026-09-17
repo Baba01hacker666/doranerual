@@ -20,7 +20,31 @@ from .losses import (
     MeanSquaredError,
     MSELoss,
 )
-from .optimizers import Optimizer, SGD, Adam, RMSprop
+from .optimizers import (
+    Optimizer,
+    SGD,
+    Adam,
+    RMSprop,
+    clip_grad_norm,
+    clip_grad_value,
+)
+from .schedulers import (
+    LRScheduler,
+    StepLR,
+    CosineAnnealingLR,
+    WarmupCosineLR,
+)
+from .recurrent import (
+    SimpleRNN,
+    RNN,
+    LSTM,
+    GRU,
+)
+from .attention import (
+    PositionalEncoding,
+    MultiHeadAttention,
+    TransformerBlock,
+)
 from .metrics import Metric, Accuracy, accuracy_score, MSE, MAE, get_metric
 from .model import Sequential, History, EvaluationResult
 from .serialization import save_model, load_model
@@ -85,6 +109,15 @@ __all__ = [
     "Flatten",
     "Conv2D",
     "MaxPool2D",
+    # Recurrent Layers (Sequence Modeling)
+    "SimpleRNN",
+    "RNN",
+    "LSTM",
+    "GRU",
+    # Attention & Transformers
+    "PositionalEncoding",
+    "MultiHeadAttention",
+    "TransformerBlock",
     # Activations
     "ReLU",
     "Sigmoid",
@@ -95,11 +128,18 @@ __all__ = [
     "CategoricalCrossEntropy",
     "MeanSquaredError",
     "MSELoss",
-    # Optimizers
+    # Optimizers & Gradient Clipping
     "Optimizer",
     "SGD",
     "Adam",
     "RMSprop",
+    "clip_grad_norm",
+    "clip_grad_value",
+    # Learning Rate Schedulers
+    "LRScheduler",
+    "StepLR",
+    "CosineAnnealingLR",
+    "WarmupCosineLR",
     # Metrics
     "Metric",
     "Accuracy",

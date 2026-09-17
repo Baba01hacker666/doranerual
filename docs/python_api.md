@@ -10,13 +10,17 @@
 - [CSV Data Loader (`dn.load_csv`)](#2-csv-data-loader)
 - [Standalone Python Exporter (`dn.export_to_standalone_python`)](#3-standalone-python-exporter)
 - [ASCII Curves & Visuals (`dn.plot_history`, `dn.plot_ascii_curve`)](#4-ascii-curves--visuals)
-- [Core Modular Components](#5-core-modular-components)
+- [Zero-Dependency Image Loader & Vision](#5-zero-dependency-image-loader--vision)
+- [Sequence Modeling & Recurrent Networks (RNN, LSTM, GRU)](#6-sequence-modeling--recurrent-networks)
+- [Attention & Transformer Blocks (Pure NumPy)](#7-attention--transformer-blocks)
+- [Learning Rate Schedulers](#8-learning-rate-schedulers)
+- [Core Modular Components](#9-core-modular-components)
   - [Layers](#layers)
   - [Activations](#activations)
   - [Loss Functions](#loss-functions)
-  - [Optimizers](#optimizers)
+  - [Optimizers & Regularizers](#optimizers--regularizers)
   - [Metrics](#metrics)
-- [Model Serialization](#6-model-serialization)
+- [Model Serialization](#10-model-serialization)
 
 ---
 
@@ -154,15 +158,123 @@ dn.write_bmp("saved_image.bmp", img_array)
 
 ---
 
-## 6. Core Modular Components
+---
+
+## 6. Sequence Modeling & Recurrent Networks
+
+`doraneural` features pure NumPy sequence models with exact Backpropagation Through Time (BPTT):
+
+### `SimpleRNN` / `RNN`
+Standard Elman recurrent network layer:
+$$h_t = \tanh(x_t W_{xh} + h_{t-1} W_{hh} + b_h)$$
+
+```python
+import doraneural as dn
+
+# Output full sequence (batch, time, hidden_units)
+rnn_seq = dn.SimpleRNN(in_features=8, hidden_units=16, return_sequences=True)
+
+# Output last hidden state (batch, hidden_units)
+rnn_last = dn.SimpleRNN(in_features=8, hidden_units=16, return_sequences=False)
+```
+
+### `LSTM` (Long Short-Term Memory)
+Full gated LSTM cell with forget, input, cell candidate, and output gates:
+
+```python
+lstm = dn.LSTM(in_features=16, hidden_units=32, return_sequences=False)
+```
+
+### `GRU` (Gated Recurrent Unit)
+Compact gated unit with reset and update gates:
+
+```python
+gru = dn.GRU(in_features=16, hidden_units=32, return_sequences=True)
+```
+
+---
+
+## 7. Attention & Transformer Blocks (Pure NumPy)
+
+Build and train transformers from scratch without PyTorch or JAX:
+
+### `PositionalEncoding`
+Sinusoidal positional embeddings:
+
+```python
+pe = dn.PositionalEncoding(d_model=32, max_len=500)
+```
+
+### `MultiHeadAttention`
+Multi-head scaled dot-product attention with causal autoregressive masking support:
+$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{Q K^T}{\sqrt{d_k}} + M\right) V$$
+
+```python
+# Bidirectional encoder attention
+mha = dn.MultiHeadAttention(d_model=32, num_heads=4, causal=False)
+
+# Autoregressive causal decoder attention
+mha_causal = dn.MultiHeadAttention(d_model=32, num_heads=4, causal=True)
+```
+
+### `TransformerBlock`
+Pre-LN Transformer encoder block integrating `LayerNorm`, `MultiHeadAttention`, residual skip connections, `Dropout`, and a two-layer `Dense` feed-forward network:
+
+```python
+transformer = dn.TransformerBlock(
+    d_model=32,
+    num_heads=4,
+    d_ff=64,
+    dropout=0.1,
+    causal=False
+)
+```
+
+---
+
+## 8. Learning Rate Schedulers
+
+Dynamic learning rate scheduling integrated directly into `model.fit()`:
+
+```python
+opt = dn.Adam(lr=0.01)
+
+# 1. Step decay
+scheduler1 = dn.StepLR(opt, step_size=5, gamma=0.5)
+
+# 2. Cosine Annealing
+scheduler2 = dn.CosineAnnealingLR(opt, T_max=20, eta_min=1e-4)
+
+# 3. Linear Warmup + Cosine Annealing
+scheduler3 = dn.WarmupCosineLR(opt, warmup_epochs=3, total_epochs=20, eta_min=1e-4)
+
+# Pass scheduler and gradient clipping to fit():
+model.fit(
+    X_train,
+    y_train,
+    epochs=20,
+    scheduler=scheduler3,
+    clip_norm=1.0  # Global gradient clipping
+)
+```
+
+---
+
+## 9. Core Modular Components
 
 ### Layers
-- `Dense(in_features, out_features, weight_init="he")`: Fully connected layer.
-- `Conv2D(in_channels, out_channels, kernel_size, stride=1, padding=0)`: 2D Spatial Convolution with vectorized im2col.
+- `Dense(in_features, out_features, weight_init="he", l1_reg=0.0, l2_reg=0.0)`: Fully connected layer. Supports 2D and 3D sequence inputs `(*, in_features)`.
+- `Conv2D(in_channels, out_channels, kernel_size, stride=1, padding="same", dilation=1, l1_reg=0.0, l2_reg=0.0)`: 2D Spatial Convolution with vectorized im2col, custom dilation, and `"same"` / `"valid"` padding.
 - `MaxPool2D(pool_size=2, stride=2)`: 2D Spatial Max Pooling.
 - `Flatten()`: Flattens N-D tensors into 2D batch matrices.
-- `LayerNorm(normalized_shape, eps=1e-5)`: Layer Normalization.
-- `Dropout(drop_rate=0.5)`: Inverted dropout with train/eval switching.
+- `LayerNorm(normalized_shape, eps=1e-5)`: Layer Normalization across feature dimension.
+- `Dropout(drop_rate=0.5)`: Inverted dropout with train/eval mode switching.
+- `SimpleRNN(in_features, hidden_units, return_sequences=False)`: Elman RNN.
+- `LSTM(in_features, hidden_units, return_sequences=False)`: Long Short-Term Memory.
+- `GRU(in_features, hidden_units, return_sequences=False)`: Gated Recurrent Unit.
+- `PositionalEncoding(d_model, max_len=5000)`: Sinusoidal embeddings.
+- `MultiHeadAttention(d_model, num_heads=4, causal=False)`: Scaled dot-product MHA.
+- `TransformerBlock(d_model, num_heads=4, d_ff=64, dropout=0.0)`: Transformer Block.
 
 ### Activations
 - `ReLU()`: Rectified Linear Unit ($\max(0, x)$).
@@ -174,10 +286,12 @@ dn.write_bmp("saved_image.bmp", img_array)
 - `CategoricalCrossEntropy()`: Multi-class cross entropy.
 - `MeanSquaredError()` (alias `MSELoss`): Continuous regression loss.
 
-### Optimizers
-- `SGD(lr=0.01, momentum=0.9)`: Stochastic Gradient Descent with velocity momentum.
-- `Adam(lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8)`: Adaptive Moment Estimation with bias correction.
+### Optimizers & Regularizers
+- `SGD(lr=0.01, momentum=0.9, weight_decay=0.0)`: Stochastic Gradient Descent with velocity momentum and decoupled weight decay.
+- `Adam(lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0)`: Adaptive Moment Estimation with bias correction and decoupled AdamW weight decay.
 - `RMSprop(lr=0.001, alpha=0.9, eps=1e-8)`: Root Mean Square Propagation.
+- `clip_grad_norm(layers_or_grads, max_norm)`: Global L2 gradient norm clipping.
+- `clip_grad_value(layers_or_grads, clip_value)`: Element-wise gradient threshold clipping.
 
 ### Metrics
 - `Accuracy()`: Binary and multiclass classification accuracy.
@@ -186,14 +300,14 @@ dn.write_bmp("saved_image.bmp", img_array)
 
 ---
 
-## 7. Model Serialization
+## 10. Model Serialization
 
 Save and reload architectures and weights:
 
 ```python
 import doraneural as dn
 
-# Save JSON architecture + compressed NPZ weights
+# Save JSON architecture + compressed NPZ weights (supports Dense, Conv2D, RNN, LSTM, GRU, Transformers)
 dn.save_model(model, "my_model")
 
 # Reload fully restored model

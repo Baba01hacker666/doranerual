@@ -173,17 +173,21 @@ class Sequential:
         verbose: int = 1,
         shuffle: bool = True,
         validation_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        scheduler: Optional[Any] = None,
+        clip_norm: Optional[float] = None,
     ) -> History:
         """Train the model using mini-batch gradient descent.
 
         Args:
-            X (np.ndarray): Training features, shape (N, features).
+            X (np.ndarray): Training features, shape (N, ...).
             y (np.ndarray): Training targets, shape (N, ...).
             epochs (int): Number of complete passes over the training dataset.
             batch_size (int): Number of samples per gradient update batch.
             verbose (int): Verbosity mode (0 = silent, 1 = print every epoch, >1 = progress step).
             shuffle (bool): Whether to shuffle training data before each epoch.
             validation_data (Optional[Tuple[np.ndarray, np.ndarray]]): Optional (X_val, y_val) tuple.
+            scheduler (Optional[LRScheduler]): Learning rate scheduler stepped each epoch.
+            clip_norm (Optional[float]): Global gradient norm threshold for clipping.
 
         Returns:
             History: Object containing recorded training metrics across epochs.
@@ -203,21 +207,31 @@ class Sequential:
         history = History()
 
         for epoch in range(1, epochs + 1):
-            # Set training mode for mini-batch updates
             self.train(True)
+
+            # Mini-batch gradient descent loop
             for X_batch, y_batch in batch_iterator(X_train, y_train, batch_size=batch_size, shuffle=shuffle):
                 # 1. Forward pass
-                y_pred_batch = self.forward(X_batch)
+                preds = self.forward(X_batch)
 
-                # 2. Compute loss and gradient
-                self.loss.forward(y_pred_batch, y_batch)
-                loss_grad = self.loss.backward(y_pred_batch, y_batch)
+                # 2. Loss computation
+                self.loss.forward(preds, y_batch)
 
                 # 3. Backward pass
+                loss_grad = self.loss.backward(preds, y_batch)
                 self.backward(loss_grad)
 
-                # 4. Optimizer update step
+                # 4. Optional gradient clipping
+                if clip_norm is not None:
+                    from .optimizers import clip_grad_norm
+                    clip_grad_norm(self.layers, clip_norm)
+
+                # 5. Optimizer step
                 self.optimizer.step(self.layers)
+
+            # Step learning rate scheduler if present
+            if scheduler is not None:
+                scheduler.step()
 
             # End of epoch evaluation on full dataset (eval mode)
             self.eval()
@@ -252,6 +266,9 @@ class Sequential:
                         val_key = f"val_{metric.name}"
                         if val_key in epoch_logs:
                             log_strs.append(f"{val_key}: {epoch_logs[val_key]:.4f}")
+
+                if scheduler is not None:
+                    log_strs.append(f"lr: {self.optimizer.lr:.6f}")
 
                 print(f"Epoch {epoch:3d}/{epochs} - " + " - ".join(log_strs))
 

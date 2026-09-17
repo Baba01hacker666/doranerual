@@ -38,6 +38,8 @@ class Dense(Layer):
         out_features: int,
         weight_init: str = "he",
         use_bias: bool = True,
+        l1_reg: float = 0.0,
+        l2_reg: float = 0.0,
         dtype: np.dtype = np.float32,
     ) -> None:
         super().__init__()
@@ -50,6 +52,8 @@ class Dense(Layer):
         self.out_features: int = int(out_features)
         self.weight_init: str = weight_init.lower()
         self.use_bias: bool = bool(use_bias)
+        self.l1_reg: float = float(l1_reg)
+        self.l2_reg: float = float(l2_reg)
         self.dtype = dtype
         self.trainable: bool = True
 
@@ -92,15 +96,15 @@ class Dense(Layer):
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         x_arr = np.asarray(x, dtype=self.dtype)
-        if x_arr.ndim != 2:
+        if x_arr.ndim < 2:
             raise ValueError(
-                f"Dense layer expected 2D input array of shape (batch_size, {self.in_features}), "
+                f"Dense layer expected array with at least 2 dimensions (*, {self.in_features}), "
                 f"but received array with shape {x_arr.shape} ({x_arr.ndim} dimensions)."
             )
-        if x_arr.shape[1] != self.in_features:
+        if x_arr.shape[-1] != self.in_features:
             raise ValueError(
-                f"Dense layer expected {self.in_features} features (dim 1), "
-                f"but received input with {x_arr.shape[1]} features (shape {x_arr.shape})."
+                f"Dense layer expected {self.in_features} features (last dim), "
+                f"but received input with {x_arr.shape[-1]} features (shape {x_arr.shape})."
             )
 
         self._input_cache = x_arr
@@ -114,20 +118,30 @@ class Dense(Layer):
             raise RuntimeError("Dense.backward called before forward pass.")
 
         grad_out = np.asarray(grad_output, dtype=self.dtype)
-        batch_size = self._input_cache.shape[0]
+        orig_shape = self._input_cache.shape
+        expected_shape = (*orig_shape[:-1], self.out_features)
 
-        if grad_out.shape != (batch_size, self.out_features):
+        if grad_out.shape != expected_shape:
             raise ValueError(
-                f"Gradient shape mismatch in Dense backward. Expected ({batch_size}, {self.out_features}), "
+                f"Gradient shape mismatch in Dense backward. Expected {expected_shape}, "
                 f"got {grad_out.shape}."
             )
 
-        np.copyto(self.dweights, self._input_cache.T @ grad_out)
+        x_flat = self._input_cache.reshape(-1, self.in_features)
+        grad_flat = grad_out.reshape(-1, self.out_features)
+
+        np.copyto(self.dweights, x_flat.T @ grad_flat)
+
+        # L1 and L2 regularization gradients
+        if self.l2_reg > 0:
+            self.dweights += self.l2_reg * self.weights
+        if self.l1_reg > 0:
+            self.dweights += self.l1_reg * np.sign(self.weights)
 
         if self.use_bias and self.dbiases is not None:
-            np.copyto(self.dbiases, np.sum(grad_out, axis=0, keepdims=True))
+            np.copyto(self.dbiases, np.sum(grad_flat, axis=0, keepdims=True))
 
-        grad_input = grad_out @ self.weights.T
+        grad_input = (grad_flat @ self.weights.T).reshape(orig_shape)
         return grad_input
 
     def to_dict(self) -> Dict[str, Any]:
@@ -137,6 +151,8 @@ class Dense(Layer):
             "out_features": self.out_features,
             "weight_init": self.weight_init,
             "use_bias": self.use_bias,
+            "l1_reg": self.l1_reg,
+            "l2_reg": self.l2_reg,
         }
 
     @classmethod
@@ -241,9 +257,10 @@ class LayerNorm(Layer):
         if x_norm is None or std is None:
             raise RuntimeError("LayerNorm.backward called before forward pass.")
 
-        # Gradients for gamma and beta
-        np.copyto(self.dgamma, np.sum(grad_out * x_norm, axis=0, keepdims=True))
-        np.copyto(self.dbeta, np.sum(grad_out, axis=0, keepdims=True))
+        # Gradients for gamma and beta (sum across all batch and sequence dimensions)
+        reduce_axes = tuple(range(grad_out.ndim - 1))
+        np.copyto(self.dgamma, np.sum(grad_out * x_norm, axis=reduce_axes, keepdims=False).reshape(1, -1))
+        np.copyto(self.dbeta, np.sum(grad_out, axis=reduce_axes, keepdims=False).reshape(1, -1))
 
         # Gradient with respect to x
         d_xnorm = grad_out * self.gamma
@@ -297,17 +314,41 @@ class Flatten(Layer):
         return cls()
 
 
+def _resolve_padding(padding: Union[int, str], k_size: int, dilation: int = 1) -> int:
+    """Resolve integer or string padding ('same' or 'valid') to pixel count."""
+    if isinstance(padding, str):
+        pad_str = padding.lower().strip()
+        if pad_str == "same":
+            k_eff = (k_size - 1) * dilation + 1
+            return (k_eff - 1) // 2
+        elif pad_str == "valid":
+            return 0
+        else:
+            raise ValueError(f"Unknown padding mode: '{padding}'. Supported: 'same', 'valid', or int.")
+    return int(padding)
+
+
 def _im2col_indices(
     x: np.ndarray,
     kh: int,
     kw: int,
     padding: int = 1,
     stride: int = 1,
+    dilation: int = 1,
 ) -> Tuple[np.ndarray, int, int]:
-    """Efficient vectorized im2col transformation for 2D convolutions."""
+    """Efficient vectorized im2col transformation with stride and dilation."""
     N, C, H, W = x.shape
-    out_h = (H + 2 * padding - kh) // stride + 1
-    out_w = (W + 2 * padding - kw) // stride + 1
+    kheff = (kh - 1) * dilation + 1
+    kweff = (kw - 1) * dilation + 1
+
+    out_h = (H + 2 * padding - kheff) // stride + 1
+    out_w = (W + 2 * padding - kweff) // stride + 1
+
+    if out_h <= 0 or out_w <= 0:
+        raise ValueError(
+            f"Conv2D output spatial size non-positive: out_h={out_h}, out_w={out_w}. "
+            f"Input ({H}x{W}), kernel ({kh}x{kw}), padding={padding}, stride={stride}, dilation={dilation}."
+        )
 
     x_padded = np.pad(
         x,
@@ -315,13 +356,15 @@ def _im2col_indices(
         mode="constant",
     )
 
-    # Compute index slices
+    # Compute index slices stepping by dilation
     cols = np.zeros((N, C, kh, kw, out_h, out_w), dtype=x.dtype)
     for i in range(kh):
-        i_max = i + stride * out_h
+        i_start = i * dilation
+        i_max = i_start + stride * out_h
         for j in range(kw):
-            j_max = j + stride * out_w
-            cols[:, :, i, j, :, :] = x_padded[:, :, i:i_max:stride, j:j_max:stride]
+            j_start = j * dilation
+            j_max = j_start + stride * out_w
+            cols[:, :, i, j, :, :] = x_padded[:, :, i_start:i_max:stride, j_start:j_max:stride]
 
     # Reshape to (N * out_h * out_w, C * kh * kw)
     cols = cols.transpose(0, 4, 5, 1, 2, 3).reshape(N * out_h * out_w, C * kh * kw)
@@ -335,20 +378,26 @@ def _col2im_indices(
     kw: int,
     padding: int = 1,
     stride: int = 1,
+    dilation: int = 1,
 ) -> np.ndarray:
-    """Accumulates column patches back into image tensor."""
+    """Accumulates column patches back into image tensor with stride and dilation."""
     N, C, H, W = x_shape
-    out_h = (H + 2 * padding - kh) // stride + 1
-    out_w = (W + 2 * padding - kw) // stride + 1
+    kheff = (kh - 1) * dilation + 1
+    kweff = (kw - 1) * dilation + 1
+
+    out_h = (H + 2 * padding - kheff) // stride + 1
+    out_w = (W + 2 * padding - kweff) // stride + 1
 
     x_padded = np.zeros((N, C, H + 2 * padding, W + 2 * padding), dtype=cols.dtype)
     cols_reshaped = cols.reshape(N, out_h, out_w, C, kh, kw).transpose(0, 3, 4, 5, 1, 2)
 
     for i in range(kh):
-        i_max = i + stride * out_h
+        i_start = i * dilation
+        i_max = i_start + stride * out_h
         for j in range(kw):
-            j_max = j + stride * out_w
-            x_padded[:, :, i:i_max:stride, j:j_max:stride] += cols_reshaped[:, :, i, j, :, :]
+            j_start = j * dilation
+            j_max = j_start + stride * out_w
+            x_padded[:, :, i_start:i_max:stride, j_start:j_max:stride] += cols_reshaped[:, :, i, j, :, :]
 
     if padding > 0:
         return x_padded[:, :, padding:-padding, padding:-padding]
@@ -359,13 +408,18 @@ class Conv2D(Layer):
     """2D Spatial Convolution Layer.
 
     Computes 2D cross-correlation across (batch_size, in_channels, height, width).
+    Supports customizable kernel size, stride, dilation, padding modes ('same', 'valid', or int),
+    and L1/L2 regularization.
 
     Attributes:
         in_channels (int): Number of input feature channels.
         out_channels (int): Number of output filter channels.
         kernel_size (int): Size of square kernel (k, k).
         stride (int): Stride step size along height and width.
-        padding (int): Zero-padding applied to borders.
+        padding (Union[int, str]): Zero-padding ('same', 'valid', or integer count).
+        dilation (int): Spacing between kernel points.
+        l1_reg (float): L1 regularization factor.
+        l2_reg (float): L2 regularization factor.
     """
 
     def __init__(
@@ -374,9 +428,12 @@ class Conv2D(Layer):
         out_channels: int,
         kernel_size: int = 3,
         stride: int = 1,
-        padding: int = 0,
+        padding: Union[int, str] = 0,
+        dilation: int = 1,
         weight_init: str = "he",
         use_bias: bool = True,
+        l1_reg: float = 0.0,
+        l2_reg: float = 0.0,
         dtype: np.dtype = np.float32,
     ) -> None:
         super().__init__()
@@ -384,9 +441,13 @@ class Conv2D(Layer):
         self.out_channels: int = int(out_channels)
         self.kernel_size: int = int(kernel_size)
         self.stride: int = int(stride)
-        self.padding: int = int(padding)
+        self.padding_raw: Union[int, str] = padding
+        self.dilation: int = max(1, int(dilation))
+        self.resolved_padding: int = _resolve_padding(padding, self.kernel_size, self.dilation)
         self.weight_init: str = weight_init.lower()
         self.use_bias: bool = bool(use_bias)
+        self.l1_reg: float = float(l1_reg)
+        self.l2_reg: float = float(l2_reg)
         self.dtype = dtype
         self.trainable: bool = True
 
@@ -419,6 +480,10 @@ class Conv2D(Layer):
         self._out_h: int = 0
         self._out_w: int = 0
 
+    @property
+    def padding(self) -> int:
+        return self.resolved_padding
+
     def forward(self, x: np.ndarray) -> np.ndarray:
         x_arr = np.asarray(x, dtype=self.dtype)
         if x_arr.ndim != 4:
@@ -431,9 +496,14 @@ class Conv2D(Layer):
         self._x_shape = x_arr.shape
         N = x_arr.shape[0]
 
-        # im2col
+        # im2col with dilation
         cols, out_h, out_w = _im2col_indices(
-            x_arr, self.kernel_size, self.kernel_size, self.padding, self.stride
+            x_arr,
+            self.kernel_size,
+            self.kernel_size,
+            self.resolved_padding,
+            self.stride,
+            self.dilation,
         )
         self._x_cols = cols
         self._out_h = out_h
@@ -465,6 +535,12 @@ class Conv2D(Layer):
         dw = grad_flat.T @ self._x_cols
         np.copyto(self.dweights, dw.reshape(self.weights.shape))
 
+        # L1 and L2 regularization gradients
+        if self.l2_reg > 0:
+            self.dweights += self.l2_reg * self.weights
+        if self.l1_reg > 0:
+            self.dweights += self.l1_reg * np.sign(self.weights)
+
         # db = sum across spatial and batch
         if self.use_bias and self.dbiases is not None:
             db = np.sum(grad_flat, axis=0, keepdims=True).T
@@ -474,14 +550,15 @@ class Conv2D(Layer):
         w_row = self.weights.reshape(self.out_channels, -1)
         dx_cols = grad_flat @ w_row
 
-        # col2im
+        # col2im with dilation
         dx = _col2im_indices(
             dx_cols,
             self._x_shape,
             self.kernel_size,
             self.kernel_size,
-            self.padding,
+            self.resolved_padding,
             self.stride,
+            self.dilation,
         )
         return dx
 
@@ -492,9 +569,12 @@ class Conv2D(Layer):
             "out_channels": self.out_channels,
             "kernel_size": self.kernel_size,
             "stride": self.stride,
-            "padding": self.padding,
+            "padding": self.padding_raw,
+            "dilation": self.dilation,
             "weight_init": self.weight_init,
             "use_bias": self.use_bias,
+            "l1_reg": self.l1_reg,
+            "l2_reg": self.l2_reg,
         }
 
     @classmethod
@@ -505,8 +585,11 @@ class Conv2D(Layer):
             kernel_size=config.get("kernel_size", 3),
             stride=config.get("stride", 1),
             padding=config.get("padding", 0),
+            dilation=config.get("dilation", 1),
             weight_init=config.get("weight_init", "he"),
             use_bias=config.get("use_bias", True),
+            l1_reg=config.get("l1_reg", 0.0),
+            l2_reg=config.get("l2_reg", 0.0),
         )
 
 

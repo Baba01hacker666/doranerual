@@ -13,6 +13,8 @@ import numpy as np
 from .base import Layer
 from .layers import Dense, Dropout, LayerNorm, Flatten, Conv2D, MaxPool2D
 from .activations import ReLU, Sigmoid, Softmax
+from .recurrent import SimpleRNN, RNN, LSTM, GRU
+from .attention import PositionalEncoding, MultiHeadAttention, TransformerBlock
 
 # Registry of serializable layer types
 LAYER_REGISTRY: Dict[str, Type[Layer]] = {
@@ -25,6 +27,13 @@ LAYER_REGISTRY: Dict[str, Type[Layer]] = {
     "ReLU": ReLU,
     "Sigmoid": Sigmoid,
     "Softmax": Softmax,
+    "SimpleRNN": SimpleRNN,
+    "RNN": RNN,
+    "LSTM": LSTM,
+    "GRU": GRU,
+    "PositionalEncoding": PositionalEncoding,
+    "MultiHeadAttention": MultiHeadAttention,
+    "TransformerBlock": TransformerBlock,
 }
 
 

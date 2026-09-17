@@ -52,6 +52,19 @@ from doraneural import (
     plot_ascii_curve,
     plot_history,
     export_to_standalone_python,
+    SimpleRNN,
+    RNN,
+    LSTM,
+    GRU,
+    PositionalEncoding,
+    MultiHeadAttention,
+    TransformerBlock,
+    LRScheduler,
+    StepLR,
+    CosineAnnealingLR,
+    WarmupCosineLR,
+    clip_grad_norm,
+    clip_grad_value,
 )
 
 
@@ -188,6 +201,37 @@ class TestLayersAndActivations(unittest.TestCase):
         sums = np.sum(out, axis=-1)
         np.testing.assert_allclose(sums, np.ones_like(sums), rtol=1e-5)
 
+    def test_conv2d_dilation_and_padding_same(self):
+        conv = Conv2D(in_channels=2, out_channels=3, kernel_size=3, stride=1, padding="same", dilation=2)
+        x = np.random.randn(2, 2, 8, 8).astype(np.float32)
+        out = conv.forward(x)
+        self.assertEqual(out.shape, (2, 3, 8, 8))
+
+        dx = conv.backward(np.ones_like(out))
+        self.assertEqual(dx.shape, x.shape)
+        self.assertEqual(conv.dweights.shape, conv.weights.shape)
+
+    def test_dense_3d_support(self):
+        dense = Dense(in_features=8, out_features=12)
+        x = np.random.randn(3, 5, 8).astype(np.float32)
+        out = dense.forward(x)
+        self.assertEqual(out.shape, (3, 5, 12))
+
+        dx = dense.backward(np.ones_like(out))
+        self.assertEqual(dx.shape, (3, 5, 8))
+        self.assertEqual(dense.dweights.shape, (8, 12))
+        self.assertEqual(dense.dbiases.shape, (1, 12))
+
+    def test_l1_l2_regularization(self):
+        dense = Dense(in_features=4, out_features=2, l1_reg=0.1, l2_reg=0.2)
+        x = np.random.randn(3, 4).astype(np.float32)
+        out = dense.forward(x)
+        grad_out = np.zeros_like(out)
+        dense.backward(grad_out)
+
+        expected_dw = 0.1 * np.sign(dense.weights) + 0.2 * dense.weights
+        np.testing.assert_allclose(dense.dweights, expected_dw, atol=1e-6)
+
 
 class TestOptimizers(unittest.TestCase):
     def test_adam_and_rmsprop_step(self):
@@ -217,6 +261,36 @@ class TestOptimizers(unittest.TestCase):
         w2_before = dense2.weights.copy()
         rmsprop.step([dense2])
         self.assertFalse(np.allclose(w2_before, dense2.weights))
+
+    def test_sgd_with_weight_decay(self):
+        dense = Dense(4, 2)
+        sgd = SGD(lr=0.1, weight_decay=0.05)
+        x = np.random.randn(2, 4).astype(np.float32)
+        dense.forward(x)
+        dense.backward(np.zeros((2, 2), dtype=np.float32))
+
+        w_before = dense.weights.copy()
+        sgd.step([dense])
+        expected_w = w_before - 0.1 * 0.05 * w_before
+        np.testing.assert_allclose(dense.weights, expected_w, atol=1e-6)
+
+    def test_clip_grad_norm(self):
+        dense = Dense(4, 2)
+        dense.dweights[:] = 100.0
+        dense.dbiases[:] = 100.0
+        total_norm = clip_grad_norm([dense], max_norm=1.0)
+        self.assertGreater(total_norm, 1.0)
+
+        new_norm = np.sqrt(np.sum(dense.dweights ** 2) + np.sum(dense.dbiases ** 2))
+        self.assertAlmostEqual(new_norm, 1.0, places=4)
+
+    def test_clip_grad_value(self):
+        dense = Dense(4, 2)
+        dense.dweights[:] = 50.0
+        dense.dbiases[:] = -30.0
+        clip_grad_value([dense], clip_value=5.0)
+        self.assertTrue(np.all(dense.dweights <= 5.0))
+        self.assertTrue(np.all(dense.dbiases >= -5.0))
 
 
 class TestLossesAndMetrics(unittest.TestCase):
@@ -452,6 +526,210 @@ class TestImageLoaderAndVision(unittest.TestCase):
             ascii_art = render_image_ascii(X[0, 0], width=12, height=6)
             self.assertIn("┌", ascii_art)
             self.assertIn("┘", ascii_art)
+
+
+class TestRecurrentLayers(unittest.TestCase):
+    def setUp(self):
+        set_seed(42)
+
+    def test_simplernn_shapes(self):
+        x = np.random.randn(2, 6, 4).astype(np.float32)
+
+        rnn_seq = SimpleRNN(in_features=4, hidden_units=5, return_sequences=True)
+        out_seq = rnn_seq.forward(x)
+        self.assertEqual(out_seq.shape, (2, 6, 5))
+        dx = rnn_seq.backward(np.ones_like(out_seq))
+        self.assertEqual(dx.shape, (2, 6, 4))
+        self.assertEqual(rnn_seq.dW_xh.shape, (4, 5))
+        self.assertEqual(rnn_seq.dW_hh.shape, (5, 5))
+
+        rnn_last = SimpleRNN(in_features=4, hidden_units=5, return_sequences=False)
+        out_last = rnn_last.forward(x)
+        self.assertEqual(out_last.shape, (2, 5))
+        dx = rnn_last.backward(np.ones_like(out_last))
+        self.assertEqual(dx.shape, (2, 6, 4))
+
+    def test_lstm_shapes(self):
+        x = np.random.randn(2, 6, 4).astype(np.float32)
+
+        lstm_seq = LSTM(in_features=4, hidden_units=5, return_sequences=True)
+        out_seq = lstm_seq.forward(x)
+        self.assertEqual(out_seq.shape, (2, 6, 5))
+        dx = lstm_seq.backward(np.ones_like(out_seq))
+        self.assertEqual(dx.shape, (2, 6, 4))
+
+        lstm_last = LSTM(in_features=4, hidden_units=5, return_sequences=False)
+        out_last = lstm_last.forward(x)
+        self.assertEqual(out_last.shape, (2, 5))
+        dx = lstm_last.backward(np.ones_like(out_last))
+        self.assertEqual(dx.shape, (2, 6, 4))
+
+    def test_gru_shapes(self):
+        x = np.random.randn(2, 6, 4).astype(np.float32)
+
+        gru_seq = GRU(in_features=4, hidden_units=5, return_sequences=True)
+        out_seq = gru_seq.forward(x)
+        self.assertEqual(out_seq.shape, (2, 6, 5))
+        dx = gru_seq.backward(np.ones_like(out_seq))
+        self.assertEqual(dx.shape, (2, 6, 4))
+
+        gru_last = GRU(in_features=4, hidden_units=5, return_sequences=False)
+        out_last = gru_last.forward(x)
+        self.assertEqual(out_last.shape, (2, 5))
+        dx = gru_last.backward(np.ones_like(out_last))
+        self.assertEqual(dx.shape, (2, 6, 4))
+
+    def test_simplernn_numerical_gradient(self):
+        rnn = SimpleRNN(in_features=3, hidden_units=3, return_sequences=True)
+        x = np.random.randn(2, 4, 3).astype(np.float32)
+        grad_out = np.random.randn(2, 4, 3).astype(np.float32)
+        eps = 1e-4
+
+        rnn.forward(x)
+        rnn.backward(grad_out)
+        analytical = rnn.dW_xh.copy()
+
+        numerical = np.zeros_like(rnn.W_xh)
+        for i in range(rnn.W_xh.shape[0]):
+            for j in range(rnn.W_xh.shape[1]):
+                orig = rnn.W_xh[i, j]
+                rnn.W_xh[i, j] = orig + eps
+                l_pos = np.sum(rnn.forward(x) * grad_out)
+                rnn.W_xh[i, j] = orig - eps
+                l_neg = np.sum(rnn.forward(x) * grad_out)
+                rnn.W_xh[i, j] = orig
+                numerical[i, j] = (l_pos - l_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical - numerical) / (np.linalg.norm(analytical) + np.linalg.norm(numerical) + 1e-8)
+        self.assertLess(rel_err, 1e-3)
+
+
+class TestAttentionAndTransformers(unittest.TestCase):
+    def setUp(self):
+        set_seed(42)
+
+    def test_positional_encoding(self):
+        pe = PositionalEncoding(d_model=8, max_len=50)
+        x = np.random.randn(2, 10, 8).astype(np.float32)
+        out = pe.forward(x)
+        self.assertEqual(out.shape, (2, 10, 8))
+        dx = pe.backward(np.ones_like(out))
+        self.assertEqual(dx.shape, (2, 10, 8))
+        np.testing.assert_array_equal(dx, np.ones_like(out))
+
+    def test_multihead_attention_shapes_and_mask(self):
+        x = np.random.randn(2, 6, 8).astype(np.float32)
+
+        mha = MultiHeadAttention(d_model=8, num_heads=2, causal=False)
+        out = mha.forward(x)
+        self.assertEqual(out.shape, (2, 6, 8))
+        dx = mha.backward(np.ones_like(out))
+        self.assertEqual(dx.shape, (2, 6, 8))
+
+        mha_causal = MultiHeadAttention(d_model=8, num_heads=2, causal=True)
+        out_causal = mha_causal.forward(x)
+        self.assertEqual(out_causal.shape, (2, 6, 8))
+        dx_causal = mha_causal.backward(np.ones_like(out_causal))
+        self.assertEqual(dx_causal.shape, (2, 6, 8))
+
+    def test_multihead_attention_numerical_gradient(self):
+        mha = MultiHeadAttention(d_model=4, num_heads=2, causal=False)
+        x = np.random.randn(2, 3, 4).astype(np.float32)
+        grad_out = np.random.randn(2, 3, 4).astype(np.float32)
+        eps = 1e-4
+
+        mha.forward(x)
+        mha.backward(grad_out)
+        analytical = mha.dW_q.copy()
+
+        numerical = np.zeros_like(mha.W_q)
+        for i in range(mha.W_q.shape[0]):
+            for j in range(mha.W_q.shape[1]):
+                orig = mha.W_q[i, j]
+                mha.W_q[i, j] = orig + eps
+                l_pos = np.sum(mha.forward(x) * grad_out)
+                mha.W_q[i, j] = orig - eps
+                l_neg = np.sum(mha.forward(x) * grad_out)
+                mha.W_q[i, j] = orig
+                numerical[i, j] = (l_pos - l_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical - numerical) / (np.linalg.norm(analytical) + np.linalg.norm(numerical) + 1e-8)
+        self.assertLess(rel_err, 1e-3)
+
+    def test_transformer_block_forward_backward(self):
+        tb = TransformerBlock(d_model=8, num_heads=2, d_ff=16, dropout=0.2)
+        x = np.random.randn(2, 5, 8).astype(np.float32)
+
+        tb.train(True)
+        out_train = tb.forward(x)
+        self.assertEqual(out_train.shape, (2, 5, 8))
+        dx_train = tb.backward(np.ones_like(out_train))
+        self.assertEqual(dx_train.shape, (2, 5, 8))
+
+        tb.eval()
+        out_eval1 = tb.forward(x)
+        out_eval2 = tb.forward(x)
+        np.testing.assert_allclose(out_eval1, out_eval2)
+
+
+class TestSchedulers(unittest.TestCase):
+    def test_step_lr(self):
+        dense = Dense(2, 2)
+        opt = SGD(lr=0.1)
+        scheduler = StepLR(opt, step_size=5, gamma=0.5)
+
+        self.assertEqual(scheduler.step(), 0.1)
+        for _ in range(4):
+            scheduler.step()
+        self.assertEqual(scheduler.current_lr, 0.1)
+        scheduler.step()
+        self.assertAlmostEqual(scheduler.current_lr, 0.05)
+        self.assertAlmostEqual(opt.lr, 0.05)
+
+    def test_cosine_annealing_lr(self):
+        dense = Dense(2, 2)
+        opt = SGD(lr=0.1)
+        scheduler = CosineAnnealingLR(opt, T_max=10, eta_min=0.01)
+
+        lr0 = scheduler.step(0)
+        self.assertAlmostEqual(lr0, 0.1)
+        lr5 = scheduler.step(5)
+        self.assertTrue(0.01 < lr5 < 0.1)
+        lr10 = scheduler.step(10)
+        self.assertAlmostEqual(lr10, 0.01)
+
+    def test_warmup_cosine_lr(self):
+        dense = Dense(2, 2)
+        opt = SGD(lr=0.1)
+        scheduler = WarmupCosineLR(opt, warmup_epochs=5, total_epochs=20, eta_min=0.001)
+
+        lr0 = scheduler.step(0)
+        self.assertAlmostEqual(lr0, 0.02)
+        lr4 = scheduler.step(4)
+        self.assertAlmostEqual(lr4, 0.1)
+
+        lr10 = scheduler.step(10)
+        self.assertTrue(0.001 < lr10 < 0.1)
+
+        lr20 = scheduler.step(20)
+        self.assertAlmostEqual(lr20, 0.001)
+
+    def test_model_fit_with_scheduler_and_clipping(self):
+        model = Sequential([
+            Dense(in_features=4, out_features=8),
+            ReLU(),
+            Dense(in_features=8, out_features=1),
+        ])
+        opt = Adam(lr=0.05)
+        model.compile(optimizer=opt, loss=MSELoss())
+
+        scheduler = CosineAnnealingLR(opt, T_max=5)
+        X = np.random.randn(20, 4).astype(np.float32)
+        y = np.random.randn(20, 1).astype(np.float32)
+
+        hist = model.fit(X, y, epochs=5, batch_size=4, verbose=0, scheduler=scheduler, clip_norm=1.0)
+        self.assertEqual(len(hist.history["loss"]), 5)
+        self.assertLess(opt.lr, 0.05)
 
 
 if __name__ == "__main__":

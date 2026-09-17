@@ -75,7 +75,10 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 
 ## ✨ Key Features
 
-- **Zero-Dependency Image Loader & Cat vs Dog Vision**: Load `.bmp`, `.ppm`, and `.pgm` images without Pillow or OpenCV. Run real CPU computer vision with `Conv2D` and `MaxPool2D`:
+- **Pure NumPy Sequence & Recurrent Models**: Full analytical BPTT support for `SimpleRNN`, `LSTM`, and `GRU` sequence modeling.
+- **Pure NumPy Attention & Transformers**: Pre-LN `TransformerBlock`, `MultiHeadAttention` (with causal autoregressive masking), and `PositionalEncoding`—all in pure NumPy without PyTorch or JAX.
+- **LR Schedulers & Gradient Clipping**: Dynamic `StepLR`, `CosineAnnealingLR`, `WarmupCosineLR`, along with `clip_grad_norm`, `clip_grad_value`, and decoupled weight decay.
+- **Zero-Dependency Image Loader & Cat vs Dog Vision**: Load `.bmp`, `.ppm`, and `.pgm` images without Pillow or OpenCV. Run real CPU computer vision with `Conv2D` (stride, dilation, padding) and `MaxPool2D`:
   ```bash
   doraneural demo catdog
   ```
@@ -112,7 +115,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 | `doraneural predict <vals>` | Runs immediate inference on user input numbers |
 | `doraneural explain <topic>`| Explains concepts (`weights`, `epochs`, `loss`, `backprop`) |
 | `doraneural demo <name>` | Runs demos (`catdog`, `interactive`, `digits`, `moons`, `blobs`, `cnn`) |
-| `doraneural test` | Runs the automated 25-test unit test suite |
+| `doraneural test` | Runs the automated 43-test unit test suite |
 | `doraneural info` | Displays system specs, NumPy version, and engine info |
 
 ---
@@ -122,7 +125,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 For complete deep dives and advanced configurations, see the `docs/` folder:
 
 - 📖 **[CLI Reference Guide](docs/cli_reference.md)**: Full wizard walkthroughs, custom dataset options, and parameter flags.
-- 🧠 **[Python API Reference](docs/python_api.md)**: `Dense`, `Conv2D`, `MaxPool2D`, `Dropout`, `LayerNorm`, image loading, custom losses, optimizers, and data preprocessing.
+- 🧠 **[Python API Reference](docs/python_api.md)**: `Dense`, `Conv2D`, `LSTM`, `GRU`, `TransformerBlock`, `MultiHeadAttention`, schedulers, image loading, custom losses, optimizers, and data preprocessing.
 - 📐 **[Math & Backpropagation Under the Hood](docs/math_and_backprop.md)**: Numerical gradient checks, Jacobians, weight initialization, and backprop math.
 - 🎮 **[Interactive Demos & Visualizer](docs/demos.md)**: Real-time 0–9 digit synthesizer, Cat vs Dog CNN vision benchmark, and ASCII previewer.
 
@@ -135,4 +138,4 @@ doraneural test
 # or
 python3 -m unittest discover tests/
 ```
-All 25 unit tests pass on pure CPU with standard NumPy.
+All 43 unit tests pass on pure CPU with standard NumPy.
