@@ -113,7 +113,48 @@ print(dn.plot_ascii_curve([1.0, 0.7, 0.4, 0.2, 0.05], title="Loss Drop"))
 
 ---
 
-## 5. Core Modular Components
+## 5. Zero-Dependency Image Loader & Vision
+
+`doraneural` loads, resizes, and processes real images (`.bmp`, `.ppm`, `.pgm`) without requiring Pillow (PIL) or OpenCV:
+
+### Load Image Folders (Cats vs Dogs)
+
+```python
+import doraneural as dn
+
+# Scans dataset/cats and dataset/dogs, resizes to 24x24, and normalizes
+X, y, class_names = dn.load_image_dataset(
+    "path/to/dataset",
+    target_size=(24, 24),
+    grayscale=True
+)
+print(f"Loaded {len(X)} images of {class_names}")
+```
+
+### Render Images as Terminal ASCII Art
+
+```python
+import doraneural as dn
+
+# Print visual grayscale ASCII representation directly in terminal
+print(dn.render_image_ascii(X[0, 0], width=20, height=10))
+```
+
+### Save and Read BMP Files
+
+```python
+import doraneural as dn
+
+# Read standard uncompressed 24-bit or 8-bit BMP
+img_array = dn.read_bmp("cat.bmp")
+
+# Write array back to BMP
+dn.write_bmp("saved_image.bmp", img_array)
+```
+
+---
+
+## 6. Core Modular Components
 
 ### Layers
 - `Dense(in_features, out_features, weight_init="he")`: Fully connected layer.
@@ -145,7 +186,7 @@ print(dn.plot_ascii_curve([1.0, 0.7, 0.4, 0.2, 0.05], title="Loss Drop"))
 
 ---
 
-## 6. Model Serialization
+## 7. Model Serialization
 
 Save and reload architectures and weights:
 

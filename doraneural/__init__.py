@@ -37,6 +37,16 @@ from .utils import (
 from .easy import create, quick_train
 from .teach import explain
 from .data import load_csv, create_sample_classification_csv, create_sample_regression_csv
+from .image import (
+    read_bmp,
+    write_bmp,
+    read_ppm,
+    resize_image,
+    load_image,
+    load_image_dataset,
+    render_image_ascii,
+    create_sample_cat_dog_dataset,
+)
 from .plot import plot_ascii_curve, plot_history
 from .export import export_to_standalone_python
 from .errors import DoraneuralError, ShapeMismatchError, ModelNotCompiledError
@@ -52,6 +62,15 @@ __all__ = [
     "load_csv",
     "create_sample_classification_csv",
     "create_sample_regression_csv",
+    # Image loading & Computer Vision (Zero-dependency)
+    "read_bmp",
+    "write_bmp",
+    "read_ppm",
+    "resize_image",
+    "load_image",
+    "load_image_dataset",
+    "render_image_ascii",
+    "create_sample_cat_dog_dataset",
     # Visual ASCII plotting
     "plot_ascii_curve",
     "plot_history",

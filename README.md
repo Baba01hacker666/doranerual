@@ -75,6 +75,10 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 
 ## ✨ Key Features
 
+- **Zero-Dependency Image Loader & Cat vs Dog Vision**: Load `.bmp`, `.ppm`, and `.pgm` images without Pillow or OpenCV. Run real CPU computer vision with `Conv2D` and `MaxPool2D`:
+  ```bash
+  doraneural demo catdog
+  ```
 - **Zero-Dependency CSV Loader**: Load and auto-normalize tabular datasets with pure standard library (no pandas needed):
   ```bash
   doraneural new --data my_dataset.csv
@@ -107,8 +111,8 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 | `doraneural status` | Displays ASCII architecture flow and training stats |
 | `doraneural predict <vals>` | Runs immediate inference on user input numbers |
 | `doraneural explain <topic>`| Explains concepts (`weights`, `epochs`, `loss`, `backprop`) |
-| `doraneural demo <name>` | Runs demos (`interactive`, `digits`, `moons`, `blobs`, `cnn`) |
-| `doraneural test` | Runs the automated 22-test unit test suite |
+| `doraneural demo <name>` | Runs demos (`catdog`, `interactive`, `digits`, `moons`, `blobs`, `cnn`) |
+| `doraneural test` | Runs the automated 25-test unit test suite |
 | `doraneural info` | Displays system specs, NumPy version, and engine info |
 
 ---
@@ -118,9 +122,9 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 For complete deep dives and advanced configurations, see the `docs/` folder:
 
 - 📖 **[CLI Reference Guide](docs/cli_reference.md)**: Full wizard walkthroughs, custom dataset options, and parameter flags.
-- 🧠 **[Python API Reference](docs/python_api.md)**: `Dense`, `Conv2D`, `MaxPool2D`, `Dropout`, `LayerNorm`, custom losses, optimizers, and data preprocessing.
+- 🧠 **[Python API Reference](docs/python_api.md)**: `Dense`, `Conv2D`, `MaxPool2D`, `Dropout`, `LayerNorm`, image loading, custom losses, optimizers, and data preprocessing.
 - 📐 **[Math & Backpropagation Under the Hood](docs/math_and_backprop.md)**: Numerical gradient checks, Jacobians, weight initialization, and backprop math.
-- 🎮 **[Interactive Demos & Visualizer](docs/demos.md)**: Real-time 0–9 digit synthesizer, noise generator, and ASCII previewer.
+- 🎮 **[Interactive Demos & Visualizer](docs/demos.md)**: Real-time 0–9 digit synthesizer, Cat vs Dog CNN vision benchmark, and ASCII previewer.
 
 ---
 
@@ -131,4 +135,4 @@ doraneural test
 # or
 python3 -m unittest discover tests/
 ```
-All 22 unit tests pass on pure CPU with standard NumPy.
+All 25 unit tests pass on pure CPU with standard NumPy.

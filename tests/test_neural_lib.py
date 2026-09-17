@@ -42,6 +42,13 @@ from doraneural import (
     load_csv,
     create_sample_classification_csv,
     create_sample_regression_csv,
+    read_bmp,
+    write_bmp,
+    load_image,
+    load_image_dataset,
+    resize_image,
+    render_image_ascii,
+    create_sample_cat_dog_dataset,
     plot_ascii_curve,
     plot_history,
     export_to_standalone_python,
@@ -410,6 +417,41 @@ class TestStandaloneExporter(unittest.TestCase):
             res = subprocess.run(args, capture_output=True, text=True)
             self.assertEqual(res.returncode, 0)
             self.assertIn("Prediction:", res.stdout)
+
+
+class TestImageLoaderAndVision(unittest.TestCase):
+    def test_bmp_read_write_roundtrip(self):
+        import tempfile
+        test_img = np.zeros((16, 20, 3), dtype=np.uint8)
+        test_img[4:10, 5:15] = [255, 128, 64]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bmp_path = Path(tmpdir) / "test.bmp"
+            write_bmp(bmp_path, test_img)
+            self.assertTrue(bmp_path.exists())
+
+            loaded = read_bmp(bmp_path)
+            self.assertEqual(loaded.shape, (16, 20, 3))
+            np.testing.assert_array_equal(loaded[5, 6], [255, 128, 64])
+
+    def test_resize_image(self):
+        orig = np.random.randint(0, 256, (50, 40, 3), dtype=np.uint8).astype(np.float32)
+        resized = resize_image(orig, target_size=(24, 24))
+        self.assertEqual(resized.shape, (24, 24, 3))
+
+    def test_load_image_dataset_and_ascii(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = create_sample_cat_dog_dataset(Path(tmpdir) / "data", samples_per_class=4)
+            X, y, classes = load_image_dataset(data_dir, target_size=(16, 16), grayscale=True)
+            self.assertEqual(X.shape, (8, 1, 16, 16))
+            self.assertEqual(len(y), 8)
+            self.assertEqual(classes, ["cats", "dogs"])
+
+            # Test ASCII renderer
+            ascii_art = render_image_ascii(X[0, 0], width=12, height=6)
+            self.assertIn("┌", ascii_art)
+            self.assertIn("┘", ascii_art)
 
 
 if __name__ == "__main__":

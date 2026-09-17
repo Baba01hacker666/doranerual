@@ -116,6 +116,7 @@ def cmd_demo(args: argparse.Namespace) -> None:
     examples_dir = Path(__file__).resolve().parent.parent / "examples"
 
     mapping = {
+        "catdog": examples_dir / "cat_vs_dog_classification.py",
         "digits": examples_dir / "digit_classification.py",
         "interactive": examples_dir / "generate_and_predict_digit.py",
         "moons": examples_dir / "binary_classification.py",
@@ -217,7 +218,7 @@ def main() -> None:
 
     # doraneural demo
     sub_demo = subparsers.add_parser("demo", help="Run interactive and visual benchmarks")
-    sub_demo.add_argument("name", choices=["interactive", "digits", "moons", "blobs", "cnn"], default="interactive", nargs="?", help="Demo to run")
+    sub_demo.add_argument("name", choices=["catdog", "interactive", "digits", "moons", "blobs", "cnn"], default="catdog", nargs="?", help="Demo to run")
     sub_demo.set_defaults(func=cmd_demo)
 
     # doraneural test
