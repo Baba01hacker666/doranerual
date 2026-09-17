@@ -1,0 +1,78 @@
+{
+  "latest": {
+    "run_id": "zexo_step1",
+    "timestamp_utc": "2026-09-17T16:26:26.148496+00:00",
+    "tier": "micro",
+    "parameters": 280512,
+    "dataset": "step1_conversational_base.txt",
+    "chars": 12724,
+    "words": 1912,
+    "epochs": 10,
+    "lr": 0.002,
+    "loss_history": [
+      7.550589165650308,
+      6.678510311990976,
+      6.286743457429111,
+      6.060099110938609,
+      5.900909884832799,
+      5.773011427372694,
+      5.660707619972527,
+      5.557337244972587,
+      5.461159218102694,
+      5.372974926605821
+    ],
+    "test_prompt": "Who are you?",
+    "reply_before": "::::::::::::::::::::::::::::::::::::::::::::::::::",
+    "reply_after": "allj TimZ\u2013.\u001averout; T\ufffd\ufffd0\ufffd\ufffdr\ufffd T L\ufffd\ufffdcc that\ufffdw[\ufffd k\u0018 he\ufffd\u0007ith sa s b\u0006oo SI} named\u00110ppntm",
+    "sha256": "d590e85594d2e8e77e8f12387a75cb99b4f699c332c9732179a0422c7162c362"
+  },
+  "total_runs": 2,
+  "runs": [
+    {
+      "run_id": "zexo_20260917_161051",
+      "timestamp_utc": "2026-09-17T16:10:51.912636+00:00",
+      "tier": "micro",
+      "parameters": 280512,
+      "dataset": "identity_conversations.txt",
+      "chars": 1864,
+      "words": 297,
+      "epochs": 2,
+      "lr": 0.0005,
+      "loss_history": [
+        3.543095550603337,
+        3.5431909097565546
+      ],
+      "test_prompt": "Who are you?",
+      "reply_before": "Zoom is so much fun!\" So she replied. She saw a big, white snake and asked if she didn't",
+      "reply_after": "\" Jimmy was crying. \"It's my home!\"\nSo she found a crab and tried to find it. She didn'",
+      "sha256": "c79211ddeebd74518ea77887b9fc8d8c5e00fd601699d108d76dd274e7ece338"
+    },
+    {
+      "run_id": "zexo_step1",
+      "timestamp_utc": "2026-09-17T16:26:26.148496+00:00",
+      "tier": "micro",
+      "parameters": 280512,
+      "dataset": "step1_conversational_base.txt",
+      "chars": 12724,
+      "words": 1912,
+      "epochs": 10,
+      "lr": 0.002,
+      "loss_history": [
+        7.550589165650308,
+        6.678510311990976,
+        6.286743457429111,
+        6.060099110938609,
+        5.900909884832799,
+        5.773011427372694,
+        5.660707619972527,
+        5.557337244972587,
+        5.461159218102694,
+        5.372974926605821
+      ],
+      "test_prompt": "Who are you?",
+      "reply_before": "::::::::::::::::::::::::::::::::::::::::::::::::::",
+      "reply_after": "allj TimZ\u2013.\u001averout; T\ufffd\ufffd0\ufffd\ufffdr\ufffd T L\ufffd\ufffdcc that\ufffdw[\ufffd k\u0018 he\ufffd\u0007ith sa s b\u0006oo SI} named\u00110ppntm",
+      "sha256": "d590e85594d2e8e77e8f12387a75cb99b4f699c332c9732179a0422c7162c362"
+    }
+  ]
+}

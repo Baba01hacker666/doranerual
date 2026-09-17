@@ -134,6 +134,20 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 
 ---
 
+## 🔬 Research Lab: Novel Neural Architectures
+
+Explore cutting-edge architectures created to challenge classical neuron paradigms in the **[`research/`](research/README.md)** directory:
+
+- 🧠 **[01. Multi-Compartment Dendritic Pyramidal Neurons](research/01_dendritic_pyramidal_neurons.md)**: Biologically inspired dendritic branch gating solving XOR in 1 layer.
+- 📐 **[02. Chebyshev Kolmogorov-Arnold Networks (KAN)](research/02_chebyshev_kan.md)**: Continuous orthogonal polynomial synapses delivering an **18.2x reduction in spectral bias MSE**.
+- 🚀 **[03. Novel Transformers (KAN-Former & Dendritic-Former)](research/03_novel_transformer_blocks.md)**: KAN and Dendritic feedforward layers with **6.9x lower training loss** on sequence dynamics.
+- ⚡ **[04. Dynamic Threshold-Gated Bifurcated Neurons](research/04_threshold_gated_bifurcation.md)**: Dynamic conditional routing cutting dual-regime physics MSE by **2.0x**.
+- 🔄 **[05. Cortical Reflection & Top-Down Feedback](research/05_cortical_reflection_feedback.md)**: Iterative predictive coding and hypothesis refinement loops.
+- 🌌 **[06. Synaptic Inverters & 4D Spacetime Hyper-Tensors](research/06_synaptic_inversion_and_4d_tensors.md)**: Learnable forward-inverse duality ($+W \leftrightarrow -W$) and 4D tensor manifolds $(B, T, S, C)$.
+- 🧬 **[07. Bio-Reflective KAN Unified Architecture](research/07_bio_reflective_kan_unified.md)**: Synthesizing all 4 novel neuron paradigms into a single unified network (96.4% test accuracy on noisy vision).
+
+---
+
 ## 📚 Documentation
 
 For complete deep dives and advanced configurations, see the `docs/` folder:
@@ -150,8 +164,9 @@ For complete deep dives and advanced configurations, see the `docs/` folder:
 ```bash
 doraneural test
 # or
-python3 -m unittest discover tests/
+python3 -m pytest tests/
 ```
-All 74 unit tests pass on pure CPU with standard NumPy.
+All **90 unit tests** pass on pure CPU with standard NumPy.
+
 
 

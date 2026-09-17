@@ -197,18 +197,31 @@ def cmd_finetune(args: argparse.Namespace) -> None:
     """Fine-tune pretrained LLaMA LLM on custom text data."""
     from .llm import load_pretrained_llm
 
-    data_path = Path(args.data)
-    if data_path.exists():
-        text = data_path.read_text(encoding="utf-8", errors="replace")
-        print(f"Loaded {len(text)} characters from {args.data}")
+    if dn.is_hf_dataset_identifier(args.data):
+        print(f"🤗 Detected Hugging Face dataset identifier: '{args.data}'")
+        hf_samples = getattr(args, "hf_samples", 100)
+        cached_file = dn.download_hf_dataset(args.data, max_samples=hf_samples)
+        text = cached_file.read_text(encoding="utf-8", errors="replace")
+        print(f"Loaded {len(text)} characters from Hugging Face ({cached_file.name})")
     else:
-        text = args.data
-        print(f"Using inline prompt text ({len(text)} characters)")
+        data_path = Path(args.data)
+        if data_path.exists():
+            text = data_path.read_text(encoding="utf-8", errors="replace")
+            print(f"Loaded {len(text)} characters from {args.data}")
+        else:
+            text = args.data
+            print(f"Using inline prompt text ({len(text)} characters)")
 
     print("=" * 65)
     print("⚡ doraneural LLM Fine-Tuning")
     print("=" * 65)
-    llm = load_pretrained_llm(model_name=args.model)
+    if getattr(args, "checkpoint", None) and Path(args.checkpoint).exists():
+        ckpt_path = Path(args.checkpoint)
+        tok_path = Path(__file__).resolve().parent.parent / "models" / "stories260K" / "tok512.bin"
+        llm = dn.LlamaLLM(model_path=ckpt_path, tokenizer_path=tok_path, backend="auto")
+        print(f"Resuming from prior checkpoint: {ckpt_path.name}")
+    else:
+        llm = load_pretrained_llm(model_name=args.model)
     print(f"Engine: {llm.backend.upper()} | Architecture: LLaMA ({llm.config.dim} dim, {llm.config.n_layers} layers)")
     print(f"Training for {args.epochs} epochs (lr={args.lr})...\n")
 
@@ -341,6 +354,8 @@ def main() -> None:
     sub_ft.add_argument("--lr", type=float, default=5e-4, help="Learning rate (default: 5e-4)")
     sub_ft.add_argument("--seq-len", type=int, default=16, help="Sequence chunk length (default: 16)")
     sub_ft.add_argument("--model", "-m", choices=["stories260K", "stories15M"], default="stories260K", help="Base model")
+    sub_ft.add_argument("--checkpoint", "-c", type=str, default=None, help="Path to existing .bin checkpoint to resume continuous training")
+    sub_ft.add_argument("--hf-samples", type=int, default=100, help="Max samples to download if using a Hugging Face dataset (default: 100)")
     sub_ft.add_argument("--output", "-o", type=str, default="finetuned_model.bin", help="Output path for checkpoint")
     sub_ft.set_defaults(func=cmd_finetune)
 

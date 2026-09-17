@@ -185,18 +185,18 @@ class HFTokenizer:
             parts = m.split(" ")
             if len(parts) == 2:
                 self.bpe_ranks[(parts[0], parts[1])] = i
+        self._cache: Dict[str, List[int]] = {}
 
-    def encode(self, text: str, bos: bool = True) -> List[int]:
-        """Encode a string into token IDs with SentencePiece BPE merges."""
-        tokens: List[int] = [1] if bos else []  # BOS = 1
-        if not text:
-            return tokens
+    def _encode_piece(self, piece: str) -> List[int]:
+        """Encode a single small piece/word with memoization."""
+        if piece in self._cache:
+            return self._cache[piece]
+        if piece in self.vocab:
+            res = [self.vocab[piece]]
+            self._cache[piece] = res
+            return res
 
-        # SentencePiece normalization: prepend ▁ and replace spaces with ▁
-        normalized = self.SPIECE + text.replace(" ", self.SPIECE)
-        current = list(normalized)
-
-        # Iteratively merge the highest-priority (lowest rank) adjacent pair
+        current = list(piece)
         while len(current) > 1:
             pairs = [(current[i], current[i + 1]) for i in range(len(current) - 1)]
             best = min(pairs, key=lambda p: self.bpe_ranks.get(p, float("inf")))
@@ -213,14 +213,30 @@ class HFTokenizer:
                     i += 1
             current = new_word
 
-        # Map symbols to token IDs with byte-fallback for unknown characters
+        res: List[int] = []
         for symbol in current:
             if symbol in self.vocab:
-                tokens.append(self.vocab[symbol])
+                res.append(self.vocab[symbol])
             else:
                 for b in symbol.encode("utf-8"):
                     byte_token = f"<0x{b:02X}>"
-                    tokens.append(self.vocab.get(byte_token, self.vocab.get("<unk>", 0)))
+                    res.append(self.vocab.get(byte_token, self.vocab.get("<unk>", 0)))
+        self._cache[piece] = res
+        return res
+
+    def encode(self, text: str, bos: bool = True) -> List[int]:
+        """Encode a string into token IDs with fast SentencePiece BPE merges."""
+        import re
+        tokens: List[int] = [1] if bos else []  # BOS = 1
+        if not text:
+            return tokens
+
+        norm = self.SPIECE + text.replace(" ", self.SPIECE)
+        chunks = re.split(r"(\n+|" + self.SPIECE + r")", norm)
+        for c in chunks:
+            if not c:
+                continue
+            tokens.extend(self._encode_piece(c))
         return tokens
 
     def decode_token(self, token_id: int) -> str:
@@ -313,6 +329,13 @@ class LlamaLLM:
         p = self.config
         self.key_cache = np.zeros((p.n_layers, p.seq_len, p.kv_dim), dtype=np.float32)
         self.val_cache = np.zeros((p.n_layers, p.seq_len, p.kv_dim), dtype=np.float32)
+
+        # Precompute RoPE frequency tables for NumPy engine
+        half = p.head_size // 2
+        dim_idx = np.arange(half, dtype=np.float32)
+        self._rope_inv_freq = 1.0 / (10000.0 ** (2.0 * dim_idx / p.head_size))
+        dim_idx_inter = np.arange(0, p.head_size, 2, dtype=np.float32)
+        self._rope_inv_freq_interleaved = 1.0 / (10000.0 ** (dim_idx_inter / p.head_size))
 
         # C++ Backend Integration
         self.weights_dict = {
@@ -499,40 +522,36 @@ class LlamaLLM:
             if p.rope_type == "hf":
                 # HuggingFace split-half RoPE: [q_first_half, q_second_half]
                 half = p.head_size // 2
-                dim_idx = np.arange(half, dtype=np.float32)
-                inv_freq = 1.0 / (10000.0 ** (2.0 * dim_idx / p.head_size))
-                freqs = pos * inv_freq
+                freqs = pos * self._rope_inv_freq
                 cos_val, sin_val = np.cos(freqs), np.sin(freqs)
 
                 q_heads = q.reshape(p.n_heads, p.head_size)
-                for h in range(p.n_heads):
-                    q1, q2 = q_heads[h, :half].copy(), q_heads[h, half:].copy()
-                    q_heads[h, :half] = q1 * cos_val - q2 * sin_val
-                    q_heads[h, half:] = q2 * cos_val + q1 * sin_val
+                q1, q2 = q_heads[:, :half], q_heads[:, half:]
+                q_heads[:, :half] = q1 * cos_val - q2 * sin_val
+                q_heads[:, half:] = q2 * cos_val + q1 * sin_val
                 q = q_heads.reshape(p.dim)
 
                 k_heads = k.reshape(p.n_kv_heads, p.head_size)
-                for h in range(p.n_kv_heads):
-                    k1, k2 = k_heads[h, :half].copy(), k_heads[h, half:].copy()
-                    k_heads[h, :half] = k1 * cos_val - k2 * sin_val
-                    k_heads[h, half:] = k2 * cos_val + k1 * sin_val
+                k1, k2 = k_heads[:, :half], k_heads[:, half:]
+                k_heads[:, :half] = k1 * cos_val - k2 * sin_val
+                k_heads[:, half:] = k2 * cos_val + k1 * sin_val
                 k = k_heads.reshape(p.kv_dim)
             else:
                 # Standard llama2.c interleaved RoPE: [q0, q1, q2, q3, ...]
-                for i in range(0, p.dim, 2):
-                    h_dim = i % p.head_size
-                    freq = 1.0 / (10000.0 ** (h_dim / p.head_size))
-                    val = pos * freq
-                    fcr, fci = np.cos(val), np.sin(val)
+                freqs = pos * self._rope_inv_freq_interleaved
+                fcr = np.tile(np.cos(freqs), p.n_heads)
+                fci = np.tile(np.sin(freqs), p.n_heads)
 
-                    q0, q1 = q[i], q[i + 1]
-                    q[i] = q0 * fcr - q1 * fci
-                    q[i + 1] = q0 * fci + q1 * fcr
+                q0, q1 = q[0::2].copy(), q[1::2].copy()
+                q[0::2] = q0 * fcr - q1 * fci
+                q[1::2] = q0 * fci + q1 * fcr
 
-                    if i < p.kv_dim:
-                        k0, k1 = k[i], k[i + 1]
-                        k[i] = k0 * fcr - k1 * fci
-                        k[i + 1] = k0 * fci + k1 * fcr
+                if p.kv_dim > 0:
+                    fcr_k = np.tile(np.cos(freqs), p.n_kv_heads)
+                    fci_k = np.tile(np.sin(freqs), p.n_kv_heads)
+                    k0, k1 = k[0::2].copy(), k[1::2].copy()
+                    k[0::2] = k0 * fcr_k - k1 * fci_k
+                    k[1::2] = k0 * fci_k + k1 * fcr_k
 
             # Store into KV-cache
             self.key_cache[l, pos] = k
@@ -563,6 +582,7 @@ class LlamaLLM:
 
         # Final RMSNorm and Classifier projection
         x = self._rmsnorm(x, self.rms_final)
+        self._last_x = x
         return self.wcls @ x
 
     def sample(self, logits: np.ndarray, temperature: float = 0.7, top_p: float = 0.9) -> int:
@@ -574,15 +594,34 @@ class LlamaLLM:
         probs = self._softmax(logits)
 
         if top_p < 1.0:
-            sorted_indices = np.argsort(probs)[::-1]
-            sorted_probs = probs[sorted_indices]
-            cumsum = np.cumsum(sorted_probs)
+            vocab_size = len(probs)
+            if vocab_size > 256:
+                # Fast top-K selection before sorting
+                K = min(vocab_size, 64)
+                part_idx = np.argpartition(probs, -K)[-K:]
+                part_probs = probs[part_idx]
+                sort_order = np.argsort(part_probs)[::-1]
+                sorted_indices = part_idx[sort_order]
+                sorted_probs = part_probs[sort_order]
+                cumsum = np.cumsum(sorted_probs)
+                if cumsum[-1] < top_p:
+                    sorted_indices = np.argsort(probs)[::-1]
+                    sorted_probs = probs[sorted_indices]
+                    cumsum = np.cumsum(sorted_probs)
+            else:
+                sorted_indices = np.argsort(probs)[::-1]
+                sorted_probs = probs[sorted_indices]
+                cumsum = np.cumsum(sorted_probs)
 
             # Mask out probabilities beyond top_p cutoff
             cutoff_mask = cumsum > top_p
             cutoff_mask[0] = False  # Keep at least the top-1 choice
             sorted_probs[cutoff_mask] = 0.0
-            sorted_probs /= np.sum(sorted_probs)
+            s = np.sum(sorted_probs)
+            if s > 0:
+                sorted_probs /= s
+            else:
+                sorted_probs[0] = 1.0
 
             selected_idx = np.random.choice(len(sorted_probs), p=sorted_probs)
             return int(sorted_indices[selected_idx])
@@ -615,28 +654,57 @@ class LlamaLLM:
         if not prompt_tokens:
             prompt_tokens = [1]
 
+        # Fast path: C++ non-streaming generation executes entirely in native C++
+        if not stream and self.cpp_engine is not None:
+            gen_ids = self.cpp_engine.generate(
+                prompt_tokens=prompt_tokens,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            return prompt + self.tokenizer.decode(gen_ids)
+
         def _generator() -> Generator[str, None, None]:
             pos = 0
-            logits = None
+            if self.cpp_engine is not None:
+                # Fast streaming path via C++ engine (zero logits copying to Python)
+                for tok in prompt_tokens:
+                    self.cpp_engine.forward(tok, pos, copy_logits=False)
+                    pos += 1
 
-            # Pre-fill prompt
-            for tok in prompt_tokens:
-                logits = self.forward(tok, pos)
-                pos += 1
+                for _ in range(max_tokens):
+                    if pos >= self.config.seq_len - 1:
+                        break
 
-            for _ in range(max_tokens):
-                if pos >= self.config.seq_len - 1:
-                    break
+                    next_token = self.cpp_engine.sample(temperature=temperature, top_p=top_p)
+                    if next_token == 2:  # EOS
+                        break
 
-                next_token = self.sample(logits, temperature=temperature, top_p=top_p)
-                if next_token == 2:  # EOS
-                    break
+                    piece = self.tokenizer.decode_token(next_token)
+                    yield piece
 
-                piece = self.tokenizer.decode_token(next_token)
-                yield piece
+                    self.cpp_engine.forward(next_token, pos, copy_logits=False)
+                    pos += 1
+            else:
+                # Pure NumPy streaming generator
+                logits = None
+                for tok in prompt_tokens:
+                    logits = self.forward(tok, pos)
+                    pos += 1
 
-                logits = self.forward(next_token, pos)
-                pos += 1
+                for _ in range(max_tokens):
+                    if pos >= self.config.seq_len - 1:
+                        break
+
+                    next_token = self.sample(logits, temperature=temperature, top_p=top_p)
+                    if next_token == 2:  # EOS
+                        break
+
+                    piece = self.tokenizer.decode_token(next_token)
+                    yield piece
+
+                    logits = self.forward(next_token, pos)
+                    pos += 1
 
         if stream:
             return _generator()
@@ -696,6 +764,15 @@ class LlamaLLM:
             cls_w = self.wcls if not self.shared_weights else self.tok_emb
             g_emb = cls_w.T @ dlogits
             self.tok_emb[in_tok] -= lr * (g_emb + weight_decay * self.tok_emb[in_tok])
+
+            # Gradient update for classifier weights
+            last_x = getattr(self, "_last_x", None)
+            if last_x is not None:
+                cls_w[target_tok] -= lr * (dlogits[target_tok] * last_x + weight_decay * cls_w[target_tok])
+                if self.config.vocab_size <= 1024:
+                    for v in range(self.config.vocab_size):
+                        if v != target_tok:
+                            cls_w[v] -= lr * (dlogits[v] * last_x + weight_decay * cls_w[v])
 
         return total_loss / seq_len
 

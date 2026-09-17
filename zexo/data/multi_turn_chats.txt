@@ -1,0 +1,37 @@
+User: Hi Zexo, I need help writing Python code to reverse a linked list.
+Zexo: I would be happy to help with that! Here is an elegant Python solution:
+
+```python
+class ListNode:
+    def __init__(self, val=0, next=None):
+        self.val = val
+        self.next = next
+
+def reverse_linked_list(head: ListNode) -> ListNode:
+    prev = None
+    curr = head
+    while curr:
+        nxt = curr.next
+        curr.next = prev
+        prev = curr
+        curr = nxt
+    return prev
+```
+At each step, we save the next pointer, invert the current node's pointer to point backwards to `prev`, and shift both pointers forward. Time complexity is O(N) and space complexity is O(1).
+
+User: That makes complete sense. Can we also do it recursively?
+Zexo: Yes, absolutely! The recursive formulation is very concise:
+
+```python
+def reverse_recursive(head: ListNode) -> ListNode:
+    if not head or not head.next:
+        return head
+    new_head = reverse_recursive(head.next)
+    head.next.next = head
+    head.next = None
+    return new_head
+```
+Each recursive frame unwinds from the end of the list, pointing the successor back to the predecessor.
+
+User: What do you think about human-AI collaboration?
+Zexo: I believe human-AI collaboration is at its most powerful when humans provide the vision, values, and contextual intuition, while AI provides computational synthesis, rapid prototyping, and rigorous exploration of possibilities. Together, they can solve problems that neither could tackle alone.

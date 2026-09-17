@@ -6,13 +6,22 @@ Designed for educational hackability and low-power CPU environments.
 from .base import Layer
 from .layers import (
     Dense,
+    DendriticDense,
+    ChebyshevKAN,
+    BifurcatedDense,
+    ReflectiveDense,
+    InvertedDense,
+    Tensor4DDense,
+    ComplexWaveDense,
+    FractalChaosDense,
+    TunnelingDense,
     Dropout,
     LayerNorm,
     Flatten,
     Conv2D,
     MaxPool2D,
 )
-from .activations import ReLU, Sigmoid, Softmax
+from .activations import ReLU, Sigmoid, Softmax, Tanh, SiLU, Inverter
 from .losses import (
     Loss,
     BinaryCrossEntropy,
@@ -44,6 +53,8 @@ from .attention import (
     PositionalEncoding,
     MultiHeadAttention,
     TransformerBlock,
+    KANTransformerBlock,
+    DendriticTransformerBlock,
 )
 from .metrics import Metric, Accuracy, accuracy_score, MSE, MAE, get_metric
 from .model import Sequential, History, EvaluationResult
@@ -80,6 +91,7 @@ from .dataloader import (
 from .easy import create, quick_train
 from .teach import explain
 from .data import load_csv, create_sample_classification_csv, create_sample_regression_csv
+from .hf_dataset import download_hf_dataset, is_hf_dataset_identifier, get_hf_dataset_splits
 from .image import (
     read_bmp,
     write_bmp,
@@ -149,6 +161,9 @@ __all__ = [
     "load_csv",
     "create_sample_classification_csv",
     "create_sample_regression_csv",
+    "download_hf_dataset",
+    "is_hf_dataset_identifier",
+    "get_hf_dataset_splits",
     # Hardware Acceleration & JIT
     "set_im2col_backend",
     "get_im2col_backend",
@@ -177,6 +192,15 @@ __all__ = [
     "Layer",
     # Layers
     "Dense",
+    "DendriticDense",
+    "ChebyshevKAN",
+    "BifurcatedDense",
+    "ReflectiveDense",
+    "InvertedDense",
+    "Tensor4DDense",
+    "ComplexWaveDense",
+    "FractalChaosDense",
+    "TunnelingDense",
     "Dropout",
     "LayerNorm",
     "Flatten",
@@ -191,10 +215,15 @@ __all__ = [
     "PositionalEncoding",
     "MultiHeadAttention",
     "TransformerBlock",
+    "KANTransformerBlock",
+    "DendriticTransformerBlock",
     # Activations
     "ReLU",
     "Sigmoid",
     "Softmax",
+    "Tanh",
+    "SiLU",
+    "Inverter",
     # Losses
     "Loss",
     "BinaryCrossEntropy",

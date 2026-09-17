@@ -72,6 +72,9 @@ float llama_train_step(
 int llama_get_threads();
 void llama_set_threads(int num_threads);
 
+// Sampling
+int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p);
+
 #ifdef __cplusplus
 }
 #endif

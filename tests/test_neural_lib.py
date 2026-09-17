@@ -15,6 +15,15 @@ import numpy as np
 from doraneural import (
     Sequential,
     Dense,
+    DendriticDense,
+    ChebyshevKAN,
+    BifurcatedDense,
+    ReflectiveDense,
+    InvertedDense,
+    Tensor4DDense,
+    ComplexWaveDense,
+    FractalChaosDense,
+    TunnelingDense,
     Dropout,
     LayerNorm,
     Flatten,
@@ -23,6 +32,9 @@ from doraneural import (
     ReLU,
     Sigmoid,
     Softmax,
+    Tanh,
+    SiLU,
+    Inverter,
     BinaryCrossEntropy,
     CategoricalCrossEntropy,
     MeanSquaredError,
@@ -59,6 +71,8 @@ from doraneural import (
     PositionalEncoding,
     MultiHeadAttention,
     TransformerBlock,
+    KANTransformerBlock,
+    DendriticTransformerBlock,
     LRScheduler,
     StepLR,
     CosineAnnealingLR,
@@ -233,6 +247,30 @@ class TestLayersAndActivations(unittest.TestCase):
         sums = np.sum(out, axis=-1)
         np.testing.assert_allclose(sums, np.ones_like(sums), rtol=1e-5)
 
+    def test_tanh_properties(self):
+        tanh = Tanh()
+        x = np.array([[-1.0, 0.0, 1.0]], dtype=np.float32)
+        out = tanh.forward(x)
+        np.testing.assert_allclose(out, np.tanh(x), rtol=1e-5)
+        # Gradient check
+        grad_out = np.array([[0.5, 1.0, -0.5]], dtype=np.float32)
+        grad_in = tanh.backward(grad_out)
+        expected_grad = grad_out * (1.0 - np.tanh(x) ** 2)
+        np.testing.assert_allclose(grad_in, expected_grad, rtol=1e-5)
+
+    def test_silu_properties(self):
+        silu = SiLU()
+        x = np.array([[-2.0, 0.0, 2.0]], dtype=np.float32)
+        out = silu.forward(x)
+        sig = 1.0 / (1.0 + np.exp(-x))
+        np.testing.assert_allclose(out, x * sig, rtol=1e-5)
+        # Finite difference gradient check
+        eps = 1e-4
+        grad_out = np.array([[1.0, 1.0, 1.0]], dtype=np.float32)
+        analytical = silu.backward(grad_out)
+        numerical = (silu.forward(x + eps) - silu.forward(x - eps)) / (2 * eps)
+        np.testing.assert_allclose(analytical, numerical, rtol=1e-3, atol=1e-3)
+
     def test_conv2d_dilation_and_padding_same(self):
         conv = Conv2D(in_channels=2, out_channels=3, kernel_size=3, stride=1, padding="same", dilation=2)
         x = np.random.randn(2, 2, 8, 8).astype(np.float32)
@@ -263,6 +301,470 @@ class TestLayersAndActivations(unittest.TestCase):
 
         expected_dw = 0.1 * np.sign(dense.weights) + 0.2 * dense.weights
         np.testing.assert_allclose(dense.dweights, expected_dw, atol=1e-6)
+
+    def test_dendritic_dense_forward_backward_shapes(self):
+        layer = DendriticDense(in_features=4, out_features=3, num_branches=3)
+        x = np.random.randn(5, 4).astype(np.float32)
+        out = layer.forward(x)
+        self.assertEqual(out.shape, (5, 3))
+
+        grad_out = np.ones_like(out)
+        dx = layer.backward(grad_out)
+        self.assertEqual(dx.shape, (5, 4))
+        self.assertEqual(layer.dw_signal.shape, (3, 4, 3))
+        self.assertEqual(layer.dw_gate.shape, (3, 4, 3))
+        self.assertEqual(layer.db_soma.shape, (1, 3))
+
+    def test_dendritic_dense_gradient_check(self):
+        """Verify DendriticDense analytical backward gradients against finite differences."""
+        layer = DendriticDense(in_features=3, out_features=2, num_branches=2)
+        x = np.random.randn(4, 3).astype(np.float32)
+        eps = 1e-4
+
+        out = layer.forward(x)
+        grad_out = np.random.randn(*out.shape).astype(np.float32)
+        layer.backward(grad_out)
+        analytical_dw = layer.dw_signal.copy()
+
+        numerical_dw = np.zeros_like(layer.w_signal)
+        for b in range(layer.num_branches):
+            for i in range(layer.in_features):
+                for j in range(layer.out_features):
+                    orig = layer.w_signal[b, i, j]
+                    layer.w_signal[b, i, j] = orig + eps
+                    l_pos = np.sum(layer.forward(x) * grad_out)
+
+                    layer.w_signal[b, i, j] = orig - eps
+                    l_neg = np.sum(layer.forward(x) * grad_out)
+
+                    layer.w_signal[b, i, j] = orig
+                    numerical_dw[b, i, j] = (l_pos - l_neg) / (2 * eps)
+
+        rel_error = np.linalg.norm(analytical_dw - numerical_dw) / (
+            np.linalg.norm(analytical_dw) + np.linalg.norm(numerical_dw) + 1e-8
+        )
+        self.assertLess(rel_error, 1e-3)
+
+    def test_dendritic_dense_xor_in_single_layer(self):
+        """A single DendriticDense layer solves XOR without hidden layers."""
+        set_seed(42)
+        X = np.array([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], dtype=np.float32)
+        y = np.array([[0.0], [1.0], [1.0], [0.0]], dtype=np.float32)
+
+        model = Sequential([
+            DendriticDense(in_features=2, out_features=1, num_branches=2),
+            Sigmoid(),
+        ])
+        model.compile(optimizer=Adam(lr=0.1), loss=BinaryCrossEntropy())
+        model.fit(X, y, epochs=150, batch_size=4, verbose=0)
+
+        preds = (model.predict_proba(X) > 0.5).astype(np.float32)
+        np.testing.assert_array_equal(preds, y)
+
+    def test_chebyshev_kan_forward_backward_shapes(self):
+        kan = ChebyshevKAN(in_features=4, out_features=3, degree=3)
+        x = np.random.randn(5, 4).astype(np.float32)
+        out = kan.forward(x)
+        self.assertEqual(out.shape, (5, 3))
+
+        grad_out = np.ones_like(out)
+        dx = kan.backward(grad_out)
+        self.assertEqual(dx.shape, (5, 4))
+        self.assertEqual(kan.dw_base.shape, (4, 3))
+        self.assertEqual(kan.dc_poly.shape, (4, 3, 4))
+
+    def test_chebyshev_kan_gradient_check(self):
+        """Verify ChebyshevKAN analytical gradients against numerical finite differences."""
+        kan = ChebyshevKAN(in_features=3, out_features=2, degree=3)
+        x = np.random.randn(4, 3).astype(np.float32)
+        eps = 1e-4
+
+        out = kan.forward(x)
+        grad_out = np.random.randn(*out.shape).astype(np.float32)
+        kan.backward(grad_out)
+        analytical_dc = kan.dc_poly.copy()
+
+        numerical_dc = np.zeros_like(kan.c_poly)
+        for i in range(kan.in_features):
+            for j in range(kan.out_features):
+                for k in range(kan.degree + 1):
+                    orig = kan.c_poly[i, j, k]
+                    kan.c_poly[i, j, k] = orig + eps
+                    l_pos = np.sum(kan.forward(x) * grad_out)
+
+                    kan.c_poly[i, j, k] = orig - eps
+                    l_neg = np.sum(kan.forward(x) * grad_out)
+
+                    kan.c_poly[i, j, k] = orig
+                    numerical_dc[i, j, k] = (l_pos - l_neg) / (2 * eps)
+
+        rel_error = np.linalg.norm(analytical_dc - numerical_dc) / (
+            np.linalg.norm(analytical_dc) + np.linalg.norm(numerical_dc) + 1e-8
+        )
+        self.assertLess(rel_error, 1e-3)
+
+    def test_chebyshev_kan_nonlinear_function_learning(self):
+        """Verify ChebyshevKAN learns non-linear polynomial interaction y = x1^2 - x2."""
+        set_seed(42)
+        X = np.random.uniform(-1.0, 1.0, size=(100, 2)).astype(np.float32)
+        y = (X[:, 0:1] ** 2 - X[:, 1:2]).astype(np.float32)
+
+        model = Sequential([
+            ChebyshevKAN(in_features=2, out_features=1, degree=4),
+        ])
+        model.compile(optimizer=Adam(lr=0.05), loss=MSELoss())
+        hist = model.fit(X, y, epochs=50, batch_size=16, verbose=0)
+        self.assertLess(hist["loss"][-1], hist["loss"][0])
+        self.assertLess(hist["loss"][-1], 0.05)
+
+    def test_bifurcated_dense_shapes_and_gradient(self):
+        set_seed(42)
+        layer = BifurcatedDense(in_features=3, out_features=2, temperature=1.0)
+        x = np.random.randn(4, 3).astype(np.float32)
+
+        # 2D and 3D shapes
+        out2d = layer.forward(x)
+        self.assertEqual(out2d.shape, (4, 2))
+        dx2d = layer.backward(np.ones_like(out2d))
+        self.assertEqual(dx2d.shape, (4, 3))
+
+        x3d = np.random.randn(2, 5, 3).astype(np.float32)
+        out3d = layer.forward(x3d)
+        self.assertEqual(out3d.shape, (2, 5, 2))
+        dx3d = layer.backward(np.ones_like(out3d))
+        self.assertEqual(dx3d.shape, (2, 5, 3))
+
+        # Finite-difference gradient check for input x
+        eps = 1e-4
+        grad_out = np.random.randn(4, 2).astype(np.float32)
+        layer.forward(x)
+        analytical_dx = layer.backward(grad_out)
+
+        numerical_dx = np.zeros_like(x)
+        for i in range(x.shape[0]):
+            for j in range(x.shape[1]):
+                orig = x[i, j]
+                x[i, j] = orig + eps
+                out_pos = layer.forward(x)
+                loss_pos = np.sum(out_pos * grad_out)
+
+                x[i, j] = orig - eps
+                out_neg = layer.forward(x)
+                loss_neg = np.sum(out_neg * grad_out)
+
+                x[i, j] = orig
+                numerical_dx[i, j] = (loss_pos - loss_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical_dx - numerical_dx) / (
+            np.linalg.norm(analytical_dx) + np.linalg.norm(numerical_dx) + 1e-8
+        )
+        self.assertLess(rel_err, 1e-3)
+
+        # Serialization
+        cfg = layer.to_dict()
+        self.assertEqual(cfg["type"], "BifurcatedDense")
+        restored = BifurcatedDense.from_dict(cfg)
+        self.assertEqual(restored.in_features, 3)
+        self.assertEqual(restored.out_features, 2)
+
+    def test_reflective_dense_shapes_and_gradient(self):
+        set_seed(42)
+        layer = ReflectiveDense(in_features=3, out_features=2, reflection_steps=2, alpha=0.5)
+        x = np.random.randn(4, 3).astype(np.float32)
+
+        # 2D and 3D shapes
+        out2d = layer.forward(x)
+        self.assertEqual(out2d.shape, (4, 2))
+        dx2d = layer.backward(np.ones_like(out2d))
+        self.assertEqual(dx2d.shape, (4, 3))
+
+        x3d = np.random.randn(2, 5, 3).astype(np.float32)
+        out3d = layer.forward(x3d)
+        self.assertEqual(out3d.shape, (2, 5, 2))
+        dx3d = layer.backward(np.ones_like(out3d))
+        self.assertEqual(dx3d.shape, (2, 5, 3))
+
+        # Finite-difference gradient check for input x across iterative reflection
+        eps = 1e-3
+        grad_out = np.random.randn(4, 2).astype(np.float32)
+        layer.forward(x)
+        analytical_dx = layer.backward(grad_out)
+
+        numerical_dx = np.zeros_like(x)
+        for i in range(x.shape[0]):
+            for j in range(x.shape[1]):
+                orig = x[i, j]
+                x[i, j] = orig + eps
+                out_pos = layer.forward(x)
+                loss_pos = np.sum(out_pos * grad_out)
+
+                x[i, j] = orig - eps
+                out_neg = layer.forward(x)
+                loss_neg = np.sum(out_neg * grad_out)
+
+                x[i, j] = orig
+                numerical_dx[i, j] = (loss_pos - loss_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical_dx - numerical_dx) / (
+            np.linalg.norm(analytical_dx) + np.linalg.norm(numerical_dx) + 1e-8
+        )
+        self.assertLess(rel_err, 1e-3)
+
+        # Serialization
+        cfg = layer.to_dict()
+        self.assertEqual(cfg["type"], "ReflectiveDense")
+        restored = ReflectiveDense.from_dict(cfg)
+        self.assertEqual(restored.in_features, 3)
+        self.assertEqual(restored.out_features, 2)
+        self.assertEqual(restored.reflection_steps, 2)
+
+    def test_inverter_activation(self):
+        inv = Inverter()
+        x = np.array([[-2.0, 0.0, 3.5]], dtype=np.float32)
+        out = inv.forward(x)
+        np.testing.assert_allclose(out, [[2.0, 0.0, -3.5]])
+        grad_out = np.array([[1.0, -1.0, 0.5]], dtype=np.float32)
+        dx = inv.backward(grad_out)
+        np.testing.assert_allclose(dx, [[-1.0, 1.0, -0.5]])
+
+        # Serialization
+        cfg = inv.to_dict()
+        self.assertEqual(cfg["type"], "Inverter")
+        restored = Inverter.from_dict(cfg)
+        self.assertIsInstance(restored, Inverter)
+
+    def test_inverted_dense_shapes_and_gradient(self):
+        set_seed(42)
+        layer = InvertedDense(in_features=4, out_features=3, init_inverted=False)
+        x = np.random.randn(5, 4).astype(np.float32)
+
+        out2d = layer.forward(x)
+        self.assertEqual(out2d.shape, (5, 3))
+        dx2d = layer.backward(np.ones_like(out2d))
+        self.assertEqual(dx2d.shape, (5, 4))
+
+        # Check gradient with eps=1e-3
+        eps = 1e-3
+        grad_out = np.random.randn(5, 3).astype(np.float32)
+        layer.forward(x)
+        analytical_dx = layer.backward(grad_out)
+
+        numerical_dx = np.zeros_like(x)
+        for i in range(x.shape[0]):
+            for j in range(x.shape[1]):
+                orig = x[i, j]
+                x[i, j] = orig + eps
+                l_pos = np.sum(layer.forward(x) * grad_out)
+
+                x[i, j] = orig - eps
+                l_neg = np.sum(layer.forward(x) * grad_out)
+
+                x[i, j] = orig
+                numerical_dx[i, j] = (l_pos - l_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical_dx - numerical_dx) / (
+            np.linalg.norm(analytical_dx) + np.linalg.norm(numerical_dx) + 1e-8
+        )
+        self.assertLess(rel_err, 1e-3)
+
+        # Inversion logic check: switch to fully inverted mode
+        layer.inversion_logits[:] = 10.0
+        out_inverted = layer.forward(x)
+        layer.inversion_logits[:] = -10.0
+        out_standard = layer.forward(x)
+        np.testing.assert_allclose(out_inverted, -out_standard, rtol=1e-3, atol=1e-3)
+
+        # Serialization
+        cfg = layer.to_dict()
+        self.assertEqual(cfg["type"], "InvertedDense")
+        restored = InvertedDense.from_dict(cfg)
+        self.assertEqual(restored.in_features, 4)
+        self.assertEqual(restored.out_features, 3)
+
+    def test_tensor4d_dense_shapes_and_gradient(self):
+        set_seed(42)
+        layer = Tensor4DDense(in_channels=3, out_channels=5)
+        # 4D tensor: (Batch, Time, Space, Channels)
+        x = np.random.randn(2, 4, 6, 3).astype(np.float32)
+
+        out4d = layer.forward(x)
+        self.assertEqual(out4d.shape, (2, 4, 6, 5))
+        dx4d = layer.backward(np.ones_like(out4d))
+        self.assertEqual(dx4d.shape, (2, 4, 6, 3))
+
+        # Finite difference gradient check on 4D input
+        eps = 1e-3
+        grad_out = np.random.randn(2, 4, 6, 5).astype(np.float32)
+        layer.forward(x)
+        analytical_dx = layer.backward(grad_out)
+
+        # Test sample elements
+        for b in range(2):
+            for t in range(2):
+                for s in range(2):
+                    for c in range(3):
+                        orig = x[b, t, s, c]
+                        x[b, t, s, c] = orig + eps
+                        l_pos = np.sum(layer.forward(x) * grad_out)
+                        x[b, t, s, c] = orig - eps
+                        l_neg = np.sum(layer.forward(x) * grad_out)
+                        x[b, t, s, c] = orig
+                        num_grad = (l_pos - l_neg) / (2 * eps)
+                        np.testing.assert_allclose(analytical_dx[b, t, s, c], num_grad, rtol=1e-3, atol=1e-3)
+
+        # Serialization
+        cfg = layer.to_dict()
+        self.assertEqual(cfg["type"], "Tensor4DDense")
+        restored = Tensor4DDense.from_dict(cfg)
+        self.assertEqual(restored.in_channels, 3)
+        self.assertEqual(restored.out_channels, 5)
+
+    def test_complex_wave_dense_shapes_and_gradient(self):
+        set_seed(42)
+        # Real-output mode (magnitude)
+        layer_mag = ComplexWaveDense(in_features=3, out_features=2, return_complex=False)
+        x_real = np.random.randn(4, 3).astype(np.float32)
+        out_mag = layer_mag.forward(x_real)
+        self.assertEqual(out_mag.shape, (4, 2))
+        self.assertTrue((out_mag >= 0.0).all())
+
+        # Gradient check for real-output mode
+        eps = 1e-3
+        grad_out = np.random.randn(4, 2).astype(np.float32)
+        layer_mag.forward(x_real)
+        analytical_dx = layer_mag.backward(grad_out)
+
+        numerical_dx = np.zeros_like(x_real)
+        for i in range(x_real.shape[0]):
+            for j in range(x_real.shape[1]):
+                orig = x_real[i, j]
+                x_real[i, j] = orig + eps
+                l_pos = np.sum(layer_mag.forward(x_real) * grad_out)
+                x_real[i, j] = orig - eps
+                l_neg = np.sum(layer_mag.forward(x_real) * grad_out)
+                x_real[i, j] = orig
+                numerical_dx[i, j] = (l_pos - l_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical_dx - numerical_dx) / (
+            np.linalg.norm(analytical_dx) + np.linalg.norm(numerical_dx) + 1e-8
+        )
+        self.assertLess(rel_err, 1e-3)
+
+        # Complex-output mode with complex input: (Batch, In, 2)
+        layer_comp = ComplexWaveDense(in_features=3, out_features=2, return_complex=True)
+        x_comp = np.random.randn(4, 3, 2).astype(np.float32)
+        out_comp = layer_comp.forward(x_comp)
+        self.assertEqual(out_comp.shape, (4, 2, 2))
+
+        # Destructive phase cancellation check
+        # Opposite phases (phase difference pi: e.g. [1.0, 0.0] and [-1.0, 0.0])
+        x_c1 = np.array([[[1.0, 0.5]]], dtype=np.float32)
+        x_c2 = np.array([[[-1.0, -0.5]]], dtype=np.float32)
+        layer_zero_b = ComplexWaveDense(in_features=1, out_features=1, return_complex=True, use_bias=False)
+        y1 = layer_zero_b.forward(x_c1)
+        y2 = layer_zero_b.forward(x_c2)
+        # Sum of signals with 180-deg phase shift destructively cancel: y1 + y2 == 0
+        np.testing.assert_allclose(y1 + y2, np.zeros_like(y1), atol=1e-6)
+
+        # Serialization check
+        cfg = layer_mag.to_dict()
+        self.assertEqual(cfg["type"], "ComplexWaveDense")
+        restored = ComplexWaveDense.from_dict(cfg)
+        self.assertEqual(restored.in_features, 3)
+        self.assertEqual(restored.out_features, 2)
+        self.assertFalse(restored.return_complex)
+
+    def test_fractal_chaos_dense_shapes_and_gradient(self):
+        set_seed(42)
+        layer = FractalChaosDense(in_features=3, out_features=2, r_init=3.7)
+        x2d = np.random.randn(4, 3).astype(np.float32)
+        out2d = layer.forward(x2d)
+        self.assertEqual(out2d.shape, (4, 2))
+        dx2d = layer.backward(np.ones_like(out2d))
+        self.assertEqual(dx2d.shape, (4, 3))
+
+        # 3D tensor support
+        x3d = np.random.randn(2, 5, 3).astype(np.float32)
+        out3d = layer.forward(x3d)
+        self.assertEqual(out3d.shape, (2, 5, 2))
+        dx3d = layer.backward(np.ones_like(out3d))
+        self.assertEqual(dx3d.shape, (2, 5, 3))
+
+        # Finite difference gradient check
+        eps = 1e-3
+        grad_out = np.random.randn(4, 2).astype(np.float32)
+        layer.forward(x2d)
+        analytical_dx = layer.backward(grad_out)
+
+        numerical_dx = np.zeros_like(x2d)
+        for i in range(x2d.shape[0]):
+            for j in range(x2d.shape[1]):
+                orig = x2d[i, j]
+                x2d[i, j] = orig + eps
+                l_pos = np.sum(layer.forward(x2d) * grad_out)
+                x2d[i, j] = orig - eps
+                l_neg = np.sum(layer.forward(x2d) * grad_out)
+                x2d[i, j] = orig
+                numerical_dx[i, j] = (l_pos - l_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical_dx - numerical_dx) / (
+            np.linalg.norm(analytical_dx) + np.linalg.norm(numerical_dx) + 1e-8
+        )
+        self.assertLess(rel_err, 1e-3)
+
+        # Serialization
+        cfg = layer.to_dict()
+        self.assertEqual(cfg["type"], "FractalChaosDense")
+        restored = FractalChaosDense.from_dict(cfg)
+        self.assertEqual(restored.in_features, 3)
+        self.assertEqual(restored.out_features, 2)
+
+    def test_tunneling_dense_shapes_and_gradient(self):
+        set_seed(42)
+        layer = TunnelingDense(in_features=3, out_features=2, tau=1.0)
+        x2d = np.random.randn(4, 3).astype(np.float32)
+        out2d = layer.forward(x2d)
+        self.assertEqual(out2d.shape, (4, 2))
+        dx2d = layer.backward(np.ones_like(out2d))
+        self.assertEqual(dx2d.shape, (4, 3))
+
+        # Dead neuron immunity test:
+        # Heavily negative inputs far below barrier threshold V=0.5
+        x_deep_negative = np.full((2, 3), -10.0, dtype=np.float32)
+        out_sub = layer.forward(x_deep_negative)
+        dx_sub = layer.backward(np.ones_like(out_sub))
+        # Unlike ReLU where gradient is strictly 0.0, Tunneling maintains non-zero backpropagation
+        self.assertTrue((np.abs(dx_sub) > 0.0).all())
+
+        # Finite difference gradient check
+        eps = 1e-3
+        grad_out = np.random.randn(4, 2).astype(np.float32)
+        layer.forward(x2d)
+        analytical_dx = layer.backward(grad_out)
+
+        numerical_dx = np.zeros_like(x2d)
+        for i in range(x2d.shape[0]):
+            for j in range(x2d.shape[1]):
+                orig = x2d[i, j]
+                x2d[i, j] = orig + eps
+                l_pos = np.sum(layer.forward(x2d) * grad_out)
+                x2d[i, j] = orig - eps
+                l_neg = np.sum(layer.forward(x2d) * grad_out)
+                x2d[i, j] = orig
+                numerical_dx[i, j] = (l_pos - l_neg) / (2 * eps)
+
+        rel_err = np.linalg.norm(analytical_dx - numerical_dx) / (
+            np.linalg.norm(analytical_dx) + np.linalg.norm(numerical_dx) + 1e-8
+        )
+        self.assertLess(rel_err, 1e-3)
+
+        # Serialization
+        cfg = layer.to_dict()
+        self.assertEqual(cfg["type"], "TunnelingDense")
+        restored = TunnelingDense.from_dict(cfg)
+        self.assertEqual(restored.in_features, 3)
+        self.assertEqual(restored.out_features, 2)
+        self.assertEqual(restored.tau, 1.0)
 
 
 class TestOptimizers(unittest.TestCase):
@@ -404,6 +906,28 @@ class TestModelAndSerialization(unittest.TestCase):
 
             np.testing.assert_allclose(orig_out, loaded_out, rtol=1e-6, atol=1e-6)
             self.assertEqual(len(model.layers), len(loaded.layers))
+
+    def test_novel_neurons_serialization_roundtrip(self):
+        import tempfile
+        from pathlib import Path
+
+        set_seed(42)
+        model = Sequential([
+            DendriticDense(in_features=4, out_features=6, num_branches=3),
+            ChebyshevKAN(in_features=6, out_features=2, degree=3),
+        ])
+        x = np.random.randn(3, 4).astype(np.float32)
+        orig_out = model.forward(x)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "novel_neurons_model"
+            save_model(model, model_path)
+
+            loaded = load_model(model_path)
+            loaded_out = loaded.forward(x)
+            np.testing.assert_allclose(orig_out, loaded_out, rtol=1e-6, atol=1e-6)
+            self.assertIsInstance(loaded.layers[0], DendriticDense)
+            self.assertIsInstance(loaded.layers[1], ChebyshevKAN)
 
 
 class TestRegression(unittest.TestCase):
@@ -702,6 +1226,52 @@ class TestAttentionAndTransformers(unittest.TestCase):
         out_eval1 = tb.forward(x)
         out_eval2 = tb.forward(x)
         np.testing.assert_allclose(out_eval1, out_eval2)
+
+    def test_kan_transformer_block_forward_backward(self):
+        ktb = KANTransformerBlock(d_model=8, num_heads=2, d_ff=16, degree=3, dropout=0.2)
+        x = np.random.randn(2, 5, 8).astype(np.float32)
+
+        ktb.train(True)
+        out_train = ktb.forward(x)
+        self.assertEqual(out_train.shape, (2, 5, 8))
+        dx_train = ktb.backward(np.ones_like(out_train))
+        self.assertEqual(dx_train.shape, (2, 5, 8))
+
+        ktb.eval()
+        out_eval1 = ktb.forward(x)
+        out_eval2 = ktb.forward(x)
+        np.testing.assert_allclose(out_eval1, out_eval2)
+
+        # Serialization
+        cfg = ktb.to_dict()
+        self.assertEqual(cfg["type"], "KANTransformerBlock")
+        restored = KANTransformerBlock.from_dict(cfg)
+        self.assertEqual(restored.d_model, 8)
+        self.assertEqual(restored.d_ff, 16)
+        self.assertEqual(restored.degree, 3)
+
+    def test_dendritic_transformer_block_forward_backward(self):
+        dtb = DendriticTransformerBlock(d_model=8, num_heads=2, d_ff=16, num_branches=2, dropout=0.2)
+        x = np.random.randn(2, 5, 8).astype(np.float32)
+
+        dtb.train(True)
+        out_train = dtb.forward(x)
+        self.assertEqual(out_train.shape, (2, 5, 8))
+        dx_train = dtb.backward(np.ones_like(out_train))
+        self.assertEqual(dx_train.shape, (2, 5, 8))
+
+        dtb.eval()
+        out_eval1 = dtb.forward(x)
+        out_eval2 = dtb.forward(x)
+        np.testing.assert_allclose(out_eval1, out_eval2)
+
+        # Serialization
+        cfg = dtb.to_dict()
+        self.assertEqual(cfg["type"], "DendriticTransformerBlock")
+        restored = DendriticTransformerBlock.from_dict(cfg)
+        self.assertEqual(restored.d_model, 8)
+        self.assertEqual(restored.d_ff, 16)
+        self.assertEqual(restored.num_branches, 2)
 
 
 class TestSchedulers(unittest.TestCase):
@@ -1268,6 +1838,124 @@ class TestChatSession(unittest.TestCase):
         self.assertEqual(len(session.messages), 0)
 
 
+class TestLLMContinualTraining(unittest.TestCase):
+    """Tests for LLM checkpoint saving, reloading, and iterative training loops."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.llm = load_pretrained_llm("stories260K")
+        except Exception as e:
+            cls.llm = None
+
+    def setUp(self):
+        if self.llm is None:
+            self.skipTest("Pretrained LLM model not available")
+
+    def test_llm_save_and_reload_checkpoint(self):
+        import tempfile
+        from pathlib import Path
+        import doraneural as dn
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "ckpt_test.bin"
+            self.llm.save(save_path)
+            self.assertTrue(save_path.exists())
+            self.assertGreater(save_path.stat().st_size, 100_000)
+
+            # Reload saved checkpoint
+            reloaded = dn.LlamaLLM(
+                model_path=save_path,
+                tokenizer_path=self.llm.tokenizer_path,
+                backend="auto",
+            )
+            self.assertEqual(reloaded.config.dim, self.llm.config.dim)
+            self.assertEqual(reloaded.config.n_layers, self.llm.config.n_layers)
+
+            # Test generation
+            gen = reloaded.generate("Once upon a time", max_tokens=10)
+            self.assertTrue(gen.startswith("Once upon a time"))
+
+    def test_continual_training_loop(self):
+        import tempfile
+        from pathlib import Path
+        import doraneural as dn
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ckpt_1 = Path(tmpdir) / "ckpt_stage1.bin"
+            ckpt_2 = Path(tmpdir) / "ckpt_stage2.bin"
+
+            # Stage 1: Train on first domain
+            corpus1 = "The little robot named Sparky repaired the telescope on the hill."
+            hist1 = self.llm.train(corpus1, epochs=2, lr=1e-3, seq_len=8, verbose=0)
+            self.assertIn("loss", hist1)
+            self.llm.save(ckpt_1)
+
+            # Stage 2: Load checkpoint 1 into new instance and train on second domain
+            llm_stage2 = dn.LlamaLLM(
+                model_path=ckpt_1,
+                tokenizer_path=self.llm.tokenizer_path,
+                backend="auto",
+            )
+            corpus2 = "Sparky transmitted radio signals to the purple star in Orion."
+            hist2 = llm_stage2.train(corpus2, epochs=2, lr=1e-3, seq_len=8, verbose=0)
+            self.assertIn("loss", hist2)
+            llm_stage2.save(ckpt_2)
+
+            self.assertTrue(ckpt_2.exists())
+            self.assertEqual(ckpt_2.stat().st_size, ckpt_1.stat().st_size)
+
+    def test_train_llm_runner_cli(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        import json
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "scripts" / "train_llm.py"
+        data_file = repo_root / "data" / "dataset_1_robot_adventures.txt"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd = [
+                sys.executable,
+                str(script),
+                "--data", str(data_file),
+                "--output-dir", tmpdir,
+                "--epochs", "1",
+                "--tag", "unit_test_run",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"Runner failed: {res.stderr}")
+
+            # Verify latest.bin and checkpoint_meta.json
+            latest_bin = Path(tmpdir) / "latest.bin"
+            meta_json = Path(tmpdir) / "checkpoint_meta.json"
+            self.assertTrue(latest_bin.exists())
+            self.assertTrue(meta_json.exists())
+
+            with open(meta_json, "r") as f:
+                meta = json.load(f)
+            self.assertEqual(meta["latest"]["run_id"], "unit_test_run")
+            self.assertIn("loss_history", meta["latest"])
+
+    def test_huggingface_dataset_download_and_detection(self):
+        import tempfile
+        from pathlib import Path
+        from doraneural.hf_dataset import download_hf_dataset, is_hf_dataset_identifier
+
+        self.assertTrue(is_hf_dataset_identifier("roneneldan/TinyStories"))
+        self.assertFalse(is_hf_dataset_identifier("data/train.txt"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_txt = Path(tmpdir) / "hf_sample.txt"
+            cached = download_hf_dataset("roneneldan/TinyStories", max_samples=3, target_path=out_txt)
+            self.assertTrue(cached.exists())
+            self.assertGreater(cached.stat().st_size, 50)
+            text = cached.read_text(encoding="utf-8")
+            self.assertGreater(len(text), 10)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -10,7 +10,7 @@ Provides:
 from typing import Optional, Tuple, Dict, Any
 import numpy as np
 from .base import Layer
-from .layers import LayerNorm, Dropout, Dense
+from .layers import LayerNorm, Dropout, Dense, DendriticDense, ChebyshevKAN
 from .activations import ReLU
 
 
@@ -387,3 +387,250 @@ class TransformerBlock(Layer):
             dropout=config.get("dropout", 0.0),
             causal=config.get("causal", False),
         )
+
+
+class KANTransformerBlock(Layer):
+    """Transformer Block utilizing Kolmogorov-Arnold Network (KAN) feedforward layers.
+
+    Replaces the standard fixed-activation MLP with Chebyshev polynomial basis expansion layers:
+        x1 = x + Dropout(MultiHeadAttention(LayerNorm(x)))
+        out = x1 + Dropout(ChebyshevKAN_2(ChebyshevKAN_1(LayerNorm(x1))))
+
+    Args:
+        d_model (int): Embedding and attention dimension.
+        num_heads (int): Number of attention heads.
+        d_ff (int): Hidden dimension of inner KAN layers.
+        degree (int): Chebyshev polynomial degree on synaptic edges (default: 3).
+        dropout (float): Dropout probability.
+        causal (bool): Whether to use causal autoregressive attention mask.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int = 4,
+        d_ff: int = 32,
+        degree: int = 3,
+        dropout: float = 0.0,
+        causal: bool = False,
+        dtype: np.dtype = np.float32,
+    ) -> None:
+        super().__init__()
+        self.d_model = int(d_model)
+        self.num_heads = int(num_heads)
+        self.d_ff = int(d_ff)
+        self.degree = int(degree)
+        self.dropout_rate = float(dropout)
+        self.causal = bool(causal)
+        self.dtype = dtype
+        self.trainable = True
+
+        self.ln1 = LayerNorm(normalized_shape=self.d_model)
+        self.mha = MultiHeadAttention(d_model=self.d_model, num_heads=self.num_heads, causal=self.causal)
+        self.drop1 = Dropout(drop_rate=self.dropout_rate)
+
+        self.ln2 = LayerNorm(normalized_shape=self.d_model)
+        self.kan1 = ChebyshevKAN(in_features=self.d_model, out_features=self.d_ff, degree=self.degree)
+        self.kan2 = ChebyshevKAN(in_features=self.d_ff, out_features=self.d_model, degree=self.degree)
+        self.drop2 = Dropout(drop_rate=self.dropout_rate)
+
+        self._sublayers = [self.ln1, self.mha, self.drop1, self.ln2, self.kan1, self.kan2, self.drop2]
+        for sub_idx, sub in enumerate(self._sublayers):
+            for p_name, param in sub.get_params().items():
+                self._params[f"sub_{sub_idx}_{p_name}"] = param
+            for g_name, grad in sub.get_grads().items():
+                self._grads[f"sub_{sub_idx}_{g_name}"] = grad
+
+        self._cache_residual: Optional[Tuple[np.ndarray, np.ndarray]] = None
+
+    def train(self, mode: bool = True) -> "KANTransformerBlock":
+        super().train(mode)
+        for sub in self._sublayers:
+            sub.train(mode)
+        return self
+
+    def eval(self) -> "KANTransformerBlock":
+        return self.train(False)
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        # Sublayer 1: Pre-LN Attention + Residual
+        norm1 = self.ln1.forward(x)
+        attn_out = self.mha.forward(norm1)
+        x1 = x + self.drop1.forward(attn_out)
+
+        # Sublayer 2: Pre-LN KAN Feed-Forward + Residual
+        norm2 = self.ln2.forward(x1)
+        kan_out = self.kan2.forward(self.kan1.forward(norm2))
+        out = x1 + self.drop2.forward(kan_out)
+
+        self._cache_residual = (x, x1)
+        return out
+
+    def backward(self, grad_output: np.ndarray) -> np.ndarray:
+        if self._cache_residual is None:
+            raise RuntimeError("KANTransformerBlock.backward called before forward pass.")
+
+        x, x1 = self._cache_residual
+        d_out = np.asarray(grad_output, dtype=self.dtype)
+
+        # Sublayer 2 backward (KAN + Residual)
+        d_drop2 = self.drop2.backward(d_out)
+        d_kan2 = self.kan2.backward(d_drop2)
+        d_kan1 = self.kan1.backward(d_kan2)
+        d_norm2 = self.ln2.backward(d_kan1)
+
+        d_x1 = d_out + d_norm2
+
+        # Sublayer 1 backward (Attn + Residual)
+        d_drop1 = self.drop1.backward(d_x1)
+        d_mha = self.mha.backward(d_drop1)
+        d_norm1 = self.ln1.backward(d_mha)
+
+        d_x = d_x1 + d_norm1
+        return d_x
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "KANTransformerBlock",
+            "d_model": self.d_model,
+            "num_heads": self.num_heads,
+            "d_ff": self.d_ff,
+            "degree": self.degree,
+            "dropout": self.dropout_rate,
+            "causal": self.causal,
+        }
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any]) -> "KANTransformerBlock":
+        return cls(
+            d_model=config["d_model"],
+            num_heads=config.get("num_heads", 4),
+            d_ff=config.get("d_ff", 32),
+            degree=config.get("degree", 3),
+            dropout=config.get("dropout", 0.0),
+            causal=config.get("causal", False),
+        )
+
+
+class DendriticTransformerBlock(Layer):
+    """Transformer Block utilizing Multi-Compartment Pyramidal Dendritic feedforward layers.
+
+    Replaces the standard MLP with multi-branch multiplicative dendritic gating:
+        x1 = x + Dropout(MultiHeadAttention(LayerNorm(x)))
+        out = x1 + Dropout(DendriticDense_2(DendriticDense_1(LayerNorm(x1))))
+
+    Args:
+        d_model (int): Embedding and attention dimension.
+        num_heads (int): Number of attention heads.
+        d_ff (int): Hidden dimension of inner dendritic layers.
+        num_branches (int): Number of dendritic compartments per neuron (default: 2).
+        dropout (float): Dropout probability.
+        causal (bool): Whether to use causal autoregressive attention mask.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int = 4,
+        d_ff: int = 32,
+        num_branches: int = 2,
+        dropout: float = 0.0,
+        causal: bool = False,
+        dtype: np.dtype = np.float32,
+    ) -> None:
+        super().__init__()
+        self.d_model = int(d_model)
+        self.num_heads = int(num_heads)
+        self.d_ff = int(d_ff)
+        self.num_branches = int(num_branches)
+        self.dropout_rate = float(dropout)
+        self.causal = bool(causal)
+        self.dtype = dtype
+        self.trainable = True
+
+        self.ln1 = LayerNorm(normalized_shape=self.d_model)
+        self.mha = MultiHeadAttention(d_model=self.d_model, num_heads=self.num_heads, causal=self.causal)
+        self.drop1 = Dropout(drop_rate=self.dropout_rate)
+
+        self.ln2 = LayerNorm(normalized_shape=self.d_model)
+        self.dend1 = DendriticDense(in_features=self.d_model, out_features=self.d_ff, num_branches=self.num_branches)
+        self.dend2 = DendriticDense(in_features=self.d_ff, out_features=self.d_model, num_branches=self.num_branches)
+        self.drop2 = Dropout(drop_rate=self.dropout_rate)
+
+        self._sublayers = [self.ln1, self.mha, self.drop1, self.ln2, self.dend1, self.dend2, self.drop2]
+        for sub_idx, sub in enumerate(self._sublayers):
+            for p_name, param in sub.get_params().items():
+                self._params[f"sub_{sub_idx}_{p_name}"] = param
+            for g_name, grad in sub.get_grads().items():
+                self._grads[f"sub_{sub_idx}_{g_name}"] = grad
+
+        self._cache_residual: Optional[Tuple[np.ndarray, np.ndarray]] = None
+
+    def train(self, mode: bool = True) -> "DendriticTransformerBlock":
+        super().train(mode)
+        for sub in self._sublayers:
+            sub.train(mode)
+        return self
+
+    def eval(self) -> "DendriticTransformerBlock":
+        return self.train(False)
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        # Sublayer 1: Pre-LN Attention + Residual
+        norm1 = self.ln1.forward(x)
+        attn_out = self.mha.forward(norm1)
+        x1 = x + self.drop1.forward(attn_out)
+
+        # Sublayer 2: Pre-LN Dendritic Feed-Forward + Residual
+        norm2 = self.ln2.forward(x1)
+        dend_out = self.dend2.forward(self.dend1.forward(norm2))
+        out = x1 + self.drop2.forward(dend_out)
+
+        self._cache_residual = (x, x1)
+        return out
+
+    def backward(self, grad_output: np.ndarray) -> np.ndarray:
+        if self._cache_residual is None:
+            raise RuntimeError("DendriticTransformerBlock.backward called before forward pass.")
+
+        x, x1 = self._cache_residual
+        d_out = np.asarray(grad_output, dtype=self.dtype)
+
+        # Sublayer 2 backward (Dendritic + Residual)
+        d_drop2 = self.drop2.backward(d_out)
+        d_dend2 = self.dend2.backward(d_drop2)
+        d_dend1 = self.dend1.backward(d_dend2)
+        d_norm2 = self.ln2.backward(d_dend1)
+
+        d_x1 = d_out + d_norm2
+
+        # Sublayer 1 backward (Attn + Residual)
+        d_drop1 = self.drop1.backward(d_x1)
+        d_mha = self.mha.backward(d_drop1)
+        d_norm1 = self.ln1.backward(d_mha)
+
+        d_x = d_x1 + d_norm1
+        return d_x
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "DendriticTransformerBlock",
+            "d_model": self.d_model,
+            "num_heads": self.num_heads,
+            "d_ff": self.d_ff,
+            "num_branches": self.num_branches,
+            "dropout": self.dropout_rate,
+            "causal": self.causal,
+        }
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any]) -> "DendriticTransformerBlock":
+        return cls(
+            d_model=config["d_model"],
+            num_heads=config.get("num_heads", 4),
+            d_ff=config.get("d_ff", 32),
+            num_branches=config.get("num_branches", 2),
+            dropout=config.get("dropout", 0.0),
+            causal=config.get("causal", False),
+        )
+

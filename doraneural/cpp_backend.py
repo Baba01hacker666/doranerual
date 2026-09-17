@@ -82,6 +82,9 @@ def build_cpp_library(force: bool = False) -> Optional[Path]:
         "-fPIC",
         "-std=c++17",
         "-fopenmp",
+        "-ffast-math",
+        "-march=native",
+        "-funroll-loops",
         str(cpp_file),
         "-o",
         str(so_file),
@@ -90,11 +93,18 @@ def build_cpp_library(force: bool = False) -> Optional[Path]:
     try:
         ret = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if ret.returncode != 0:
-            # Fallback without -fopenmp
-            cmd_no_omp = [compiler, "-O3", "-shared", "-fPIC", "-std=c++17", str(cpp_file), "-o", str(so_file)]
-            ret_no_omp = subprocess.run(cmd_no_omp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            if ret_no_omp.returncode != 0:
-                return None
+            # Fallback without -march=native
+            cmd_no_native = [compiler, "-O3", "-shared", "-fPIC", "-std=c++17", "-fopenmp", "-ffast-math", str(cpp_file), "-o", str(so_file)]
+            ret = subprocess.run(cmd_no_native, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if ret.returncode != 0:
+                # Fallback without -fopenmp
+                cmd_no_omp = [compiler, "-O3", "-shared", "-fPIC", "-std=c++17", "-ffast-math", str(cpp_file), "-o", str(so_file)]
+                ret = subprocess.run(cmd_no_omp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                if ret.returncode != 0:
+                    cmd_basic = [compiler, "-O3", "-shared", "-fPIC", "-std=c++17", str(cpp_file), "-o", str(so_file)]
+                    ret = subprocess.run(cmd_basic, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                    if ret.returncode != 0:
+                        return None
         return so_file if so_file.exists() else None
     except Exception:
         return None
@@ -158,6 +168,9 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
 
         lib.llama_set_threads.argtypes = [ctypes.c_int]
         lib.llama_set_threads.restype = None
+
+        lib.llama_sample_token.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float]
+        lib.llama_sample_token.restype = ctypes.c_int
 
         _LIB_HANDLE = lib
         return _LIB_HANDLE
@@ -232,11 +245,15 @@ class CppLlamaEngine:
         """Reset key-value cache arenas."""
         self.lib.llama_reset_cache(self.handle)
 
-    def forward(self, token: int, pos: int) -> np.ndarray:
-        """Run forward pass for a single token using C++ OpenMP engine."""
+    def forward(self, token: int, pos: int, copy_logits: bool = True) -> np.ndarray:
+        """Run forward pass for a single token using C++ OpenMP/SIMD engine."""
         ptr = self._logits_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
         self.lib.llama_forward(self.handle, int(token), int(pos), ptr)
-        return self._logits_buf.copy()
+        return self._logits_buf.copy() if copy_logits else self._logits_buf
+
+    def sample(self, temperature: float = 0.7, top_p: float = 0.9) -> int:
+        """Sample next token directly in C++ using fast partial-sort sampling."""
+        return int(self.lib.llama_sample_token(self.handle, float(temperature), float(top_p)))
 
     def generate(
         self,

@@ -11,14 +11,23 @@ from typing import Dict, Type, Any, Union
 import numpy as np
 
 from .base import Layer
-from .layers import Dense, Dropout, LayerNorm, Flatten, Conv2D, MaxPool2D
-from .activations import ReLU, Sigmoid, Softmax
+from .layers import Dense, Dropout, LayerNorm, Flatten, Conv2D, MaxPool2D, DendriticDense, ChebyshevKAN, BifurcatedDense, ReflectiveDense, InvertedDense, Tensor4DDense, ComplexWaveDense, FractalChaosDense, TunnelingDense
+from .activations import ReLU, Sigmoid, Softmax, Tanh, SiLU, Inverter
 from .recurrent import SimpleRNN, RNN, LSTM, GRU
-from .attention import PositionalEncoding, MultiHeadAttention, TransformerBlock
+from .attention import PositionalEncoding, MultiHeadAttention, TransformerBlock, KANTransformerBlock, DendriticTransformerBlock
 
 # Registry of serializable layer types
 LAYER_REGISTRY: Dict[str, Type[Layer]] = {
     "Dense": Dense,
+    "DendriticDense": DendriticDense,
+    "ChebyshevKAN": ChebyshevKAN,
+    "BifurcatedDense": BifurcatedDense,
+    "ReflectiveDense": ReflectiveDense,
+    "InvertedDense": InvertedDense,
+    "Tensor4DDense": Tensor4DDense,
+    "ComplexWaveDense": ComplexWaveDense,
+    "FractalChaosDense": FractalChaosDense,
+    "TunnelingDense": TunnelingDense,
     "Dropout": Dropout,
     "LayerNorm": LayerNorm,
     "Flatten": Flatten,
@@ -27,6 +36,9 @@ LAYER_REGISTRY: Dict[str, Type[Layer]] = {
     "ReLU": ReLU,
     "Sigmoid": Sigmoid,
     "Softmax": Softmax,
+    "Tanh": Tanh,
+    "SiLU": SiLU,
+    "Inverter": Inverter,
     "SimpleRNN": SimpleRNN,
     "RNN": RNN,
     "LSTM": LSTM,
@@ -34,6 +46,8 @@ LAYER_REGISTRY: Dict[str, Type[Layer]] = {
     "PositionalEncoding": PositionalEncoding,
     "MultiHeadAttention": MultiHeadAttention,
     "TransformerBlock": TransformerBlock,
+    "KANTransformerBlock": KANTransformerBlock,
+    "DendriticTransformerBlock": DendriticTransformerBlock,
 }
 
 

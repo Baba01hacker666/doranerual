@@ -200,3 +200,138 @@ class Softmax(Layer):
     def from_dict(cls, config: Dict[str, Any]) -> "Softmax":
         """Reconstruct Softmax from configuration."""
         return cls(axis=config.get("axis", -1))
+
+
+class Tanh(Layer):
+    """Hyperbolic Tangent activation function.
+
+    Applies the element-wise function:
+        f(x) = tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+
+    Derivative:
+        f'(x) = 1 - tanh(x)^2
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trainable: bool = False
+        self._output_cache: Optional[np.ndarray] = None
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """Apply Tanh activation forward pass."""
+        x_arr = np.asarray(x, dtype=np.float32)
+        out = np.tanh(x_arr)
+        self._output_cache = out
+        return out
+
+    def backward(self, grad_output: np.ndarray) -> np.ndarray:
+        """Compute backward gradient through Tanh."""
+        if self._output_cache is None:
+            raise RuntimeError("Tanh.backward called before forward pass.")
+
+        grad_out = np.asarray(grad_output, dtype=np.float32)
+        if grad_out.shape != self._output_cache.shape:
+            raise ValueError(
+                f"Gradient shape {grad_out.shape} does not match cached output shape {self._output_cache.shape}."
+            )
+
+        return grad_out * (1.0 - self._output_cache ** 2)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize Tanh configuration for JSON export."""
+        return {"type": "Tanh"}
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any]) -> "Tanh":
+        """Reconstruct Tanh from configuration."""
+        return cls()
+
+
+class SiLU(Layer):
+    """Sigmoid Linear Unit (SiLU / Swish) activation function.
+
+    Applies the element-wise function:
+        f(x) = x * sigmoid(x) = x / (1 + exp(-x))
+
+    Derivative:
+        f'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+              = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trainable: bool = False
+        self._input_cache: Optional[np.ndarray] = None
+        self._sig_cache: Optional[np.ndarray] = None
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """Apply SiLU activation forward pass."""
+        x_arr = np.asarray(x, dtype=np.float32)
+        x_clipped = np.clip(x_arr, -88.0, 88.0)
+        sig = 1.0 / (1.0 + np.exp(-x_clipped))
+        self._input_cache = x_arr
+        self._sig_cache = sig
+        return x_arr * sig
+
+    def backward(self, grad_output: np.ndarray) -> np.ndarray:
+        """Compute backward gradient through SiLU."""
+        if self._input_cache is None or self._sig_cache is None:
+            raise RuntimeError("SiLU.backward called before forward pass.")
+
+        grad_out = np.asarray(grad_output, dtype=np.float32)
+        if grad_out.shape != self._input_cache.shape:
+            raise ValueError(
+                f"Gradient shape {grad_out.shape} does not match cached input shape {self._input_cache.shape}."
+            )
+
+        x = self._input_cache
+        sig = self._sig_cache
+        dsilu_dx = sig * (1.0 + x * (1.0 - sig))
+        return grad_out * dsilu_dx
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize SiLU configuration for JSON export."""
+        return {"type": "SiLU"}
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any]) -> "SiLU":
+        """Reconstruct SiLU from configuration."""
+        return cls()
+
+
+class Inverter(Layer):
+    """Signal Polarity Inverter Activation Layer.
+
+    Applies element-wise sign inversion:
+        f(x) = -x
+
+    Derivative:
+        f'(x) = -1
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trainable = False
+        self._input_shape = None
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """Invert signal polarity forward pass."""
+        x_arr = np.asarray(x, dtype=np.float32)
+        self._input_shape = x_arr.shape
+        return -x_arr
+
+    def backward(self, grad_output: np.ndarray) -> np.ndarray:
+        """Invert signal polarity backward pass."""
+        grad_out = np.asarray(grad_output, dtype=np.float32)
+        return -grad_out
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize Inverter configuration for JSON export."""
+        return {"type": "Inverter"}
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any]) -> "Inverter":
+        """Reconstruct Inverter from configuration."""
+        return cls()
+
+

@@ -21,6 +21,8 @@ dist/
 current_model.*
 .doraneural.json
 models/
+checkpoints/*.bin
+zexo/checkpoints/*.bin
 
 # IDE and OS files
 .DS_Store
