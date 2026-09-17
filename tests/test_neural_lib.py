@@ -90,7 +90,9 @@ from doraneural import (
     inspect_dnb,
     LlamaLLM,
     LlamaTokenizer,
+    HFTokenizer,
     load_pretrained_llm,
+    load_safetensors,
     is_cpp_available,
     CppLlamaEngine,
 )
@@ -1152,6 +1154,63 @@ class TestLlamaLLM(unittest.TestCase):
             saved = llm.save(save_path)
             self.assertTrue(saved.exists())
             self.assertEqual(saved.stat().st_size, 1056540)
+
+    def test_hf_safetensors_tiny_llm(self):
+        """Test loading arnir0/Tiny-LLM from safetensors + tokenizer.json."""
+        try:
+            llm = load_pretrained_llm("arnir0/Tiny-LLM", cache_dir="models/arnir0_Tiny-LLM")
+        except Exception as e:
+            self.skipTest(f"Skipping HF Tiny-LLM test: {e}")
+
+        # Config check
+        self.assertEqual(llm.config.dim, 192)
+        self.assertEqual(llm.config.hidden_dim, 1024)
+        self.assertEqual(llm.config.n_layers, 1)
+        self.assertEqual(llm.config.n_heads, 2)
+        self.assertEqual(llm.config.n_kv_heads, 1)
+        self.assertEqual(llm.config.vocab_size, 32000)
+        self.assertEqual(llm.config.rope_type, "hf")
+        self.assertIsInstance(llm.tokenizer, HFTokenizer)
+
+        # Tokenizer round-trip
+        text = "The cat sat on the mat"
+        tokens = llm.tokenizer.encode(text, bos=True)
+        self.assertEqual(tokens[0], 1)  # BOS
+        self.assertGreater(len(tokens), 3)
+        decoded = llm.tokenizer.decode(tokens)
+        self.assertEqual(decoded, text)
+
+        # Forward pass produces valid logits
+        llm.reset_cache()
+        logits = llm.forward(1, 0)
+        self.assertEqual(logits.shape, (32000,))
+        self.assertFalse(np.isnan(logits).any())
+        self.assertFalse(np.isinf(logits).any())
+
+        # Generation produces non-empty text
+        text_out = llm.generate(prompt="The cat", max_tokens=10, temperature=0.7)
+        self.assertTrue(text_out.startswith("The cat"))
+        self.assertGreater(len(text_out), len("The cat"))
+
+    def test_hf_tiny_llm_cpp_numpy_parity(self):
+        """Verify C++ and NumPy forward passes match for HF safetensors model."""
+        if not is_cpp_available():
+            self.skipTest("C++ engine not available")
+
+        try:
+            llm_np = load_pretrained_llm("arnir0/Tiny-LLM", cache_dir="models/arnir0_Tiny-LLM", backend="numpy")
+            llm_cpp = load_pretrained_llm("arnir0/Tiny-LLM", cache_dir="models/arnir0_Tiny-LLM", backend="cpp")
+        except Exception as e:
+            self.skipTest(f"Skipping HF parity test: {e}")
+
+        llm_np.reset_cache()
+        np_logits = llm_np.forward(1, 0)
+
+        llm_cpp.reset_cache()
+        cpp_logits = llm_cpp.forward(1, 0)
+
+        self.assertEqual(int(np.argmax(np_logits)), int(np.argmax(cpp_logits)))
+        np.testing.assert_allclose(np_logits, cpp_logits, atol=1e-4)
 
 
 if __name__ == "__main__":

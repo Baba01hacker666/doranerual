@@ -266,23 +266,55 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
         matmul_forward(engine->v.data(), engine->xb.data(), w.wv + l * kv_dim * p.dim, p.dim, kv_dim);
 
         // RoPE relative positional encoding
-        for (int i = 0; i < p.dim; i += 2) {
-            int h_dim = i % head_size;
-            float freq = 1.0f / std::pow(10000.0f, static_cast<float>(h_dim) / head_size);
-            float val = pos * freq;
-            float fcr = std::cos(val);
-            float fci = std::sin(val);
+        if (p.rope_type == 1) {
+            // HuggingFace split-half RoPE
+            int half = head_size / 2;
+            for (int h = 0; h < p.n_heads; h++) {
+                float* qh = engine->q.data() + h * head_size;
+                for (int i = 0; i < half; i++) {
+                    float freq = 1.0f / std::pow(10000.0f, (2.0f * i) / static_cast<float>(head_size));
+                    float val = pos * freq;
+                    float fcr = std::cos(val);
+                    float fci = std::sin(val);
+                    float q0 = qh[i];
+                    float q1 = qh[i + half];
+                    qh[i] = q0 * fcr - q1 * fci;
+                    qh[i + half] = q1 * fcr + q0 * fci;
+                }
+            }
+            for (int h = 0; h < p.n_kv_heads; h++) {
+                float* kh = engine->k.data() + h * head_size;
+                for (int i = 0; i < half; i++) {
+                    float freq = 1.0f / std::pow(10000.0f, (2.0f * i) / static_cast<float>(head_size));
+                    float val = pos * freq;
+                    float fcr = std::cos(val);
+                    float fci = std::sin(val);
+                    float k0 = kh[i];
+                    float k1 = kh[i + half];
+                    kh[i] = k0 * fcr - k1 * fci;
+                    kh[i + half] = k1 * fcr + k0 * fci;
+                }
+            }
+        } else {
+            // Standard llama2.c interleaved RoPE
+            for (int i = 0; i < p.dim; i += 2) {
+                int h_dim = i % head_size;
+                float freq = 1.0f / std::pow(10000.0f, static_cast<float>(h_dim) / head_size);
+                float val = pos * freq;
+                float fcr = std::cos(val);
+                float fci = std::sin(val);
 
-            float q0 = engine->q[i];
-            float q1 = engine->q[i + 1];
-            engine->q[i] = q0 * fcr - q1 * fci;
-            engine->q[i + 1] = q0 * fci + q1 * fcr;
+                float q0 = engine->q[i];
+                float q1 = engine->q[i + 1];
+                engine->q[i] = q0 * fcr - q1 * fci;
+                engine->q[i + 1] = q0 * fci + q1 * fcr;
 
-            if (i < kv_dim) {
-                float k0 = engine->k[i];
-                float k1 = engine->k[i + 1];
-                engine->k[i] = k0 * fcr - k1 * fci;
-                engine->k[i + 1] = k0 * fci + k1 * fcr;
+                if (i < kv_dim) {
+                    float k0 = engine->k[i];
+                    float k1 = engine->k[i + 1];
+                    engine->k[i] = k0 * fcr - k1 * fci;
+                    engine->k[i + 1] = k0 * fci + k1 * fcr;
+                }
             }
         }
 

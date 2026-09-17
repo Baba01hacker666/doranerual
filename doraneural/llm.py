@@ -1,24 +1,26 @@
 """Pure NumPy Pretrained LLaMA Language Model Engine.
 
 Implements full autoregressive Transformer decoder inference in pure NumPy with:
-- RoPE (Rotary Position Embeddings)
+- RoPE (Rotary Position Embeddings) — both llama2.c interleaved and HuggingFace split-half
 - RMSNorm
-- Multi-Head Attention with KV-Caching
+- Multi-Head Attention with KV-Caching (including Grouped-Query Attention)
 - SwiGLU Feed-Forward Network
-- SentencePiece Byte-Fallback BPE Tokenizer
+- SentencePiece Byte-Fallback BPE Tokenizer (binary .bin or HuggingFace tokenizer.json)
+- SafeTensors loader for HuggingFace models (zero PyTorch dependency)
 - Nucleus (Top-p) & Temperature Sampling
 - Streaming Generation Generator
-- Automatic download from Hugging Face Hub (karpathy/tinyllamas)
+- Automatic download from Hugging Face Hub (any LlamaForCausalLM repo)
 """
 
+import json
 import os
 import struct
 import sys
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generator, List, Optional, Tuple, Union
+from typing import Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -51,6 +53,7 @@ class LlamaConfig:
     n_kv_heads: int
     vocab_size: int
     seq_len: int
+    rope_type: str = "interleaved"  # "interleaved" (llama2.c) or "hf" (HuggingFace split-half)
 
     @property
     def head_size(self) -> int:
@@ -59,6 +62,11 @@ class LlamaConfig:
     @property
     def kv_dim(self) -> int:
         return (self.dim * self.n_kv_heads) // self.n_heads
+
+    @property
+    def rope_type_int(self) -> int:
+        """0 = llama2.c interleaved, 1 = HuggingFace split-half."""
+        return 1 if self.rope_type == "hf" else 0
 
 
 class LlamaTokenizer:
@@ -148,6 +156,129 @@ class LlamaTokenizer:
         return "".join(pieces)
 
 
+class HFTokenizer:
+    """HuggingFace tokenizer.json BPE tokenizer in pure Python.
+
+    Reads the standard tokenizer.json format used by LlamaTokenizer
+    models on HuggingFace Hub (SentencePiece BPE with ▁ word boundary).
+    """
+
+    SPIECE = chr(0x2581)  # ▁
+
+    def __init__(self, tokenizer_path: Union[str, Path]) -> None:
+        path = Path(tokenizer_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Tokenizer file not found: {path}")
+
+        with open(path, "r", encoding="utf-8") as f:
+            tok_data = json.load(f)
+
+        model_section = tok_data.get("model", {})
+        self.vocab: Dict[str, int] = model_section.get("vocab", {})
+        self.vocab_size: int = len(self.vocab)
+        self.id_to_token: Dict[int, str] = {v: k for k, v in self.vocab.items()}
+
+        # Build BPE merge rank table from merge list
+        merges = model_section.get("merges", [])
+        self.bpe_ranks: Dict[Tuple[str, str], int] = {}
+        for i, m in enumerate(merges):
+            parts = m.split(" ")
+            if len(parts) == 2:
+                self.bpe_ranks[(parts[0], parts[1])] = i
+
+    def encode(self, text: str, bos: bool = True) -> List[int]:
+        """Encode a string into token IDs with SentencePiece BPE merges."""
+        tokens: List[int] = [1] if bos else []  # BOS = 1
+        if not text:
+            return tokens
+
+        # SentencePiece normalization: prepend ▁ and replace spaces with ▁
+        normalized = self.SPIECE + text.replace(" ", self.SPIECE)
+        current = list(normalized)
+
+        # Iteratively merge the highest-priority (lowest rank) adjacent pair
+        while len(current) > 1:
+            pairs = [(current[i], current[i + 1]) for i in range(len(current) - 1)]
+            best = min(pairs, key=lambda p: self.bpe_ranks.get(p, float("inf")))
+            if best not in self.bpe_ranks:
+                break
+            new_word: List[str] = []
+            i = 0
+            while i < len(current):
+                if i < len(current) - 1 and (current[i], current[i + 1]) == best:
+                    new_word.append(best[0] + best[1])
+                    i += 2
+                else:
+                    new_word.append(current[i])
+                    i += 1
+            current = new_word
+
+        # Map symbols to token IDs with byte-fallback for unknown characters
+        for symbol in current:
+            if symbol in self.vocab:
+                tokens.append(self.vocab[symbol])
+            else:
+                for b in symbol.encode("utf-8"):
+                    byte_token = f"<0x{b:02X}>"
+                    tokens.append(self.vocab.get(byte_token, self.vocab.get("<unk>", 0)))
+        return tokens
+
+    def decode_token(self, token_id: int) -> str:
+        """Decode a single token ID to its string piece."""
+        s = self.id_to_token.get(token_id, "")
+        if s.startswith("<0x") and s.endswith(">"):
+            try:
+                s = bytes([int(s[3:-1], 16)]).decode("utf-8", errors="replace")
+            except Exception:
+                return ""
+        return s.replace(self.SPIECE, " ")
+
+    def decode(self, tokens: List[int]) -> str:
+        """Decode a sequence of token IDs into a UTF-8 string."""
+        pieces = []
+        for t in tokens:
+            if t in (0, 1, 2):  # Skip UNK, BOS, EOS
+                continue
+            pieces.append(self.decode_token(t))
+        text = "".join(pieces)
+        if text.startswith(" "):
+            text = text[1:]  # Strip leading space from SentencePiece prefix
+        return text
+
+
+def load_safetensors(path: Union[str, Path]) -> Dict[str, np.ndarray]:
+    """Load all tensors from a .safetensors file into a dict of NumPy arrays (float32).
+
+    Pure Python reader — zero PyTorch / safetensors library dependency.
+    """
+    _DTYPE_MAP = {"F16": np.float16, "F32": np.float32, "BF16": np.float16, "I32": np.int32}
+    path = Path(path)
+    tensors: Dict[str, np.ndarray] = {}
+    with open(path, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len).decode("utf-8"))
+        data_start = 8 + header_len
+
+        for name, info in header.items():
+            if name == "__metadata__":
+                continue
+            dtype_str = info["dtype"]
+            shape = info["shape"]
+            start, end = info["data_offsets"]
+            np_dtype = _DTYPE_MAP.get(dtype_str, np.float32)
+            f.seek(data_start + start)
+            raw_bytes = f.read(end - start)
+            arr = np.frombuffer(raw_bytes, dtype=np_dtype).astype(np.float32).reshape(shape)
+            tensors[name] = arr
+    return tensors
+
+
+def load_hf_config(config_path: Union[str, Path]) -> dict:
+    """Load a HuggingFace config.json and return it as a plain dict."""
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 class LlamaLLM:
     """Pure NumPy LLaMA transformer model for autoregressive text generation."""
 
@@ -156,6 +287,7 @@ class LlamaLLM:
         model_path: Union[str, Path],
         tokenizer_path: Union[str, Path],
         backend: str = "auto",
+        config_path: Optional[Union[str, Path]] = None,
     ) -> None:
         self.model_path = Path(model_path)
         self.tokenizer_path = Path(tokenizer_path)
@@ -163,30 +295,72 @@ class LlamaLLM:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
 
-        # 1. Read config header
+        is_safetensors = str(self.model_path).endswith(".safetensors")
+
+        if is_safetensors:
+            self._load_safetensors(config_path)
+        else:
+            self._load_llama2c_bin()
+
+        # Load Tokenizer (detect format by extension)
+        tok_path = Path(self.tokenizer_path)
+        if tok_path.name.endswith(".json"):
+            self.tokenizer = HFTokenizer(tok_path)
+        else:
+            self.tokenizer = LlamaTokenizer(tok_path, vocab_size=self.config.vocab_size)
+
+        # Allocate Key-Value Cache
+        p = self.config
+        self.key_cache = np.zeros((p.n_layers, p.seq_len, p.kv_dim), dtype=np.float32)
+        self.val_cache = np.zeros((p.n_layers, p.seq_len, p.kv_dim), dtype=np.float32)
+
+        # C++ Backend Integration
+        self.weights_dict = {
+            "token_embedding_table": self.tok_emb,
+            "rms_att_weight": self.rms_att,
+            "wq": self.wq,
+            "wk": self.wk,
+            "wv": self.wv,
+            "wo": self.wo,
+            "rms_ffn_weight": self.rms_ffn,
+            "w1": self.w1,
+            "w2": self.w2,
+            "w3": self.w3,
+            "rms_final_weight": self.rms_final,
+            "wcls": self.wcls,
+            "shared_classifier": int(self.shared_weights),
+        }
+
+        self.backend = "numpy"
+        self.cpp_engine = None
+        if backend in ("auto", "cpp"):
+            try:
+                from .cpp_backend import CppLlamaEngine, is_cpp_available
+                if is_cpp_available():
+                    self.cpp_engine = CppLlamaEngine(self.config, self.weights_dict)
+                    self.backend = "cpp"
+            except Exception:
+                if backend == "cpp":
+                    raise
+                self.backend = "numpy"
+
+    def _load_llama2c_bin(self) -> None:
+        """Load weights from the llama2.c binary format (.bin)."""
         with open(self.model_path, "rb") as f:
             header = f.read(28)
             dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len = struct.unpack("<7i", header)
-            # Handle shared weights convention (negative vocab_size)
             shared_weights = vocab_size > 0
             vocab_size = abs(vocab_size)
 
             self.config = LlamaConfig(
-                dim=dim,
-                hidden_dim=hidden_dim,
-                n_layers=n_layers,
-                n_heads=n_heads,
-                n_kv_heads=n_kv_heads,
-                vocab_size=vocab_size,
-                seq_len=seq_len,
+                dim=dim, hidden_dim=hidden_dim, n_layers=n_layers,
+                n_heads=n_heads, n_kv_heads=n_kv_heads,
+                vocab_size=vocab_size, seq_len=seq_len,
+                rope_type="interleaved",
             )
-
-            # Read all remaining float32 parameters
             raw = np.fromfile(f, dtype=np.float32)
 
-        # 2. Slice weights according to llama2.c binary specification
         offset = 0
-
         def take(shape: Tuple[int, ...]) -> np.ndarray:
             nonlocal offset
             sz = int(np.prod(shape))
@@ -206,53 +380,82 @@ class LlamaLLM:
         self.w2 = take((p.n_layers, p.dim, p.hidden_dim))
         self.w3 = take((p.n_layers, p.hidden_dim, p.dim))
         self.rms_final = take((p.dim,))
-
-        # Skip legacy frequency table floats
-        offset += p.seq_len * p.head_size
-
-        # Output classifier weights
+        offset += p.seq_len * p.head_size  # Skip legacy frequency table
         if shared_weights or offset >= len(raw):
             self.wcls = self.tok_emb
         else:
             self.wcls = take((p.vocab_size, p.dim))
-
-        # 3. Load Tokenizer
-        self.tokenizer = LlamaTokenizer(self.tokenizer_path, vocab_size=p.vocab_size)
-
-        # 4. Allocate Key-Value Cache
-        self.key_cache = np.zeros((p.n_layers, p.seq_len, p.kv_dim), dtype=np.float32)
-        self.val_cache = np.zeros((p.n_layers, p.seq_len, p.kv_dim), dtype=np.float32)
-
-        # 5. C++ Backend Integration
         self.shared_weights = bool(shared_weights)
-        self.weights_dict = {
-            "token_embedding_table": self.tok_emb,
-            "rms_att_weight": self.rms_att,
-            "wq": self.wq,
-            "wk": self.wk,
-            "wv": self.wv,
-            "wo": self.wo,
-            "rms_ffn_weight": self.rms_ffn,
-            "w1": self.w1,
-            "w2": self.w2,
-            "w3": self.w3,
-            "rms_final_weight": self.rms_final,
-            "wcls": self.wcls,
-            "shared_classifier": int(shared_weights),
-        }
 
-        self.backend = "numpy"
-        self.cpp_engine = None
-        if backend in ("auto", "cpp"):
-            try:
-                from .cpp_backend import CppLlamaEngine, is_cpp_available
-                if is_cpp_available():
-                    self.cpp_engine = CppLlamaEngine(self.config, self.weights_dict)
-                    self.backend = "cpp"
-            except Exception:
-                if backend == "cpp":
-                    raise
-                self.backend = "numpy"
+    def _load_safetensors(self, config_path: Optional[Union[str, Path]] = None) -> None:
+        """Load weights from HuggingFace SafeTensors format (.safetensors).
+
+        Expects a config.json alongside the model file (or explicitly provided).
+        """
+        if config_path is None:
+            config_path = self.model_path.parent / "config.json"
+        cfg = load_hf_config(config_path)
+
+        dim = cfg["hidden_size"]
+        hidden_dim = cfg["intermediate_size"]
+        n_layers = cfg["num_hidden_layers"]
+        n_heads = cfg["num_attention_heads"]
+        n_kv_heads = cfg.get("num_key_value_heads", n_heads)
+        vocab_size = cfg["vocab_size"]
+        seq_len = cfg.get("max_position_embeddings", 1024)
+        tie_embeddings = cfg.get("tie_word_embeddings", True)
+
+        self.config = LlamaConfig(
+            dim=dim, hidden_dim=hidden_dim, n_layers=n_layers,
+            n_heads=n_heads, n_kv_heads=n_kv_heads,
+            vocab_size=vocab_size, seq_len=seq_len,
+            rope_type="hf",
+        )
+
+        tensors = load_safetensors(self.model_path)
+        p = self.config
+
+        # Token embedding
+        self.tok_emb = tensors["model.embed_tokens.weight"]
+
+        # Per-layer weights stacked into (n_layers, ...) arrays
+        rms_att_list, wq_list, wk_list, wv_list, wo_list = [], [], [], [], []
+        rms_ffn_list, w1_list, w2_list, w3_list = [], [], [], []
+        for l in range(n_layers):
+            prefix = f"model.layers.{l}"
+            rms_att_list.append(tensors[f"{prefix}.input_layernorm.weight"])
+            wq_list.append(tensors[f"{prefix}.self_attn.q_proj.weight"])
+            wk_list.append(tensors[f"{prefix}.self_attn.k_proj.weight"])
+            wv_list.append(tensors[f"{prefix}.self_attn.v_proj.weight"])
+            wo_list.append(tensors[f"{prefix}.self_attn.o_proj.weight"])
+            rms_ffn_list.append(tensors[f"{prefix}.post_attention_layernorm.weight"])
+            w1_list.append(tensors[f"{prefix}.mlp.gate_proj.weight"])
+            w2_list.append(tensors[f"{prefix}.mlp.down_proj.weight"])
+            w3_list.append(tensors[f"{prefix}.mlp.up_proj.weight"])
+
+        self.rms_att = np.stack(rms_att_list)
+        self.wq = np.stack(wq_list)
+        self.wk = np.stack(wk_list)
+        self.wv = np.stack(wv_list)
+        self.wo = np.stack(wo_list)
+        self.rms_ffn = np.stack(rms_ffn_list)
+        self.w1 = np.stack(w1_list)
+        self.w2 = np.stack(w2_list)
+        self.w3 = np.stack(w3_list)
+
+        # Final norm
+        self.rms_final = tensors["model.norm.weight"]
+
+        # Output classifier (lm_head)
+        if tie_embeddings:
+            self.wcls = self.tok_emb
+            self.shared_weights = True
+        elif "lm_head.weight" in tensors:
+            self.wcls = tensors["lm_head.weight"]
+            self.shared_weights = False
+        else:
+            self.wcls = self.tok_emb
+            self.shared_weights = True
 
     def reset_cache(self) -> None:
         """Clear key-value cache arenas."""
@@ -293,20 +496,43 @@ class LlamaLLM:
             v = self.wv[l] @ xb       # (kv_dim,)
 
             # 3. RoPE Rotary Position Embeddings
-            for i in range(0, p.dim, 2):
-                h_dim = i % p.head_size
-                freq = 1.0 / (10000.0 ** (h_dim / p.head_size))
-                val = pos * freq
-                fcr, fci = np.cos(val), np.sin(val)
+            if p.rope_type == "hf":
+                # HuggingFace split-half RoPE: [q_first_half, q_second_half]
+                half = p.head_size // 2
+                dim_idx = np.arange(half, dtype=np.float32)
+                inv_freq = 1.0 / (10000.0 ** (2.0 * dim_idx / p.head_size))
+                freqs = pos * inv_freq
+                cos_val, sin_val = np.cos(freqs), np.sin(freqs)
 
-                q0, q1 = q[i], q[i + 1]
-                q[i] = q0 * fcr - q1 * fci
-                q[i + 1] = q0 * fci + q1 * fcr
+                q_heads = q.reshape(p.n_heads, p.head_size)
+                for h in range(p.n_heads):
+                    q1, q2 = q_heads[h, :half].copy(), q_heads[h, half:].copy()
+                    q_heads[h, :half] = q1 * cos_val - q2 * sin_val
+                    q_heads[h, half:] = q2 * cos_val + q1 * sin_val
+                q = q_heads.reshape(p.dim)
 
-                if i < p.kv_dim:
-                    k0, k1 = k[i], k[i + 1]
-                    k[i] = k0 * fcr - k1 * fci
-                    k[i + 1] = k0 * fci + k1 * fcr
+                k_heads = k.reshape(p.n_kv_heads, p.head_size)
+                for h in range(p.n_kv_heads):
+                    k1, k2 = k_heads[h, :half].copy(), k_heads[h, half:].copy()
+                    k_heads[h, :half] = k1 * cos_val - k2 * sin_val
+                    k_heads[h, half:] = k2 * cos_val + k1 * sin_val
+                k = k_heads.reshape(p.kv_dim)
+            else:
+                # Standard llama2.c interleaved RoPE: [q0, q1, q2, q3, ...]
+                for i in range(0, p.dim, 2):
+                    h_dim = i % p.head_size
+                    freq = 1.0 / (10000.0 ** (h_dim / p.head_size))
+                    val = pos * freq
+                    fcr, fci = np.cos(val), np.sin(val)
+
+                    q0, q1 = q[i], q[i + 1]
+                    q[i] = q0 * fcr - q1 * fci
+                    q[i + 1] = q0 * fci + q1 * fcr
+
+                    if i < p.kv_dim:
+                        k0, k1 = k[i], k[i + 1]
+                        k[i] = k0 * fcr - k1 * fci
+                        k[i + 1] = k0 * fci + k1 * fcr
 
             # Store into KV-cache
             self.key_cache[l, pos] = k
@@ -558,52 +784,92 @@ class LlamaLLM:
 
         return out_path
 
+def _fetch_file(url: str, dest: Path) -> None:
+    """Download a single file from a URL with progress display."""
+    if dest.exists() and dest.stat().st_size > 0:
+        return
+    print(f"Downloading {dest.name} from Hugging Face...")
+    req = urllib.request.Request(url, headers={"User-Agent": "doraneural/1.0"})
+    with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
+        total_size = int(resp.headers.get("Content-Length", 0))
+        downloaded = 0
+        block_size = 65536
+        while True:
+            chunk = resp.read(block_size)
+            if not chunk:
+                break
+            f.write(chunk)
+            downloaded += len(chunk)
+            if total_size > 0:
+                pct = downloaded / total_size * 100
+                print(f"\r  Progress: {pct:5.1f}% ({downloaded / 1024 / 1024:.2f} MB)", end="", flush=True)
+    print(f"\nSaved to {dest}")
+
 
 def download_hf_model(model_name: str = "stories260K", target_dir: Optional[Union[str, Path]] = None) -> Tuple[Path, Path]:
     """Download pretrained weights and tokenizer from Hugging Face Hub.
 
+    Supports two modes:
+      1. Built-in registry names: "stories260K", "stories15M" (llama2.c .bin format)
+      2. Any HuggingFace repo: "owner/model" (e.g. "arnir0/Tiny-LLM") — auto-detects
+         safetensors + tokenizer.json format.
+
     Args:
-        model_name: "stories260K" (1MB) or "stories15M" (60MB).
-        target_dir: Directory to save the checkpoint and tokenizer. Defaults to ~/.cache/doraneural/models/<model_name>.
+        model_name: Built-in name or HuggingFace "owner/model" identifier.
+        target_dir: Directory to save files. Defaults to ~/.cache/doraneural/models/<model_name>.
 
     Returns:
         Tuple of (model_path, tokenizer_path).
     """
-    if model_name not in HF_REPOSITORIES:
-        raise ValueError(f"Unknown model '{model_name}'. Available: {list(HF_REPOSITORIES.keys())}")
+    # Built-in registry path
+    if model_name in HF_REPOSITORIES:
+        meta = HF_REPOSITORIES[model_name]
+        if target_dir is None:
+            save_dir = Path.home() / ".cache" / "doraneural" / "models" / model_name
+        else:
+            save_dir = Path(target_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        model_path = save_dir / meta["model_file"]
+        tok_path = save_dir / meta["tok_file"]
+        _fetch_file(meta["model_url"], model_path)
+        _fetch_file(meta["tok_url"], tok_path)
+        return model_path, tok_path
 
-    meta = HF_REPOSITORIES[model_name]
+    # Arbitrary HuggingFace repo: "owner/model"
+    if "/" not in model_name:
+        available = list(HF_REPOSITORIES.keys())
+        raise ValueError(
+            f"Unknown model '{model_name}'. Built-in: {available}. "
+            f"For HuggingFace repos, use 'owner/model' format (e.g. 'arnir0/Tiny-LLM')."
+        )
+
+    repo_id = model_name
+    safe_name = repo_id.replace("/", "_")
     if target_dir is None:
-        save_dir = Path.home() / ".cache" / "doraneural" / "models" / model_name
+        save_dir = Path.home() / ".cache" / "doraneural" / "models" / safe_name
     else:
         save_dir = Path(target_dir)
-
     save_dir.mkdir(parents=True, exist_ok=True)
-    model_path = save_dir / meta["model_file"]
-    tok_path = save_dir / meta["tok_file"]
 
-    def _fetch(url: str, dest: Path) -> None:
-        if dest.exists() and dest.stat().st_size > 0:
-            return
-        print(f"Downloading {dest.name} from Hugging Face...")
-        req = urllib.request.Request(url, headers={"User-Agent": "doraneural/1.0"})
-        with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
-            total_size = int(resp.headers.get("Content-Length", 0))
-            downloaded = 0
-            block_size = 65536
-            while True:
-                chunk = resp.read(block_size)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0:
-                    pct = downloaded / total_size * 100
-                    print(f"\r  Progress: {pct:5.1f}% ({downloaded / 1024 / 1024:.2f} MB)", end="", flush=True)
-        print(f"\nSaved to {dest}")
+    base_url = f"https://huggingface.co/{repo_id}/resolve/main"
 
-    _fetch(meta["model_url"], model_path)
-    _fetch(meta["tok_url"], tok_path)
+    # Always download config.json
+    config_path = save_dir / "config.json"
+    _fetch_file(f"{base_url}/config.json", config_path)
+
+    # Detect model file format: try model.safetensors first
+    model_path = save_dir / "model.safetensors"
+    _fetch_file(f"{base_url}/model.safetensors", model_path)
+
+    # Try tokenizer.json (HuggingFace standard)
+    tok_path = save_dir / "tokenizer.json"
+    if not tok_path.exists():
+        try:
+            _fetch_file(f"{base_url}/tokenizer.json", tok_path)
+        except Exception:
+            # Fallback to tokenizer.model (SentencePiece binary)
+            tok_path = save_dir / "tokenizer.model"
+            _fetch_file(f"{base_url}/tokenizer.model", tok_path)
 
     return model_path, tok_path
 
@@ -616,7 +882,8 @@ def load_pretrained_llm(
     """Load a ready-to-run pretrained LLaMA model from Hugging Face.
 
     Args:
-        model_name: Pretrained model name ("stories260K" or "stories15M").
+        model_name: Built-in name ("stories260K", "stories15M") or
+                     HuggingFace "owner/model" (e.g. "arnir0/Tiny-LLM").
         cache_dir: Optional directory for model files.
         backend: Execution engine ("auto", "cpp", or "numpy").
 

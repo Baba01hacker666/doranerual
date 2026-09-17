@@ -116,8 +116,11 @@ from .llm import (
     LlamaLLM,
     LlamaConfig,
     LlamaTokenizer,
+    HFTokenizer,
     load_pretrained_llm,
     download_hf_model,
+    load_safetensors,
+    load_hf_config,
 )
 from .cpp_backend import (
     CppLlamaEngine,
@@ -236,8 +239,11 @@ __all__ = [
     "LlamaLLM",
     "LlamaConfig",
     "LlamaTokenizer",
+    "HFTokenizer",
     "load_pretrained_llm",
     "download_hf_model",
+    "load_safetensors",
+    "load_hf_config",
     "CppLlamaEngine",
     "is_cpp_available",
     "build_cpp_library",

@@ -24,6 +24,7 @@ class LlamaCppConfigStruct(ctypes.Structure):
         ("n_kv_heads", ctypes.c_int),
         ("vocab_size", ctypes.c_int),
         ("seq_len", ctypes.c_int),
+        ("rope_type", ctypes.c_int),
     ]
 
 
@@ -185,6 +186,7 @@ class CppLlamaEngine:
             n_kv_heads=config.n_kv_heads,
             vocab_size=config.vocab_size,
             seq_len=config.seq_len,
+            rope_type=getattr(config, "rope_type_int", 0),
         )
 
         def _ptr(arr: np.ndarray) -> ctypes.POINTER(ctypes.c_float):

@@ -13,6 +13,7 @@ typedef struct {
     int n_kv_heads;
     int vocab_size;
     int seq_len;
+    int rope_type; // 0 = llama2c interleaved, 1 = HuggingFace split-half
 } LlamaCppConfig;
 
 typedef struct {
