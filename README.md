@@ -75,6 +75,10 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 
 ## ✨ Key Features
 
+- **Pretrained Hugging Face LLM (Pure NumPy LLaMA)**: Runs real pretrained transformer language models directly from Hugging Face Hub (`karpathy/tinyllamas`) in pure NumPy with RoPE, RMSNorm, KV-Cache, SwiGLU FFN, and SentencePiece BPE tokenizer, generating 70–100+ tokens/sec on CPU:
+  ```bash
+  doraneural story --prompt "Once upon a time, a brave puppy"
+  ```
 - **Computational Graph & Autograd Engine**: Reverse-mode automatic differentiation DAG on multi-dimensional NumPy arrays (`Tensor`) with automatic broadcast gradient reduction, operator overloading, and PyTorch-like dynamic tape execution.
 - **Static Graph Compiler & Operator Fusion**: Ahead-of-Time (AOT) static graph compilation (`model.compile_graph()`) with fused kernels (`Dense + Bias + ReLU`) and preallocated contiguous scratch memory arenas (`StaticBufferPool`) eliminating dynamic heap allocations during inference.
 - **Versioned Doraneural Binary Spec (`.dnb` v1.0)**: Architecture-neutral, versioned binary format with a 32-byte fixed header, UTF-8 JSON architecture metadata, 8-byte aligned raw tensor payloads, and CRC32 checksums for guaranteed corruption detection—completely free of Python `pickle`.
@@ -113,6 +117,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 | Command | What it does |
 |---|---|
 | `doraneural` | Shows workspace status & quick action recommendations |
+| `doraneural story` | Generates stories with a pretrained LLaMA LLM from Hugging Face |
 | `doraneural new` | Creates a new model (`-i` interactive wizard, `--data <file.csv>`) |
 | `doraneural train` | Trains active model on dataset (`-e` epochs, `--lr` rate) |
 | `doraneural plot` | Displays terminal ASCII training curves for loss and accuracy |
@@ -120,8 +125,8 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 | `doraneural status` | Displays ASCII architecture flow and training stats |
 | `doraneural predict <vals>` | Runs immediate inference on user input numbers |
 | `doraneural explain <topic>`| Explains concepts (`weights`, `epochs`, `loss`, `backprop`) |
-| `doraneural demo <name>` | Runs demos (`catdog`, `interactive`, `digits`, `moons`, `blobs`, `cnn`) |
-| `doraneural test` | Runs the automated 64-test unit test suite |
+| `doraneural demo <name>` | Runs demos (`story`, `catdog`, `interactive`, `digits`, `moons`, `blobs`, `cnn`) |
+| `doraneural test` | Runs the automated 67-test unit test suite |
 | `doraneural info` | Displays system specs, NumPy version, and engine info |
 
 ---
@@ -131,7 +136,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 For complete deep dives and advanced configurations, see the `docs/` folder:
 
 - 📖 **[CLI Reference Guide](docs/cli_reference.md)**: Full wizard walkthroughs, custom dataset options, and parameter flags.
-- 🧠 **[Python API Reference](docs/python_api.md)**: `Tensor` autograd engine, static graph compiler, `.dnb` binary spec, `Dense`, `Conv2D`, `LSTM`, `GRU`, `TransformerBlock`, `MultiHeadAttention`, JIT acceleration, mixed-precision, schedulers, image loading, custom losses, optimizers, and data preprocessing.
+- 🧠 **[Python API Reference](docs/python_api.md)**: Pretrained LLaMA LLM, `Tensor` autograd engine, static graph compiler, `.dnb` binary spec, `Dense`, `Conv2D`, `LSTM`, `GRU`, `TransformerBlock`, `MultiHeadAttention`, JIT acceleration, mixed-precision, schedulers, image loading, custom losses, optimizers, and data preprocessing.
 - 📐 **[Math & Backpropagation Under the Hood](docs/math_and_backprop.md)**: Numerical gradient checks, Jacobians, weight initialization, and backprop math.
 - 🎮 **[Interactive Demos & Visualizer](docs/demos.md)**: Real-time 0–9 digit synthesizer, Cat vs Dog CNN vision benchmark, and ASCII previewer.
 
@@ -144,5 +149,5 @@ doraneural test
 # or
 python3 -m unittest discover tests/
 ```
-All 64 unit tests pass on pure CPU with standard NumPy.
+All 67 unit tests pass on pure CPU with standard NumPy.
 

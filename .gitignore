@@ -20,6 +20,7 @@ dist/
 # Local model training state
 current_model.*
 .doraneural.json
+models/
 
 # IDE and OS files
 .DS_Store

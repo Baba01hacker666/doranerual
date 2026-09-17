@@ -15,6 +15,7 @@ with short, effortless commands:
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 import numpy as np
 
@@ -117,6 +118,7 @@ def cmd_demo(args: argparse.Namespace) -> None:
 
     mapping = {
         "catdog": examples_dir / "cat_vs_dog_classification.py",
+        "story": examples_dir / "run_huggingface_llm.py",
         "digits": examples_dir / "digit_classification.py",
         "interactive": examples_dir / "generate_and_predict_digit.py",
         "moons": examples_dir / "binary_classification.py",
@@ -131,6 +133,37 @@ def cmd_demo(args: argparse.Namespace) -> None:
     script = mapping[demo_name]
     print(f"Running demo '{demo_name}'...\n")
     os.system(f"{sys.executable} {script}")
+
+
+def cmd_story(args: argparse.Namespace) -> None:
+    """Generate stories using pure NumPy LLaMA inference."""
+    from .llm import load_pretrained_llm
+
+    print("=" * 65)
+    print(f"📖 doraneural LLM: {args.model} (Pure NumPy Pretrained LLaMA)")
+    print("=" * 65)
+    print("Loading pretrained weights and SentencePiece tokenizer from Hugging Face...")
+    t0 = time.perf_counter()
+    llm = load_pretrained_llm(model_name=args.model)
+    load_time = time.perf_counter() - t0
+    print(f"Model loaded in {load_time:.2f}s! ({llm.config.dim} dim, {llm.config.n_layers} layers, {llm.config.vocab_size} vocab)")
+    print(f"\nPrompt: \"{args.prompt}\"")
+    print("-" * 65)
+    sys.stdout.write(args.prompt)
+    sys.stdout.flush()
+
+    t_gen_start = time.perf_counter()
+    count = 0
+    for piece in llm.generate(prompt=args.prompt, max_tokens=args.tokens, temperature=args.temp, stream=True):
+        sys.stdout.write(piece)
+        sys.stdout.flush()
+        count += 1
+
+    gen_time = time.perf_counter() - t_gen_start
+    speed = count / max(1e-4, gen_time)
+    print("\n" + "-" * 65)
+    print(f"Generated {count} tokens in {gen_time:.2f}s ({speed:.1f} tokens/sec on CPU)")
+    print("=" * 65)
 
 
 def cmd_test(args: argparse.Namespace) -> None:
@@ -222,9 +255,17 @@ def main() -> None:
     sub_exp.add_argument("topic", nargs="?", default="help", help="Concept to explain (e.g. weights, epochs, backprop)")
     sub_exp.set_defaults(func=cmd_explain)
 
+    # doraneural story
+    sub_story = subparsers.add_parser("story", help="Generate stories using a pretrained LLaMA LLM in pure NumPy")
+    sub_story.add_argument("--prompt", "-p", type=str, default="Once upon a time", help="Starting prompt for the story")
+    sub_story.add_argument("--tokens", "-n", type=int, default=100, help="Number of tokens to generate (default: 100)")
+    sub_story.add_argument("--temp", "-t", type=float, default=0.7, help="Sampling temperature (default: 0.7)")
+    sub_story.add_argument("--model", "-m", choices=["stories260K", "stories15M"], default="stories260K", help="Pretrained model (default: stories260K)")
+    sub_story.set_defaults(func=cmd_story)
+
     # doraneural demo
     sub_demo = subparsers.add_parser("demo", help="Run interactive and visual benchmarks")
-    sub_demo.add_argument("name", choices=["catdog", "interactive", "digits", "moons", "blobs", "cnn"], default="catdog", nargs="?", help="Demo to run")
+    sub_demo.add_argument("name", choices=["story", "catdog", "interactive", "digits", "moons", "blobs", "cnn"], default="story", nargs="?", help="Demo to run")
     sub_demo.set_defaults(func=cmd_demo)
 
     # doraneural test

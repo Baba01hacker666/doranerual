@@ -27,6 +27,7 @@
 - [Computational Graph & Autograd Engine (`Tensor`, `requires_grad`)](#14-computational-graph--autograd-engine)
 - [Static Graph Compile Step & Operator Fusion (`compile_model`)](#15-static-graph-compile-step--operator-fusion)
 - [Portable Model Serialization Spec (`.dnb` v1.0)](#16-portable-model-serialization-spec-dnb)
+- [Pretrained Hugging Face LLM (Pure NumPy LLaMA)](#17-pretrained-hugging-face-llm-pure-numpy-llama)
 
 ---
 
@@ -544,4 +545,57 @@ print("Tensors:", info["tensors_count"])
 loaded_model = dn.load_dnb("my_model.dnb")
 predictions = loaded_model.forward(X_test)
 ```
+
+---
+
+## 17. Pretrained Hugging Face LLM (Pure NumPy LLaMA)
+
+`doraneural` can download and run real pretrained transformer language models directly from Hugging Face Hub (e.g. `karpathy/tinyllamas`) in **pure NumPy** with zero heavyweight dependencies (no PyTorch, no Hugging Face Transformers).
+
+### Architecture Highlights
+- **RoPE (Rotary Position Embeddings)**: Dynamic complex rotational position embeddings.
+- **RMSNorm**: Root Mean Square layer normalization.
+- **Key-Value Cache**: Preallocated inference cache arenas for fast autoregressive generation (70–100+ tokens/sec on pure CPU).
+- **SwiGLU Feed-Forward Network**: Gate and up linear projections with SiLU non-linearity.
+- **SentencePiece Byte-Fallback BPE Tokenizer**: Pure Python BPE encoder and decoder with byte-fallback.
+- **Sampling Methods**: Supports deterministic greedy argmax (`temperature=0.0`) as well as temperature and top-p (nucleus) sampling.
+- **Streaming Generation**: Python generator yielding text pieces as they are decoded.
+
+### Python API Example
+
+```python
+import doraneural as dn
+
+# 1. Automatically download weights and tokenizer from Hugging Face Hub (~1MB)
+llm = dn.load_pretrained_llm("stories260K")
+
+prompt = "Once upon a time, Lily found a kitten"
+
+# 2. Synchronous text generation
+story = llm.generate(
+    prompt=prompt,
+    max_tokens=80,
+    temperature=0.7,
+    top_p=0.85,
+    stream=False,
+)
+print(story)
+
+# 3. Real-time streaming generation (typewriter effect)
+print(prompt, end="", flush=True)
+for token_piece in llm.generate(prompt=prompt, max_tokens=60, stream=True):
+    print(token_piece, end="", flush=True)
+print()
+```
+
+### CLI Command
+
+```bash
+# Generate stories directly in your terminal:
+doraneural story --prompt "Once upon a time, a brave dragon" --tokens 60
+
+# Or run the interactive visual story demo:
+doraneural demo story
+```
+
 

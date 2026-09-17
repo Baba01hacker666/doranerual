@@ -112,6 +112,13 @@ from .dnb import (
     load_dnb,
     inspect_dnb,
 )
+from .llm import (
+    LlamaLLM,
+    LlamaConfig,
+    LlamaTokenizer,
+    load_pretrained_llm,
+    download_hf_model,
+)
 from .plot import plot_ascii_curve, plot_history
 from .export import export_to_standalone_python
 from .errors import DoraneuralError, ShapeMismatchError, ModelNotCompiledError
@@ -220,6 +227,12 @@ __all__ = [
     "CompiledModel",
     "CompiledStep",
     "StaticBufferPool",
+    # Pretrained LLM (LLaMA in pure NumPy)
+    "LlamaLLM",
+    "LlamaConfig",
+    "LlamaTokenizer",
+    "load_pretrained_llm",
+    "download_hf_model",
     # Serialization (JSON/NPZ and Versioned Binary DNB)
     "save_model",
     "load_model",

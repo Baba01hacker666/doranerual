@@ -88,6 +88,9 @@ from doraneural import (
     save_dnb,
     load_dnb,
     inspect_dnb,
+    LlamaLLM,
+    LlamaTokenizer,
+    load_pretrained_llm,
 )
 
 
@@ -1061,5 +1064,57 @@ class TestDNBSerialization(unittest.TestCase):
             self.assertIn("Checksum", str(ctx.exception))
 
 
+class TestLlamaLLM(unittest.TestCase):
+    def test_llama_tokenizer_encode_decode(self):
+        tok_path = Path("models/stories260K/tok512.bin")
+        if not tok_path.exists():
+            tok_path = Path.home() / ".cache" / "doraneural" / "models" / "stories260K" / "tok512.bin"
+        if not tok_path.exists():
+            self.skipTest("stories260K tokenizer not downloaded")
+
+        tok = LlamaTokenizer(tok_path, vocab_size=512)
+        text = "Once upon a time"
+        tokens = tok.encode(text, bos=True)
+        self.assertEqual(tokens[0], 1)
+        decoded = tok.decode(tokens)
+        self.assertIn("Once", decoded)
+        self.assertIn("time", decoded)
+
+    def test_llama_forward_and_cache(self):
+        try:
+            llm = load_pretrained_llm("stories260K")
+        except Exception as e:
+            self.skipTest(f"Skipping Llama test: {e}")
+
+        self.assertEqual(llm.config.dim, 64)
+        self.assertEqual(llm.config.n_layers, 5)
+        self.assertEqual(llm.config.vocab_size, 512)
+
+        logits = llm.forward(token=1, pos=0)
+        self.assertEqual(logits.shape, (512,))
+        self.assertFalse(np.isnan(logits).any())
+
+        # Check KV cache was populated at pos=0
+        self.assertGreater(np.max(np.abs(llm.key_cache[:, 0, :])), 0.0)
+
+    def test_llama_generation_and_streaming(self):
+        try:
+            llm = load_pretrained_llm("stories260K")
+        except Exception as e:
+            self.skipTest(f"Skipping Llama test: {e}")
+
+        prompt = "Once upon a time"
+        # Non-streaming
+        story = llm.generate(prompt=prompt, max_tokens=15, temperature=0.7, stream=False)
+        self.assertTrue(story.startswith(prompt))
+        self.assertGreater(len(story), len(prompt))
+
+        # Streaming
+        pieces = list(llm.generate(prompt=prompt, max_tokens=10, temperature=0.7, stream=True))
+        self.assertGreater(len(pieces), 0)
+        self.assertIsInstance(pieces[0], str)
+
+
 if __name__ == "__main__":
     unittest.main()
+
