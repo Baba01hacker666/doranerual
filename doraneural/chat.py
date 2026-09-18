@@ -145,7 +145,9 @@ class ChatSession:
         return {
             "used_tokens": prompt_tokens,
             "max_context": max_ctx,
+            "max_context_tokens": max_ctx,
             "percentage": round(pct, 1),
+            "percent_used": round(pct, 1),
             "messages_count": len(self.messages),
             "temperature": self.temperature,
             "max_new_tokens": self.max_new_tokens,

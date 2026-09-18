@@ -776,6 +776,35 @@ class LlamaLLM:
 
         return total_loss / seq_len
 
+    def _evaluate_tokens(
+        self,
+        tokens: List[int],
+        seq_len: int,
+        stride: Optional[int] = None,
+        max_steps: Optional[int] = None,
+    ) -> float:
+        """Measure next-token cross-entropy without changing model weights."""
+        if len(tokens) < seq_len + 1:
+            return float("nan")
+        step = stride or seq_len
+        starts = list(range(0, len(tokens) - seq_len, step))
+        if max_steps is not None:
+            starts = starts[:max(0, max_steps)]
+        total_nll = 0.0
+        total_tokens = 0
+        for start_idx in starts:
+            self.reset_cache()
+            inputs = tokens[start_idx : start_idx + seq_len]
+            targets = tokens[start_idx + 1 : start_idx + seq_len + 1]
+            for pos, (input_token, target_token) in enumerate(zip(inputs, targets)):
+                logits = self.forward(input_token, pos)
+                max_logit = float(np.max(logits))
+                log_norm = max_logit + float(np.log(np.sum(np.exp(logits - max_logit))))
+                total_nll += log_norm - float(logits[target_token])
+                total_tokens += 1
+        self.reset_cache()
+        return total_nll / max(1, total_tokens)
+
     def train(
         self,
         text: str,
@@ -784,59 +813,113 @@ class LlamaLLM:
         seq_len: int = 32,
         weight_decay: float = 0.01,
         verbose: int = 1,
+        eval_text: Optional[str] = None,
+        validation_split: float = 0.0,
+        stride: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        max_eval_steps: Optional[int] = None,
     ) -> dict:
-        """Fine-tune the model on custom text with cross-entropy loss and in-place updates.
+        """Fine-tune the model on custom text with reproducible validation.
 
-        Args:
-            text: Training text corpus.
-            epochs: Number of complete passes over the text.
-            lr: Learning rate for parameter updates.
-            seq_len: Chunk length for training sequences.
-            weight_decay: L2 regularization factor.
-            verbose: 1 to print epoch progress, 0 to silence.
+        ``eval_text`` should be a held-out corpus that was never used to tune
+        examples or hyperparameters. If it is omitted, ``validation_split``
+        can reserve the tail of the token stream. Training windows can be
+        shuffled each epoch and optionally overlapped with ``stride``.
 
-        Returns:
-            Dictionary containing 'loss' history list.
+        Returns ``loss`` and, when validation is enabled, ``val_loss`` histories.
+        The lightweight trainer updates embeddings/classifier weights; it does
+        not pretend that a lower loss is a complete quality evaluation.
         """
-        tokens = self.tokenizer.encode(text, bos=False)
-        if len(tokens) < seq_len + 1:
-            tokens = tokens * ((seq_len + 2) // max(1, len(tokens)) + 1)
+        if epochs <= 0:
+            raise ValueError(f"epochs must be positive, got {epochs}")
+        if lr <= 0.0:
+            raise ValueError(f"lr must be positive, got {lr}")
+        if not 1 <= seq_len < self.config.seq_len:
+            raise ValueError(f"seq_len must be in [1, {self.config.seq_len - 1}], got {seq_len}")
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must be in [0, 1)")
 
+        def encode_nonempty(value: str, label: str) -> List[int]:
+            encoded = self.tokenizer.encode(value, bos=False)
+            if not encoded:
+                raise ValueError(f"{label} produced no tokens")
+            return encoded
+
+        train_tokens = encode_nonempty(text, "training text")
+        if eval_text is not None and validation_split:
+            raise ValueError("Pass either eval_text or validation_split, not both")
+
+        if eval_text is not None:
+            eval_tokens = encode_nonempty(eval_text, "evaluation text")
+        elif validation_split > 0.0:
+            split_at = int(len(train_tokens) * (1.0 - validation_split))
+            split_at = min(max(split_at, seq_len + 1), len(train_tokens) - 1)
+            eval_tokens = train_tokens[split_at:]
+            train_tokens = train_tokens[:split_at]
+        else:
+            eval_tokens = None
+
+        if len(train_tokens) < seq_len + 1:
+            # Tiny smoke-test corpora are repeated rather than silently producing
+            # zero updates. Real datasets should be long enough to avoid this.
+            repeats = ((seq_len + 1) // len(train_tokens)) + 1
+            train_tokens = train_tokens * repeats
+
+        step = stride or seq_len
+        if not 1 <= step <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {step}")
+        starts = list(range(0, len(train_tokens) - seq_len, step))
+        if not starts:
+            raise ValueError("training text does not contain a usable sequence")
+
+        rng = np.random.default_rng(seed)
         history = {"loss": []}
-        total_steps = max(1, (len(tokens) - seq_len) // seq_len)
-        print_interval = max(1, total_steps // 20)  # log every 5% of epoch
+        if eval_tokens is not None:
+            history["val_loss"] = []
+        total_steps = len(starts)
+        print_interval = max(1, total_steps // 20)
 
         for ep in range(1, epochs + 1):
+            order = starts.copy()
+            if shuffle:
+                rng.shuffle(order)
             ep_loss = 0.0
-            steps = 0
+            steps_done = 0
             t_ep_start = time.perf_counter()
-            for i in range(0, len(tokens) - seq_len, seq_len):
-                in_seq = tokens[i : i + seq_len]
-                target_seq = tokens[i + 1 : i + seq_len + 1]
+            for start_idx in order:
+                in_seq = train_tokens[start_idx : start_idx + seq_len]
+                target_seq = train_tokens[start_idx + 1 : start_idx + seq_len + 1]
                 loss = self.train_step(in_seq, target_seq, lr=lr, weight_decay=weight_decay)
                 ep_loss += loss
-                steps += 1
+                steps_done += 1
 
-                if verbose and (steps % print_interval == 0 or steps == total_steps):
+                if verbose and (steps_done % print_interval == 0 or steps_done == total_steps):
                     elapsed = time.perf_counter() - t_ep_start
-                    tok_sec = (steps * seq_len) / max(1e-4, elapsed)
-                    rem_steps = total_steps - steps
-                    eta_sec = rem_steps / max(1e-4, steps / elapsed)
-                    pct = (steps / total_steps) * 100.0
+                    tok_sec = (steps_done * seq_len) / max(1e-4, elapsed)
+                    rem_steps = total_steps - steps_done
+                    eta_sec = rem_steps / max(1e-4, steps_done / elapsed)
+                    pct = (steps_done / total_steps) * 100.0
                     print(
-                        f"  [Epoch {ep}/{epochs}] Step {steps:,}/{total_steps:,} ({pct:5.1f}%) "
+                        f"  [Epoch {ep}/{epochs}] Step {steps_done:,}/{total_steps:,} ({pct:5.1f}%) "
                         f"| Loss: {loss:6.4f} | {tok_sec:,.0f} tok/s | ETA: {eta_sec:.0f}s",
-                        flush=True
+                        flush=True,
                     )
 
-            avg_loss = ep_loss / max(1, steps)
+            avg_loss = ep_loss / max(1, steps_done)
             history["loss"].append(avg_loss)
+            if eval_tokens is not None:
+                val_loss = self._evaluate_tokens(eval_tokens, seq_len, stride=step, max_steps=max_eval_steps)
+                history["val_loss"].append(val_loss)
             ep_time = time.perf_counter() - t_ep_start
             if verbose:
+                suffix = ""
+                if eval_tokens is not None:
+                    suffix = f" | Val Loss: {history['val_loss'][-1]:.4f}"
                 print(
                     f"✓ Epoch {ep:2d}/{epochs} finished in {ep_time:.1f}s | "
-                    f"Avg Loss: {avg_loss:.4f} (Engine: {self.backend.upper()})\n",
-                    flush=True
+                    f"Avg Loss: {avg_loss:.4f}{suffix} (Engine: {self.backend.upper()})\n",
+                    flush=True,
                 )
 
         return history

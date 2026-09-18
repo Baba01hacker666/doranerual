@@ -384,6 +384,7 @@ struct LlamaCppEngine {
     std::vector<float> train_step_logits;
     std::vector<float> train_dlogits;
     std::vector<float> train_probs;
+    std::vector<float> train_grad_embedding;
 
     // AdamW Optimizer State
     std::vector<float> grad_buffer;
@@ -421,6 +422,7 @@ struct LlamaCppEngine {
         train_step_logits.resize(config.vocab_size, 0.0f);
         train_dlogits.resize(config.vocab_size, 0.0f);
         train_probs.resize(config.vocab_size, 0.0f);
+        train_grad_embedding.resize(config.dim, 0.0f);
 
         // Precompute RoPE cos/sin cache across all positions and half-dimensions
         cos_cache.resize(config.seq_len * half, 0.0f);
@@ -860,9 +862,11 @@ float llama_train_step(
         const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table;
         float* d_emb_row = w.token_embedding_table + in_tok * p.dim;
 
-        // Fast vector-matrix product: g = cls_w^T @ dlogits
-        // Outer loop over active v, inner loop over d (contiguous memory & SIMD vectorized)
-        std::vector<float> g(p.dim, 0.0f);
+        // Fast vector-matrix product: g = cls_w^T @ dlogits.
+        // Reuse a preallocated buffer: allocating a std::vector for every
+        // token was a significant hot-loop cost on CPU-only fine-tuning.
+        std::fill(engine->train_grad_embedding.begin(), engine->train_grad_embedding.end(), 0.0f);
+        float* g = engine->train_grad_embedding.data();
         for (int v = 0; v < p.vocab_size; v++) {
             float dv = dlogits[v];
             if (v != target_tok && std::abs(dv) < 1e-5f) continue;

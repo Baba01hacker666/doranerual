@@ -67,11 +67,29 @@ class ZexoModel:
         text: str,
         epochs: int = 3,
         lr: float = 5e-4,
-        seq_len: int = 16,
+        seq_len: int = 64,
         verbose: int = 1,
+        eval_text: Optional[str] = None,
+        validation_split: float = 0.0,
+        stride: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        max_eval_steps: Optional[int] = None,
     ) -> dict:
-        """Fine-tune Zexo on custom text or conversational dialogue."""
-        return self.llm.train(text, epochs=epochs, lr=lr, seq_len=seq_len, verbose=verbose)
+        """Fine-tune Zexo on custom text or dialogue with optional validation."""
+        return self.llm.train(
+            text,
+            epochs=epochs,
+            lr=lr,
+            seq_len=seq_len,
+            verbose=verbose,
+            eval_text=eval_text,
+            validation_split=validation_split,
+            stride=stride,
+            shuffle=shuffle,
+            seed=seed,
+            max_eval_steps=max_eval_steps,
+        )
 
     def reset(self) -> None:
         """Clear active conversation context and model KV cache."""

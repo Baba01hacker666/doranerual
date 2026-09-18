@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import doraneural as dn
 from zexo.config import ZexoConfig
+from zexo.data.dataset_tools import load_corpus
 from zexo.model import load_zexo
 
 
@@ -36,8 +37,37 @@ def main():
     parser = argparse.ArgumentParser(description="Train and fine-tune Zexo AI on conversational data.")
     parser.add_argument(
         "--data", "-d",
-        default=str(REPO_ROOT / "zexo" / "data" / "step1_conversational_base.txt"),
-        help="Path to training dialogue file or Hugging Face dataset ID (default: zexo/data/step1_conversational_base.txt).",
+        default=str(REPO_ROOT / "zexo" / "data" / "zexo_quality_v1_train.txt"),
+        help="Path to a plain-text or validated JSONL training corpus (default: zexo/data/zexo_quality_v1_train.txt).",
+    )
+    parser.add_argument(
+        "--eval-data",
+        default=None,
+        help="Optional held-out plain-text or JSONL evaluation corpus. Auto-detected for *_train.txt files.",
+    )
+    parser.add_argument(
+        "--validation-split",
+        type=float,
+        default=0.0,
+        help="Reserve this fraction for validation when --eval-data is not provided (default: 0).",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=None,
+        help="Training window stride. Defaults to seq-len; smaller values add overlapping examples.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Seed used to shuffle training windows (default: 42).",
+    )
+    parser.add_argument(
+        "--max-eval-steps",
+        type=int,
+        default=None,
+        help="Optional cap on validation windows per epoch.",
     )
     parser.add_argument(
         "--hf-dataset",
@@ -75,14 +105,14 @@ def main():
     parser.add_argument(
         "--lr",
         type=float,
-        default=1e-3,
-        help="Learning rate (default: 0.001).",
+        default=5e-4,
+        help="Learning rate (default: 0.0005).",
     )
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=16,
-        help="Sequence chunk length (default: 16).",
+        default=64,
+        help="Sequence chunk length (default: 64).",
     )
     parser.add_argument(
         "--test-prompt", "-p",
@@ -114,8 +144,8 @@ def main():
         n_cpus = os.cpu_count() or 4
         os.environ["OMP_NUM_THREADS"] = str(n_cpus)
         os.environ["PYTHONUNBUFFERED"] = "1"
-        if args.seq_len == 16:
-            args.seq_len = 64
+        if args.seq_len == 64:
+            args.seq_len = 128
 
     run_id = args.tag or datetime.now(timezone.utc).strftime("zexo_%Y%m%d_%H%M%S")
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -146,8 +176,20 @@ def main():
         if not corpus_path.exists():
             raise FileNotFoundError(f"Training data not found: {corpus_path}")
 
-    text = corpus_path.read_text(encoding="utf-8", errors="replace")
+    text = load_corpus(corpus_path)
+    eval_text = None
+    eval_path = Path(args.eval_data) if args.eval_data else None
+    if eval_path is None and corpus_path.name.endswith("_train.txt"):
+        candidate = corpus_path.with_name(corpus_path.name.replace("_train.txt", "_eval.txt"))
+        if candidate.exists():
+            eval_path = candidate
+    if eval_path is not None:
+        if not eval_path.exists():
+            raise FileNotFoundError(f"Evaluation data not found: {eval_path}")
+        eval_text = load_corpus(eval_path)
     print(f"📄 Dataset Loaded: {corpus_path.name} ({len(text):,} chars, {len(text.split()):,} words)")
+    if eval_path is not None:
+        print(f"🧪 Held-out Evaluation: {eval_path.name} ({len(eval_text):,} chars, {len(eval_text.split()):,} words)")
 
     # 2. Load or Initialize Zexo
     print("\n[1/4] Loading Zexo Model...")
@@ -166,9 +208,23 @@ def main():
     # 4. Train Model
     print(f"\n[3/4] Fine-tuning Zexo for {args.epochs} epochs (lr={args.lr}, seq_len={args.seq_len})...")
     t0 = time.perf_counter()
-    hist = zexo.train(text, epochs=args.epochs, lr=args.lr, seq_len=args.seq_len, verbose=1)
+    hist = zexo.train(
+        text,
+        epochs=args.epochs,
+        lr=args.lr,
+        seq_len=args.seq_len,
+        verbose=1,
+        eval_text=eval_text,
+        validation_split=args.validation_split if eval_text is None else 0.0,
+        stride=args.stride,
+        seed=args.seed,
+        max_eval_steps=args.max_eval_steps,
+    )
     duration = time.perf_counter() - t0
-    print(f"  Training finished in {duration:.2f}s! Final loss: {hist['loss'][-1]:.4f}")
+    final_report = f"Final loss: {hist['loss'][-1]:.4f}"
+    if "val_loss" in hist:
+        final_report += f" | Final validation loss: {hist['val_loss'][-1]:.4f}"
+    print(f"  Training finished in {duration:.2f}s! {final_report}")
 
     # 5. Test Fine-Tuned Answer
     zexo.reset()
@@ -196,11 +252,16 @@ def main():
         "tier": zexo.config.tier,
         "parameters": zexo.config.parameter_count,
         "dataset": corpus_path.name,
+        "evaluation_dataset": eval_path.name if eval_path is not None else None,
         "chars": len(text),
         "words": len(text.split()),
         "epochs": args.epochs,
         "lr": args.lr,
+        "seq_len": args.seq_len,
+        "stride": args.stride or args.seq_len,
+        "seed": args.seed,
         "loss_history": hist["loss"],
+        "val_loss_history": hist.get("val_loss"),
         "test_prompt": args.test_prompt,
         "reply_before": ans_before,
         "reply_after": ans_after,
