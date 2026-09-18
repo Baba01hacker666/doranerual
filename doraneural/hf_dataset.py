@@ -92,6 +92,40 @@ def _detect_text_column(sample_row: Dict[str, any], explicit_col: Optional[str] 
     )
 
 
+USER_ROLES = {"user", "human", "prompter", "client", "q", "question", "input"}
+ZEXO_ROLES = {"assistant", "bot", "gpt", "model", "chatgpt", "agent", "zexo", "a", "answer", "output", "system"}
+
+
+def normalize_dialogue_text(text: str) -> str:
+    """Normalize raw dialogue strings containing varying role tags to standard User/Zexo turns."""
+    s = text.strip()
+    if not s:
+        return ""
+    # 1. OpenAssistant / Guanaco: ### Human: ... ### Assistant: ...
+    if "### Human:" in s or "### human:" in s or "### User:" in s:
+        s = re.sub(r'###\s*(Human|User|Prompter):\s*', 'User: ', s, flags=re.IGNORECASE)
+        s = re.sub(r'\s*###\s*(Assistant|AI|Bot|Zexo|Model|GPT):\s*', '\nZexo: ', s, flags=re.IGNORECASE)
+        return s.strip()
+    # 2. ChatML raw tags: <|im_start|>user ... <|im_end|>
+    if "<|im_start|>" in s:
+        s = re.sub(r'<\|im_start\|>\s*system\s*(.*?)\s*<\|im_end\|>', '', s, flags=re.DOTALL | re.IGNORECASE)
+        s = re.sub(r'<\|im_start\|>\s*(user|human|prompter)\s*', 'User: ', s, flags=re.IGNORECASE)
+        s = re.sub(r'<\|im_start\|>\s*(assistant|gpt|model|bot|zexo)\s*', '\nZexo: ', s, flags=re.IGNORECASE)
+        s = re.sub(r'<\|im_end\|>', '', s)
+        return s.strip()
+    # 3. Llama / Mistral [INST] [/INST]
+    if "[INST]" in s:
+        s = re.sub(r'\[INST\]\s*', 'User: ', s)
+        s = re.sub(r'\s*\[/INST\]\s*', '\nZexo: ', s)
+        return s.strip()
+    # 4. Standard Human: / Assistant: or User: / Assistant: lines
+    if re.search(r'^(Human|Assistant|AI):', s, flags=re.MULTILINE | re.IGNORECASE):
+        s = re.sub(r'^(Human|Prompt|Question):\s*', 'User: ', s, flags=re.MULTILINE | re.IGNORECASE)
+        s = re.sub(r'^(Assistant|Response|Answer|AI):\s*', 'Zexo: ', s, flags=re.MULTILINE | re.IGNORECASE)
+        return s.strip()
+    return s
+
+
 def format_row_to_dialogue(row: Dict[str, any], fallback_col: Optional[str] = None) -> Optional[str]:
     """Format any Hugging Face dataset row into clean User/Zexo conversational text."""
     # 1. ChatML messages format: [{"role": "user", "content": "..."}, ...]
@@ -99,11 +133,12 @@ def format_row_to_dialogue(row: Dict[str, any], fallback_col: Optional[str] = No
         turns = []
         for m in row["messages"]:
             if isinstance(m, dict):
-                r = m.get("role", "user").lower()
+                r = str(m.get("role", "user")).lower()
                 c = str(m.get("content", "")).strip()
-                prefix = "Zexo" if r in ("assistant", "bot", "gpt") else "User"
-                if c:
-                    turns.append(f"{prefix}: {c}")
+                if not c or r in ("system",):
+                    continue
+                prefix = "Zexo" if r in ZEXO_ROLES else "User"
+                turns.append(f"{prefix}: {c}")
         if turns:
             return "\n".join(turns)
 
@@ -112,46 +147,54 @@ def format_row_to_dialogue(row: Dict[str, any], fallback_col: Optional[str] = No
         turns = []
         for m in row["conversations"]:
             if isinstance(m, dict):
-                r = m.get("from", "human").lower()
-                c = str(m.get("value", "")).strip()
-                prefix = "Zexo" if r in ("gpt", "assistant", "chatgpt") else "User"
-                if c:
-                    turns.append(f"{prefix}: {c}")
+                r = str(m.get("from", m.get("role", "human"))).lower()
+                c = str(m.get("value", m.get("content", ""))).strip()
+                if not c or r in ("system",):
+                    continue
+                prefix = "Zexo" if r in ZEXO_ROLES else "User"
+                turns.append(f"{prefix}: {c}")
         if turns:
             return "\n".join(turns)
 
-    # 3. Instruction + Output format (Alpaca, Dolly, etc.)
-    if "instruction" in row and ("output" in row or "response" in row):
+    # 3. Instruction + Output/Response/Answer format (Alpaca, Dolly, etc.)
+    if "instruction" in row:
         inst = str(row.get("instruction", "")).strip()
         inp = str(row.get("input", "") or row.get("context", "")).strip()
-        out = str(row.get("output", "") or row.get("response", "")).strip()
+        out = str(row.get("output", "") or row.get("response", "") or row.get("answer", "")).strip()
         if inst and out:
             user_msg = f"{inst}\n{inp}".strip() if inp else inst
             return f"User: {user_msg}\nZexo: {out}"
 
-    # 4. Prompt + Completion format
-    if "prompt" in row and ("completion" in row or "response" in row):
+    # 4. Prompt + Completion/Response format
+    if "prompt" in row and ("completion" in row or "response" in row or "answer" in row):
         p = str(row.get("prompt", "")).strip()
-        c = str(row.get("completion", "") or row.get("response", "")).strip()
+        c = str(row.get("completion", "") or row.get("response", "") or row.get("answer", "")).strip()
         if p and c:
             return f"User: {p}\nZexo: {c}"
 
     # 5. Question + Answer format
-    if "question" in row and "answer" in row:
+    if "question" in row and ("answer" in row or "response" in row):
         q = str(row.get("question", "")).strip()
-        a = str(row.get("answer", "")).strip()
+        a = str(row.get("answer", "") or row.get("response", "")).strip()
         if q and a:
             return f"User: {q}\nZexo: {a}"
 
-    # 6. Fallback to single text column
+    # 6. Check common single text column names directly (text, content, dialogue, etc.)
+    for candidate in ("text", "content", "dialogue", "conversation", "story"):
+        if candidate in row and isinstance(row[candidate], str) and row[candidate].strip():
+            normalized = normalize_dialogue_text(row[candidate])
+            if normalized:
+                return normalized
+
+    # 7. Fallback to specified single text column
     if fallback_col and fallback_col in row:
         val = row[fallback_col]
         if isinstance(val, str) and val.strip():
-            return val.strip()
+            return normalize_dialogue_text(val)
         elif isinstance(val, (list, tuple)):
             joined = " ".join(str(item) for item in val if str(item).strip())
             if joined:
-                return joined
+                return normalize_dialogue_text(joined)
 
     return None
 
@@ -329,4 +372,110 @@ def download_hf_dataset(
 
     print(f"✅ Downloaded {len(collected_texts):,} examples from Hugging Face!")
     print(f"   Corpus saved to: {out_file} ({len(full_corpus):,} chars, {len(full_corpus.split()):,} words)")
+    return out_file
+
+
+# ── Fast-path registry ────────────────────────────────────────────────────────
+# Maps dataset ID → (direct JSON URL, list of fields to form User/Zexo dialogue)
+_HF_FAST_PATHS: dict = {
+    "yahma/alpaca-cleaned": "https://huggingface.co/datasets/yahma/alpaca-cleaned/resolve/main/alpaca_data_cleaned.json",
+    "tatsu-lab/alpaca":     "https://huggingface.co/datasets/tatsu-lab/alpaca/resolve/main/alpaca_data.json",
+    "databricks/databricks-dolly-15k": "https://huggingface.co/datasets/databricks/databricks-dolly-15k/resolve/main/databricks-dolly-15k.jsonl",
+    "timdettmers/openassistant-guanaco": "https://huggingface.co/datasets/timdettmers/openassistant-guanaco/resolve/main/openassistant_best_replies_train.jsonl",
+}
+
+
+def _download_fast_path(url: str, max_samples: int = -1, timeout: int = 90) -> list:
+    """Download a known-format HF dataset file and return list of dialogue strings."""
+    import urllib.request, json as _json
+
+    req = urllib.request.Request(url, headers={"User-Agent": "doraneural/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+
+    # JSONL (one JSON object per line) vs full JSON array
+    if url.endswith(".jsonl"):
+        rows = [_json.loads(l) for l in raw.splitlines() if l.strip()]
+    else:
+        rows = _json.loads(raw)
+
+    limit = len(rows) if max_samples <= 0 else min(max_samples, len(rows))
+    collected = []
+    for item in rows[:limit]:
+        d = format_row_to_dialogue(item)
+        if d:
+            collected.append(d)
+    return collected
+
+
+def download_and_merge_hf_datasets(
+    dataset_ids: list,
+    max_samples_each: int = -1,
+    target_path=None,
+    cache_dir=None,
+    timeout: int = 90,
+) -> "Path":
+    """Download multiple HF datasets and merge them into a single training corpus.
+
+    Args:
+        dataset_ids: List of HuggingFace dataset identifiers, e.g.
+                     ['yahma/alpaca-cleaned', 'databricks/databricks-dolly-15k']
+        max_samples_each: Max samples per dataset (-1 = all).
+        target_path: Where to write the merged corpus file.
+        cache_dir: Cache base directory.
+        timeout: Per-request network timeout.
+
+    Returns:
+        Path to merged corpus text file.
+    """
+    base_dir = Path(cache_dir or (Path.home() / ".cache" / "doraneural" / "datasets"))
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    out_file = Path(target_path) if target_path else base_dir / "merged_corpus.txt"
+
+    all_dialogues = []
+    for ds_id in dataset_ids:
+        ds_id = ds_id.strip()
+        if not ds_id:
+            continue
+        print(f"\n📥 Fetching dataset: {ds_id} ...")
+
+        # Try known fast-path first
+        fast_url = _HF_FAST_PATHS.get(ds_id)
+        if fast_url:
+            try:
+                dialogues = _download_fast_path(fast_url, max_samples=max_samples_each, timeout=timeout)
+                print(f"  ✅ Fast-path: {len(dialogues):,} examples")
+                all_dialogues.extend(dialogues)
+                continue
+            except Exception as e:
+                print(f"  ⚠️  Fast-path failed ({e}), falling back to datasets-server...")
+
+        # Fallback: datasets-server API
+        try:
+            corpus_path = download_hf_dataset(
+                ds_id,
+                max_samples=max_samples_each,
+                cache_dir=cache_dir,
+                timeout=timeout,
+            )
+            text = corpus_path.read_text(encoding="utf-8", errors="replace")
+            chunks = [c.strip() for c in text.split("\n\n") if c.strip()]
+            print(f"  ✅ API fallback: {len(chunks):,} examples")
+            all_dialogues.extend(chunks)
+        except Exception as e:
+            print(f"  ❌ Skipping {ds_id}: {e}")
+
+    if not all_dialogues:
+        raise ValueError("No examples collected from any dataset!")
+
+    import random
+    random.shuffle(all_dialogues)
+
+    merged = "\n\n".join(all_dialogues)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(merged, encoding="utf-8")
+
+    print(f"\n🗂️  Merged corpus: {len(all_dialogues):,} total examples → {out_file}")
+    print(f"   Size: {len(merged):,} chars, {len(merged.split()):,} words")
     return out_file

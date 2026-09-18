@@ -95,6 +95,11 @@ def main():
         help="Directory to save updated checkpoints (default: zexo/checkpoints).",
     )
     parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Enable fast mode: uses all available CPU threads, optimized sequence length, and high-throughput execution.",
+    )
+    parser.add_argument(
         "--tag",
         default=None,
         help="Run identifier tag.",
@@ -103,6 +108,14 @@ def main():
     args = parser.parse_args()
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Fast mode optimizations
+    if args.fast:
+        n_cpus = os.cpu_count() or 4
+        os.environ["OMP_NUM_THREADS"] = str(n_cpus)
+        os.environ["PYTHONUNBUFFERED"] = "1"
+        if args.seq_len == 16:
+            args.seq_len = 64
 
     run_id = args.tag or datetime.now(timezone.utc).strftime("zexo_%Y%m%d_%H%M%S")
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -113,6 +126,7 @@ def main():
     print(f"Run ID:         {run_id}")
     print(f"Target Tier:    {args.tier.upper()}")
     print(f"From Scratch:   {args.from_scratch}")
+    print(f"Fast Mode:      {args.fast} ({os.environ.get('OMP_NUM_THREADS', 'auto')} OpenMP threads)")
     print(f"Output Dir:     {out_dir}")
     print("─" * 72)
 
@@ -120,8 +134,13 @@ def main():
     corpus_source = args.hf_dataset or args.data
     if args.hf_dataset or dn.is_hf_dataset_identifier(args.data):
         target_hf = args.hf_dataset or args.data
-        print(f"🤗 Downloading training dataset from Hugging Face: '{target_hf}'...")
-        corpus_path = dn.download_hf_dataset(target_hf, max_samples=args.hf_samples)
+        if "," in target_hf:
+            ds_list = [d.strip() for d in target_hf.split(",") if d.strip()]
+            print(f"🤗 Downloading and merging {len(ds_list)} Hugging Face datasets: {ds_list}...")
+            corpus_path = dn.download_and_merge_hf_datasets(ds_list, max_samples_each=args.hf_samples)
+        else:
+            print(f"🤗 Downloading training dataset from Hugging Face: '{target_hf}'...")
+            corpus_path = dn.download_hf_dataset(target_hf, max_samples=args.hf_samples)
     else:
         corpus_path = Path(args.data)
         if not corpus_path.exists():

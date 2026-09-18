@@ -91,7 +91,7 @@ from .dataloader import (
 from .easy import create, quick_train
 from .teach import explain
 from .data import load_csv, create_sample_classification_csv, create_sample_regression_csv
-from .hf_dataset import download_hf_dataset, is_hf_dataset_identifier, get_hf_dataset_splits
+from .hf_dataset import download_hf_dataset, download_and_merge_hf_datasets, is_hf_dataset_identifier, get_hf_dataset_splits
 from .image import (
     read_bmp,
     write_bmp,

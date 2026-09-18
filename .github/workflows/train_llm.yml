@@ -49,6 +49,11 @@ on:
         required: false
         default: "128"
         type: string
+      fast:
+        description: "Enable fast mode (all CPU cores, OpenMP parallelization, unbuffered streaming)"
+        required: false
+        default: true
+        type: boolean
       test_prompt:
         description: "Test prompt to evaluate conversational response before and after training"
         required: false
@@ -121,23 +126,32 @@ jobs:
           fi
 
       - name: Run Zexo Conversational Training
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
+          export OMP_NUM_THREADS="$(nproc)"
           DATASET="${{ github.event.inputs.dataset || 'zexo/data/step1_conversational_expanded.txt' }}"
           if [ ! -f "$DATASET" ]; then
             DATASET="zexo/data/step1_conversational_base.txt"
           fi
           HF_DATASET="${{ github.event.inputs.hf_dataset || '' }}"
-          HF_SAMPLES="${{ github.event.inputs.hf_samples || '100' }}"
+          HF_SAMPLES="${{ github.event.inputs.hf_samples || '-1' }}"
           TIER="${{ github.event.inputs.tier || 'mini' }}"
           EPOCHS="${{ github.event.inputs.epochs || '5' }}"
-          LR="${{ github.event.inputs.learning_rate || '0.001' }}"
-          SEQLEN="${{ github.event.inputs.seq_len || '32' }}"
+          LR="${{ github.event.inputs.learning_rate || '0.0003' }}"
+          SEQLEN="${{ github.event.inputs.seq_len || '128' }}"
           PROMPT="${{ github.event.inputs.test_prompt || 'User: Who are you?\nZexo:' }}"
           FROM_SCRATCH="${{ github.event.inputs.from_scratch || 'false' }}"
+          FAST="${{ github.event.inputs.fast || 'true' }}"
 
           SCRATCH_FLAG=""
           if [ "$FROM_SCRATCH" = "true" ] || [ ! -f "zexo/checkpoints/latest.bin" ]; then
             SCRATCH_FLAG="--from-scratch"
+          fi
+
+          FAST_FLAG=""
+          if [ "$FAST" != "false" ]; then
+            FAST_FLAG="--fast"
           fi
 
           HF_ARG=""
@@ -145,7 +159,7 @@ jobs:
             HF_ARG="--hf-dataset $HF_DATASET --hf-samples $HF_SAMPLES"
           fi
 
-          python zexo/train.py \
+          python -u zexo/train.py \
             --data "$DATASET" \
             --tier "$TIER" \
             --output-dir zexo/checkpoints \
@@ -155,6 +169,7 @@ jobs:
             --test-prompt "$PROMPT" \
             --tag "zexo_run_${{ github.run_number }}" \
             $SCRATCH_FLAG \
+            $FAST_FLAG \
             $HF_ARG
 
       - name: Save Updated Checkpoint to Cache

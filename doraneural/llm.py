@@ -803,10 +803,13 @@ class LlamaLLM:
             tokens = tokens * ((seq_len + 2) // max(1, len(tokens)) + 1)
 
         history = {"loss": []}
+        total_steps = max(1, (len(tokens) - seq_len) // seq_len)
+        print_interval = max(1, total_steps // 20)  # log every 5% of epoch
 
         for ep in range(1, epochs + 1):
             ep_loss = 0.0
             steps = 0
+            t_ep_start = time.perf_counter()
             for i in range(0, len(tokens) - seq_len, seq_len):
                 in_seq = tokens[i : i + seq_len]
                 target_seq = tokens[i + 1 : i + seq_len + 1]
@@ -814,10 +817,27 @@ class LlamaLLM:
                 ep_loss += loss
                 steps += 1
 
+                if verbose and (steps % print_interval == 0 or steps == total_steps):
+                    elapsed = time.perf_counter() - t_ep_start
+                    tok_sec = (steps * seq_len) / max(1e-4, elapsed)
+                    rem_steps = total_steps - steps
+                    eta_sec = rem_steps / max(1e-4, steps / elapsed)
+                    pct = (steps / total_steps) * 100.0
+                    print(
+                        f"  [Epoch {ep}/{epochs}] Step {steps:,}/{total_steps:,} ({pct:5.1f}%) "
+                        f"| Loss: {loss:6.4f} | {tok_sec:,.0f} tok/s | ETA: {eta_sec:.0f}s",
+                        flush=True
+                    )
+
             avg_loss = ep_loss / max(1, steps)
             history["loss"].append(avg_loss)
+            ep_time = time.perf_counter() - t_ep_start
             if verbose:
-                print(f"Epoch {ep:2d}/{epochs} | Loss: {avg_loss:.4f} (Engine: {self.backend.upper()})")
+                print(
+                    f"✓ Epoch {ep:2d}/{epochs} finished in {ep_time:.1f}s | "
+                    f"Avg Loss: {avg_loss:.4f} (Engine: {self.backend.upper()})\n",
+                    flush=True
+                )
 
         return history
 
