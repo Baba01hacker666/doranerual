@@ -68,6 +68,19 @@ float llama_train_step(
     float eps
 );
 
+// Native full-transformer forward/backpropagation through every decoder layer.
+float llama_full_train_step(
+    LlamaCppEngine* engine,
+    const int* input_tokens,
+    const int* target_tokens,
+    int seq_len,
+    float lr,
+    float weight_decay,
+    float beta1,
+    float beta2,
+    float eps
+);
+
 // Threading controls
 int llama_get_threads();
 void llama_set_threads(int num_threads);

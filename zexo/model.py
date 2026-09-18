@@ -77,6 +77,11 @@ class ZexoModel:
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
         full_backprop: bool = False,
+        native_full: bool = True,
+        lora_rank: Optional[int] = None,
+        lora_alpha: float = 16.0,
+        lora_targets: Optional[List[str]] = None,
+        adapter_path: Optional[Union[str, Path]] = None,
     ) -> dict:
         """Fine-tune Zexo, optionally differentiating the complete transformer."""
         return self.llm.train(
@@ -93,11 +98,20 @@ class ZexoModel:
             seed=seed,
             max_eval_steps=max_eval_steps,
             full_backprop=full_backprop,
+            native_full=native_full,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            lora_targets=lora_targets,
+            adapter_path=adapter_path,
         )
 
     def full_backprop_model(self):
         """Expose the CPU autograd model for advanced full-layer training."""
         return self.llm.full_backprop_model()
+
+    def load_lora(self, adapter_path: Union[str, Path]):
+        """Load a saved LoRA adapter on top of the current pretrained checkpoint."""
+        return self.llm.load_lora(adapter_path)
 
     def reset(self) -> None:
         """Clear active conversation context and model KV cache."""

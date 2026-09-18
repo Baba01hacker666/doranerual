@@ -104,6 +104,21 @@ The default trainer remains the fast head-only path. For real CPU NumPy backprop
 
 The inference engine now uses the optimized C++ path automatically when available. Set `DORANEURAL_NUM_THREADS` or call `llm.set_num_threads(n)` to tune native parallelism. Tokenizers use heap-based merges and bounded caches, and HuggingFace single-file, BF16, and sharded safetensors checkpoints are supported without PyTorch.
 
+For pretrained-checkpoint adaptation, LoRA keeps the base weights frozen and saves only small adapter matrices:
+
+```bash
+python zexo/train.py \
+  --tier micro \
+  --checkpoint path/to/pretrained.bin \
+  --data zexo/data/zexo_quality_v1_train.txt \
+  --lora-rank 8 \
+  --lora-alpha 16 \
+  --lora-targets q,v \
+  --adapter-output zexo/checkpoints/zexo_style.npz
+```
+
+`--full-backprop` now selects the native C++ full-transformer trainer automatically when the C++ engine is available. Use `--numpy-full` only when you specifically want the reference autograd implementation for debugging or numerical experiments.
+
 ```bash
 # Full transformer backpropagation (CPU/NumPy reference trainer)
 python zexo/train.py \

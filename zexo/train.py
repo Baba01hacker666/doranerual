@@ -136,6 +136,38 @@ def main():
         help="Train all transformer weights with the CPU-friendly NumPy autograd path (slower; head-only remains default).",
     )
     parser.add_argument(
+        "--numpy-full",
+        action="store_true",
+        help="Force the slower NumPy full-backprop reference path instead of native C++.",
+    )
+    parser.add_argument(
+        "--lora-rank",
+        type=int,
+        default=None,
+        help="Train a LoRA adapter instead of changing the pretrained base (for example: 8).",
+    )
+    parser.add_argument(
+        "--lora-alpha",
+        type=float,
+        default=16.0,
+        help="LoRA scaling alpha (default: 16).",
+    )
+    parser.add_argument(
+        "--lora-targets",
+        default="q,v",
+        help="Comma-separated LoRA targets: q,k,v,o,w1,w2,w3,lm_head (default: q,v).",
+    )
+    parser.add_argument(
+        "--adapter-output",
+        default=None,
+        help="Optional .npz path for saving the trained LoRA adapter.",
+    )
+    parser.add_argument(
+        "--adapter-input",
+        default=None,
+        help="Optional existing .npz LoRA adapter to load on the checkpoint before training/evaluation.",
+    )
+    parser.add_argument(
         "--fast",
         action="store_true",
         help="Enable fast mode: uses all available CPU threads, optimized sequence length, and high-throughput execution.",
@@ -147,6 +179,10 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.full_backprop and args.lora_rank is not None:
+        parser.error("--full-backprop and --lora-rank are mutually exclusive")
+    if args.lora_rank is not None and args.lora_rank <= 0:
+        parser.error("--lora-rank must be positive")
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,7 +203,10 @@ def main():
     print(f"Run ID:         {run_id}")
     print(f"Target Tier:    {args.tier.upper()}")
     print(f"From Scratch:   {args.from_scratch}")
-    print(f"Training Mode:  {'FULL TRANSFORMER BACKPROP' if args.full_backprop else 'HEAD-ONLY FAST PATH'}")
+    mode = "FULL TRANSFORMER BACKPROP" if args.full_backprop else (
+        f"LORA ADAPTER (rank {args.lora_rank})" if args.lora_rank is not None else "HEAD-ONLY FAST PATH"
+    )
+    print(f"Training Mode:  {mode}")
     print(f"Weight Decay:   {args.weight_decay}")
     print(f"Fast Mode:      {args.fast} ({os.environ.get('OMP_NUM_THREADS', 'auto')} OpenMP threads)")
     print(f"Output Dir:     {out_dir}")
@@ -207,6 +246,9 @@ def main():
     # 2. Load or Initialize Zexo
     print("\n[1/4] Loading Zexo Model...")
     zexo = load_zexo(checkpoint_path=args.checkpoint, tier=args.tier, from_scratch=args.from_scratch)
+    if args.adapter_input:
+        zexo.load_lora(args.adapter_input)
+        print(f"  Loaded LoRA adapter: {args.adapter_input}")
     print(f"  Architecture: {zexo.config.dim} dim, {zexo.config.n_layers} layers, {zexo.config.parameter_count:,} params")
     print(f"  Backend:      {zexo.llm.backend.upper()}")
 
@@ -234,6 +276,11 @@ def main():
         seed=args.seed,
         max_eval_steps=args.max_eval_steps,
         full_backprop=args.full_backprop,
+        native_full=not args.numpy_full,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_targets=[item.strip() for item in args.lora_targets.split(",") if item.strip()],
+        adapter_path=args.adapter_output,
     )
     duration = time.perf_counter() - t0
     final_report = f"Final loss: {hist['loss'][-1]:.4f}"
@@ -276,7 +323,15 @@ def main():
         "seq_len": args.seq_len,
         "stride": args.stride or args.seq_len,
         "seed": args.seed,
-        "training_mode": "full_backprop" if args.full_backprop else "head_only",
+        "training_mode": "full_backprop" if args.full_backprop else (
+            "lora" if args.lora_rank is not None else "head_only"
+        ),
+        "full_backprop_backend": "numpy" if args.numpy_full else "native_cpp",
+        "lora_rank": args.lora_rank,
+        "lora_alpha": args.lora_alpha if args.lora_rank is not None else None,
+        "lora_targets": [item.strip() for item in args.lora_targets.split(",") if item.strip()] if args.lora_rank is not None else None,
+        "adapter_path": hist.get("adapter_path"),
+        "adapter_input": args.adapter_input,
         "loss_history": hist["loss"],
         "val_loss_history": hist.get("val_loss"),
         "test_prompt": args.test_prompt,

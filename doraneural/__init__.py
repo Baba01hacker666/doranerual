@@ -113,7 +113,7 @@ from .autograd import (
     mse_loss,
     binary_cross_entropy,
 )
-from .transformer import TransformerDecoderLM, TransformerDecoderBlock, TensorAdamW
+from .transformer import LoRAAdapter, TransformerDecoderLM, TransformerDecoderBlock, TensorAdamW
 from .compiler import (
     compile_model,
     CompiledModel,
@@ -265,6 +265,7 @@ __all__ = [
     "mse_loss",
     "binary_cross_entropy",
     # Full-transformer NumPy backpropagation
+    "LoRAAdapter",
     "TransformerDecoderLM",
     "TransformerDecoderBlock",
     "TensorAdamW",

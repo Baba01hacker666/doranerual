@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from doraneural.autograd import Tensor
 from doraneural.llm import LlamaLLM
@@ -53,6 +54,57 @@ def test_full_backprop_reaches_attention_and_feed_forward_parameters():
     ]
     assert all(parameter.grad is not None for parameter in learned)
     assert all(float(np.linalg.norm(parameter.grad)) > 1e-8 for parameter in learned)
+
+
+def test_lora_trains_adapters_without_updating_pretrained_base(tmp_path):
+    np.random.seed(31)
+    model = TransformerDecoderLM(
+        dim=16,
+        hidden_dim=32,
+        n_layers=1,
+        n_heads=4,
+        n_kv_heads=2,
+        vocab_size=12,
+        seq_len=16,
+    )
+    inputs = [1, 2, 3, 4, 5]
+    targets = [2, 3, 4, 5, 6]
+    initial_logits = model.forward(inputs).data.copy()
+    base_q = model.layers[0].wq.data.copy()
+    model.enable_lora(rank=4, alpha=8.0, target_modules=("q", "v"))
+    np.testing.assert_allclose(model.forward(inputs).data, initial_logits, rtol=0, atol=1e-6)
+    assert not model.layers[0].wq.requires_grad
+    assert len(model.lora_parameters()) == 4
+
+    optimizer = TensorAdamW(model.lora_parameters(), lr=0.05, weight_decay=0.0)
+    initial_loss = float(model.loss(inputs, targets).item())
+    for _ in range(15):
+        model.train_batch(inputs, targets, optimizer)
+    final_loss = float(model.loss(inputs, targets).item())
+    assert final_loss < initial_loss * 0.5
+    np.testing.assert_array_equal(model.layers[0].wq.data, base_q)
+
+    adapter_path = model.save_lora(tmp_path / "adapter")
+    assert adapter_path.suffix == ".npz"
+    restored = TransformerDecoderLM(
+        dim=16, hidden_dim=32, n_layers=1, n_heads=4, n_kv_heads=2,
+        vocab_size=12, seq_len=16,
+    )
+    # In a real use case the adapter is loaded on the same pretrained base;
+    # copy the base weights here to make the serialization check explicit.
+    restored.token_embedding.data[...] = model.token_embedding.data
+    restored.rms_final.data[...] = model.rms_final.data
+    restored.layers[0].rms_att.data[...] = model.layers[0].rms_att.data
+    restored.layers[0].rms_ffn.data[...] = model.layers[0].rms_ffn.data
+    restored.layers[0].wq.data[...] = model.layers[0].wq.data
+    restored.layers[0].wk.data[...] = model.layers[0].wk.data
+    restored.layers[0].wv.data[...] = model.layers[0].wv.data
+    restored.layers[0].wo.data[...] = model.layers[0].wo.data
+    restored.layers[0].w1.data[...] = model.layers[0].w1.data
+    restored.layers[0].w2.data[...] = model.layers[0].w2.data
+    restored.layers[0].w3.data[...] = model.layers[0].w3.data
+    restored.load_lora(adapter_path)
+    np.testing.assert_allclose(restored.forward(inputs).data, model.forward(inputs).data, rtol=1e-5, atol=1e-5)
 
 
 def test_tiny_full_backprop_model_reduces_next_token_loss():
@@ -145,6 +197,43 @@ def _write_tiny_llama_checkpoint(path: Path, model: TransformerDecoderLM) -> Non
         ))
         for array in arrays:
             np.asarray(array, dtype=np.float32).tofile(handle)
+
+
+def test_native_cpp_full_backprop_reduces_loss_and_updates_attention(tmp_path):
+    np.random.seed(41)
+    source = TransformerDecoderLM(
+        dim=16,
+        hidden_dim=32,
+        n_layers=1,
+        n_heads=4,
+        n_kv_heads=2,
+        vocab_size=512,
+        seq_len=16,
+    )
+    checkpoint = tmp_path / "native-tiny.bin"
+    _write_tiny_llama_checkpoint(checkpoint, source)
+    try:
+        llm = LlamaLLM(checkpoint, REPO_ROOT / "zexo" / "tokenizer" / "tok512.bin", backend="cpp")
+    except RuntimeError as error:
+        pytest.skip(f"native C++ engine unavailable: {error}")
+    before_q = llm.wq.copy()
+    before_k = llm.wk.copy()
+    before_ffn = llm.w1.copy()
+    before_norm = llm.rms_att.copy()
+    history = llm.train(
+        "abc abc abc abc abc abc abc abc",
+        epochs=1,
+        lr=0.01,
+        seq_len=4,
+        verbose=0,
+        full_backprop=True,
+    )
+    assert history["loss"]
+    assert llm.backend == "cpp"
+    assert not np.array_equal(before_q, llm.wq)
+    assert not np.array_equal(before_k, llm.wk)
+    assert not np.array_equal(before_ffn, llm.w1)
+    assert not np.array_equal(before_norm, llm.rms_att)
 
 
 def test_full_model_uses_existing_llama_tensor_layout_and_syncs_weights(tmp_path):

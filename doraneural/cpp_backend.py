@@ -167,6 +167,19 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
         ]
         lib.llama_train_step.restype = ctypes.c_float
 
+        lib.llama_full_train_step.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+        ]
+        lib.llama_full_train_step.restype = ctypes.c_float
+
         lib.llama_get_threads.argtypes = []
         lib.llama_get_threads.restype = ctypes.c_int
 
@@ -330,6 +343,37 @@ class CppLlamaEngine:
         target_arr = (ctypes.c_int * seq_len)(*target_tokens)
 
         loss = self.lib.llama_train_step(
+            self.handle,
+            in_arr,
+            target_arr,
+            seq_len,
+            float(lr),
+            float(weight_decay),
+            float(beta1),
+            float(beta2),
+            float(eps),
+        )
+        return float(loss)
+
+    def full_train_step(
+        self,
+        input_tokens: List[int],
+        target_tokens: List[int],
+        lr: float = 1e-4,
+        weight_decay: float = 0.01,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        eps: float = 1e-8,
+    ) -> float:
+        """Run native full-transformer backpropagation and AdamW update."""
+        seq_len = len(input_tokens)
+        if seq_len != len(target_tokens):
+            raise ValueError(f"input_tokens length ({seq_len}) must match target_tokens ({len(target_tokens)})")
+        if seq_len <= 0 or seq_len >= self.config_struct.seq_len:
+            raise ValueError("sequence length must fit inside the model context window")
+        in_arr = (ctypes.c_int * seq_len)(*input_tokens)
+        target_arr = (ctypes.c_int * seq_len)(*target_tokens)
+        loss = self.lib.llama_full_train_step(
             self.handle,
             in_arr,
             target_arr,

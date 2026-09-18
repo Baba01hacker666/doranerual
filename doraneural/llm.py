@@ -987,6 +987,81 @@ class LlamaLLM:
             self._full_backprop_model = model
         return model
 
+    def _train_full_native(
+        self,
+        text: str,
+        epochs: int,
+        lr: float,
+        seq_len: int,
+        weight_decay: float,
+        verbose: int,
+        eval_text: Optional[str],
+        validation_split: float,
+        stride: Optional[int],
+        shuffle: bool,
+        seed: int,
+        max_eval_steps: Optional[int],
+    ) -> dict:
+        """Native C++ full-transformer training loop."""
+        if self.cpp_engine is None:
+            raise RuntimeError("Native full backpropagation requires the C++ backend")
+        if eval_text is not None and validation_split:
+            raise ValueError("Pass either eval_text or validation_split, not both")
+
+        def encode_nonempty(value: str, label: str) -> List[int]:
+            encoded = self.tokenizer.encode(value, bos=False)
+            if not encoded:
+                raise ValueError(f"{label} produced no tokens")
+            return encoded
+
+        tokens = encode_nonempty(text, "training text")
+        if eval_text is not None:
+            eval_tokens = encode_nonempty(eval_text, "evaluation text")
+        elif validation_split > 0.0:
+            split_at = int(len(tokens) * (1.0 - validation_split))
+            split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
+            eval_tokens = tokens[split_at:]
+            tokens = tokens[:split_at]
+        else:
+            eval_tokens = None
+        if len(tokens) < seq_len + 1:
+            tokens = tokens * (((seq_len + 1) // len(tokens)) + 1)
+        step = stride or seq_len
+        if not 1 <= step <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {step}")
+        starts = list(range(0, len(tokens) - seq_len, step))
+        if not starts:
+            raise ValueError("training text does not contain a usable sequence")
+
+        rng = np.random.default_rng(seed)
+        history = {"loss": []}
+        if eval_tokens is not None:
+            history["val_loss"] = []
+        for epoch in range(epochs):
+            order = starts.copy()
+            if shuffle:
+                rng.shuffle(order)
+            total = 0.0
+            for start in order:
+                total += self.cpp_engine.full_train_step(
+                    tokens[start : start + seq_len],
+                    tokens[start + 1 : start + seq_len + 1],
+                    lr=lr,
+                    weight_decay=weight_decay,
+                )
+            history["loss"].append(total / len(order))
+            if eval_tokens is not None:
+                history["val_loss"].append(self._evaluate_tokens(
+                    eval_tokens, seq_len, stride=step, max_steps=max_eval_steps,
+                ))
+            if verbose:
+                message = f"[Full BP/C++] Epoch {epoch + 1}/{epochs} loss={history['loss'][-1]:.4f}"
+                if "val_loss" in history:
+                    message += f" val_loss={history['val_loss'][-1]:.4f}"
+                print(message, flush=True)
+        self.reset_cache()
+        return history
+
     def train_full(
         self,
         text: str,
@@ -1001,8 +1076,9 @@ class LlamaLLM:
         shuffle: bool = True,
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
+        native: bool = True,
     ) -> dict:
-        """Fine-tune every transformer parameter using NumPy autograd.
+        """Fine-tune every transformer parameter using native C++ or NumPy autograd.
 
         This is deliberately separate from the historical head-only trainer:
         it is slower and intended for small CPU runs, validation, and research.
@@ -1017,6 +1093,11 @@ class LlamaLLM:
             raise ValueError("validation_split must be in [0, 1)")
         if eval_text is not None and validation_split:
             raise ValueError("Pass either eval_text or validation_split, not both")
+        if native and self.cpp_engine is not None:
+            return self._train_full_native(
+                text, epochs, lr, seq_len, weight_decay, verbose,
+                eval_text, validation_split, stride, shuffle, seed, max_eval_steps,
+            )
 
         def encode_nonempty(value: str, label: str) -> List[int]:
             encoded = self.tokenizer.encode(value, bos=False)
@@ -1057,6 +1138,73 @@ class LlamaLLM:
         self.reset_cache()
         return history
 
+    def train_lora(
+        self,
+        text: str,
+        rank: int = 8,
+        alpha: float = 16.0,
+        target_modules: Sequence[str] = ("q", "v"),
+        epochs: int = 3,
+        lr: float = 1e-3,
+        seq_len: int = 32,
+        weight_decay: float = 0.0,
+        verbose: int = 1,
+        eval_text: Optional[str] = None,
+        validation_split: float = 0.0,
+        stride: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        max_eval_steps: Optional[int] = None,
+        adapter_path: Optional[Union[str, Path]] = None,
+    ) -> dict:
+        """Fine-tune a pretrained checkpoint with adapter-only LoRA weights."""
+        if not text:
+            raise ValueError("training text must not be empty")
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must be in [0, 1)")
+        if eval_text is not None and validation_split:
+            raise ValueError("Pass either eval_text or validation_split, not both")
+        model = self.full_backprop_model()
+        model.enable_lora(rank=rank, alpha=alpha, target_modules=target_modules, freeze_base=True)
+        tokens = self.tokenizer.encode(text, bos=False)
+        eval_tokens = self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
+        if validation_split > 0.0:
+            split_at = int(len(tokens) * (1.0 - validation_split))
+            split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
+            eval_tokens = tokens[split_at:]
+            tokens = tokens[:split_at]
+        if len(tokens) < seq_len + 1:
+            repeats = ((seq_len + 1) // len(tokens)) + 1
+            tokens = tokens * repeats
+        history = model.fit_lora_tokens(
+            tokens,
+            epochs=epochs,
+            seq_len=seq_len,
+            lr=lr,
+            weight_decay=weight_decay,
+            stride=stride,
+            shuffle=shuffle,
+            seed=seed,
+            eval_tokens=eval_tokens,
+            max_eval_steps=max_eval_steps,
+            verbose=verbose,
+        )
+        if adapter_path is not None:
+            history["adapter_path"] = str(model.save_lora(adapter_path))
+        # Keep chat/generation fast: fold the trained delta into the arrays
+        # already owned by the native engine after saving the standalone adapter.
+        model.merge_lora()
+        self.reset_cache()
+        return history
+
+    def load_lora(self, adapter_path: Union[str, Path]):
+        """Load and merge a saved adapter onto this checkpoint for fast inference."""
+        model = self.full_backprop_model()
+        model.load_lora(adapter_path)
+        model.merge_lora()
+        self.reset_cache()
+        return model
+
     def train(
         self,
         text: str,
@@ -1072,6 +1220,11 @@ class LlamaLLM:
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
         full_backprop: bool = False,
+        native_full: bool = True,
+        lora_rank: Optional[int] = None,
+        lora_alpha: float = 16.0,
+        lora_targets: Optional[Sequence[str]] = None,
+        adapter_path: Optional[Union[str, Path]] = None,
     ) -> dict:
         """Fine-tune the model on custom text with reproducible validation.
 
@@ -1085,6 +1238,27 @@ class LlamaLLM:
         not pretend that a lower loss is a complete quality evaluation. Set
         ``full_backprop=True`` to train all decoder layers with NumPy autograd.
         """
+        if lora_rank is not None:
+            if full_backprop:
+                raise ValueError("Choose either lora_rank or full_backprop, not both")
+            return self.train_lora(
+                text,
+                rank=lora_rank,
+                alpha=lora_alpha,
+                target_modules=lora_targets or ("q", "v"),
+                epochs=epochs,
+                lr=lr,
+                seq_len=seq_len,
+                weight_decay=weight_decay,
+                verbose=verbose,
+                eval_text=eval_text,
+                validation_split=validation_split,
+                stride=stride,
+                shuffle=shuffle,
+                seed=seed,
+                max_eval_steps=max_eval_steps,
+                adapter_path=adapter_path,
+            )
         if full_backprop:
             return self.train_full(
                 text,
@@ -1099,6 +1273,7 @@ class LlamaLLM:
                 shuffle=shuffle,
                 seed=seed,
                 max_eval_steps=max_eval_steps,
+                native=native_full,
             )
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
