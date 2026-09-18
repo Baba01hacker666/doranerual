@@ -61,11 +61,25 @@ def _find_compiler() -> Optional[str]:
 
 def build_cpp_library(force: bool = False) -> Optional[Path]:
     """Compile the C++ shared library if it does not already exist."""
+    global _LIB_HANDLE, _INIT_ATTEMPTED
+    if force:
+        # Reset cached state so get_cpp_library will retry compilation
+        _LIB_HANDLE = None
+        _INIT_ATTEMPTED = False
+        # Remove old .so to force rebuild
+        try:
+            so_path = Path(__file__).resolve().parent / "csrc" / "libdoraneural.so"
+            if so_path.exists():
+                so_path.unlink()
+        except Exception:
+            pass
+
     csrc_dir = Path(__file__).resolve().parent / "csrc"
     cpp_file = csrc_dir / "llm_engine.cpp"
     so_file = csrc_dir / "libdoraneural.so"
 
     if not cpp_file.exists():
+        print(f"[cpp_backend] C++ source not found: {cpp_file}", file=sys.stderr)
         return None
 
     if (
@@ -77,6 +91,7 @@ def build_cpp_library(force: bool = False) -> Optional[Path]:
 
     compiler = _find_compiler()
     if not compiler:
+        print("[cpp_backend] No C++ compiler found (tried g++, clang++, c++)", file=sys.stderr)
         return None
 
     cmd = [
@@ -97,20 +112,32 @@ def build_cpp_library(force: bool = False) -> Optional[Path]:
     try:
         ret = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if ret.returncode != 0:
+            print(f"[cpp_backend] Primary compile failed: {ret.stderr.decode()[:1000]}", file=sys.stderr)
             # Fallback without -march=native
             cmd_no_native = [compiler, "-O3", "-shared", "-fPIC", "-std=c++17", "-fopenmp", "-ffast-math", str(cpp_file), "-o", str(so_file)]
             ret = subprocess.run(cmd_no_native, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if ret.returncode != 0:
+                print(f"[cpp_backend] Fallback (no native) failed: {ret.stderr.decode()[:1000]}", file=sys.stderr)
                 # Fallback without -fopenmp
                 cmd_no_omp = [compiler, "-O3", "-shared", "-fPIC", "-std=c++17", "-ffast-math", str(cpp_file), "-o", str(so_file)]
                 ret = subprocess.run(cmd_no_omp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
                 if ret.returncode != 0:
+                    print(f"[cpp_backend] Fallback (no omp) failed: {ret.stderr.decode()[:1000]}", file=sys.stderr)
                     cmd_basic = [compiler, "-O3", "-shared", "-fPIC", "-std=c++17", str(cpp_file), "-o", str(so_file)]
                     ret = subprocess.run(cmd_basic, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
                     if ret.returncode != 0:
+                        print(f"[cpp_backend] Basic compile failed: {ret.stderr.decode()[:1000]}", file=sys.stderr)
                         return None
-        return so_file if so_file.exists() else None
-    except Exception:
+        if not so_file.exists():
+            print(f"[cpp_backend] Expected .so not found after compile: {so_file}", file=sys.stderr)
+            return None
+        # Quick sanity: file size >10KB
+        if so_file.stat().st_size < 10*1024:
+            print(f"[cpp_backend] Compiled .so suspiciously small: {so_file.stat().st_size} bytes", file=sys.stderr)
+            return None
+        return so_file
+    except Exception as e:
+        print(f"[cpp_backend] Exception during compile: {e}", file=sys.stderr)
         return None
 
 
@@ -125,10 +152,17 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
     _INIT_ATTEMPTED = True
     so_path = build_cpp_library()
     if not so_path or not so_path.exists():
+        print(f"[cpp_backend] Library not available at {so_path}", file=sys.stderr)
         return None
 
     try:
         lib = ctypes.CDLL(str(so_path))
+        # Verify required symbols exist
+        required_symbols = ["llama_create", "llama_free", "llama_forward", "llama_generate", "llama_get_threads", "llama_set_threads", "llama_sample_token"]
+        for sym in required_symbols:
+            if not hasattr(lib, sym):
+                print(f"[cpp_backend] Missing symbol in .so: {sym}", file=sys.stderr)
+                return None
 
         # Define argtypes and restypes
         lib.llama_create.argtypes = [ctypes.POINTER(LlamaCppConfigStruct), ctypes.POINTER(LlamaCppWeightsStruct)]
@@ -191,7 +225,8 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
 
         _LIB_HANDLE = lib
         return _LIB_HANDLE
-    except Exception:
+    except Exception as e:
+        print(f"[cpp_backend] Failed to load library: {e}", file=sys.stderr)
         return None
 
 
@@ -203,10 +238,35 @@ def is_cpp_available() -> bool:
 class CppLlamaEngine:
     """Python wrapper for the compiled C++ LLaMA engine."""
 
+    # Required weight keys for a valid LLaMA checkpoint
+    _REQUIRED_WEIGHT_KEYS = [
+        "token_embedding_table", "rms_att_weight", "wq", "wk", "wv", "wo",
+        "rms_ffn_weight", "w1", "w2", "w3", "rms_final_weight", "wcls"
+    ]
+
     def __init__(self, config: Any, weights_dict: dict) -> None:
         self.lib = get_cpp_library()
         if not self.lib:
-            raise RuntimeError("C++ library libdoraneural.so is not available.")
+            raise RuntimeError("C++ library libdoraneural.so is not available. Tried to compile from doraneural/csrc/llm_engine.cpp but failed. Check compiler (g++/clang++) and OpenMP support.")
+
+        # Validate config
+        for attr in ["dim", "hidden_dim", "n_layers", "n_heads", "n_kv_heads", "vocab_size", "seq_len"]:
+            if not hasattr(config, attr):
+                raise ValueError(f"Config missing attribute: {attr}")
+            val = getattr(config, attr)
+            if not isinstance(val, int) or val <= 0:
+                raise ValueError(f"Config {attr} must be positive int, got {val}")
+        if config.dim % config.n_heads != 0:
+            raise ValueError(f"dim {config.dim} must be divisible by n_heads {config.n_heads}")
+        if config.n_heads % config.n_kv_heads != 0:
+            raise ValueError(f"n_heads {config.n_heads} must be divisible by n_kv_heads {config.n_kv_heads}")
+
+        # Validate weights dict
+        if not isinstance(weights_dict, dict):
+            raise TypeError(f"weights_dict must be dict, got {type(weights_dict)}")
+        missing = [k for k in self._REQUIRED_WEIGHT_KEYS if k not in weights_dict]
+        if missing:
+            raise KeyError(f"weights_dict missing required keys: {missing}")
 
         self.config_struct = LlamaCppConfigStruct(
             dim=config.dim,
@@ -221,7 +281,13 @@ class CppLlamaEngine:
 
         self._contiguous_refs: List[np.ndarray] = []
 
-        def _ptr(arr: np.ndarray) -> ctypes.POINTER(ctypes.c_float):
+        def _ptr(arr: np.ndarray, name: str) -> ctypes.POINTER(ctypes.c_float):
+            if arr is None:
+                raise ValueError(f"Weight {name} is None")
+            if not isinstance(arr, np.ndarray):
+                raise TypeError(f"Weight {name} must be np.ndarray, got {type(arr)}")
+            if arr.size == 0:
+                raise ValueError(f"Weight {name} is empty")
             if arr.dtype != np.float32 or not arr.flags["C_CONTIGUOUS"]:
                 arr = np.ascontiguousarray(arr, dtype=np.float32)
                 # Keep converted storage alive for the entire native engine
@@ -232,21 +298,24 @@ class CppLlamaEngine:
         self._weights_ref = weights_dict  # Keep original Python arrays alive
         is_shared = int(weights_dict.get("shared_classifier", 1))
 
-        self.weights_struct = LlamaCppWeightsStruct(
-            token_embedding_table=_ptr(weights_dict["token_embedding_table"]),
-            rms_att_weight=_ptr(weights_dict["rms_att_weight"]),
-            wq=_ptr(weights_dict["wq"]),
-            wk=_ptr(weights_dict["wk"]),
-            wv=_ptr(weights_dict["wv"]),
-            wo=_ptr(weights_dict["wo"]),
-            rms_ffn_weight=_ptr(weights_dict["rms_ffn_weight"]),
-            w1=_ptr(weights_dict["w1"]),
-            w2=_ptr(weights_dict["w2"]),
-            w3=_ptr(weights_dict["w3"]),
-            rms_final_weight=_ptr(weights_dict["rms_final_weight"]),
-            wcls=_ptr(weights_dict["wcls"]),
-            shared_classifier=is_shared,
-        )
+        try:
+            self.weights_struct = LlamaCppWeightsStruct(
+                token_embedding_table=_ptr(weights_dict["token_embedding_table"], "token_embedding_table"),
+                rms_att_weight=_ptr(weights_dict["rms_att_weight"], "rms_att_weight"),
+                wq=_ptr(weights_dict["wq"], "wq"),
+                wk=_ptr(weights_dict["wk"], "wk"),
+                wv=_ptr(weights_dict["wv"], "wv"),
+                wo=_ptr(weights_dict["wo"], "wo"),
+                rms_ffn_weight=_ptr(weights_dict["rms_ffn_weight"], "rms_ffn_weight"),
+                w1=_ptr(weights_dict["w1"], "w1"),
+                w2=_ptr(weights_dict["w2"], "w2"),
+                w3=_ptr(weights_dict["w3"], "w3"),
+                rms_final_weight=_ptr(weights_dict["rms_final_weight"], "rms_final_weight"),
+                wcls=_ptr(weights_dict["wcls"], "wcls"),
+                shared_classifier=is_shared,
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to prepare weight pointers: {e}") from e
 
         self.handle = self.lib.llama_create(
             ctypes.byref(self.config_struct),
@@ -265,34 +334,80 @@ class CppLlamaEngine:
                 pass
 
     def __del__(self) -> None:
-        if hasattr(self, "handle") and self.handle and self.lib:
-            self.lib.llama_free(self.handle)
-            self.handle = None
+        try:
+            if hasattr(self, "handle") and self.handle and self.lib:
+                self.lib.llama_free(self.handle)
+                self.handle = None
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if self.handle and self.lib:
+                self.lib.llama_free(self.handle)
+        except Exception:
+            pass
+        self.handle = None
+        return False
 
     @property
     def threads(self) -> int:
         """Return the native OpenMP thread count."""
-        return int(self.lib.llama_get_threads())
+        try:
+            return int(self.lib.llama_get_threads())
+        except Exception as e:
+            raise RuntimeError(f"Failed to get threads: {e}") from e
 
     def set_threads(self, num_threads: int) -> None:
         """Tune native inference/training parallelism for the current process."""
         if num_threads <= 0:
             raise ValueError(f"num_threads must be positive, got {num_threads}")
-        self.lib.llama_set_threads(int(num_threads))
+        if num_threads > 64:
+            print(f"[cpp_backend] Warning: num_threads {num_threads} unusually high, may degrade performance", file=sys.stderr)
+        try:
+            self.lib.llama_set_threads(int(num_threads))
+        except Exception as e:
+            raise RuntimeError(f"Failed to set threads: {e}") from e
 
     def reset_cache(self) -> None:
         """Reset key-value cache arenas."""
-        self.lib.llama_reset_cache(self.handle)
+        if not self.handle:
+            raise RuntimeError("Engine handle is null, cannot reset cache")
+        try:
+            self.lib.llama_reset_cache(self.handle)
+        except Exception as e:
+            raise RuntimeError(f"Failed to reset cache: {e}") from e
 
     def forward(self, token: int, pos: int, copy_logits: bool = True) -> np.ndarray:
         """Run forward pass for a single token using C++ OpenMP/SIMD engine."""
-        ptr = self._logits_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        self.lib.llama_forward(self.handle, int(token), int(pos), ptr)
-        return self._logits_buf.copy() if copy_logits else self._logits_buf
+        if not self.handle:
+            raise RuntimeError("Engine handle is null")
+        if not isinstance(token, int) or token < 0 or token >= self.vocab_size:
+            raise ValueError(f"token {token} out of vocab range [0,{self.vocab_size})")
+        if not isinstance(pos, int) or pos < 0 or pos >= self.config_struct.seq_len:
+            raise ValueError(f"pos {pos} out of range [0,{self.config_struct.seq_len})")
+        try:
+            ptr = self._logits_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            self.lib.llama_forward(self.handle, int(token), int(pos), ptr)
+            return self._logits_buf.copy() if copy_logits else self._logits_buf
+        except Exception as e:
+            raise RuntimeError(f"Forward failed at pos {pos}: {e}") from e
 
     def sample(self, temperature: float = 0.7, top_p: float = 0.9) -> int:
         """Sample next token directly in C++ using fast partial-sort sampling."""
-        return int(self.lib.llama_sample_token(self.handle, float(temperature), float(top_p)))
+        if not self.handle:
+            raise RuntimeError("Engine handle is null")
+        if temperature < 0:
+            raise ValueError(f"temperature must be >=0, got {temperature}")
+        if not 0.0 <= top_p <= 1.0:
+            raise ValueError(f"top_p must be in [0,1], got {top_p}")
+        try:
+            return int(self.lib.llama_sample_token(self.handle, float(temperature), float(top_p)))
+        except Exception as e:
+            raise RuntimeError(f"Sampling failed: {e}") from e
 
     def generate(
         self,
@@ -302,27 +417,54 @@ class CppLlamaEngine:
         top_p: float = 0.9,
     ) -> List[int]:
         """Generate tokens autoregressively in pure C++ without GIL or Python overhead."""
+        if not self.handle:
+            raise RuntimeError("Engine handle is null")
         if not prompt_tokens:
             raise ValueError("prompt_tokens must not be empty")
+        if not all(isinstance(t, int) for t in prompt_tokens):
+            raise TypeError("prompt_tokens must be list of ints")
+        if any(t < 0 or t >= self.vocab_size for t in prompt_tokens):
+            raise ValueError(f"prompt_tokens contains out-of-vocab ids (vocab_size={self.vocab_size})")
         if max_new_tokens < 0:
-            raise ValueError("max_new_tokens must be non-negative")
+            raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
+        if max_new_tokens == 0:
+            return []
         if len(prompt_tokens) >= self.config_struct.seq_len:
-            raise ValueError("prompt_tokens must fit inside the model context window")
+            raise ValueError(f"prompt_tokens len {len(prompt_tokens)} must fit inside context window {self.config_struct.seq_len}")
         if not 0.0 <= top_p <= 1.0:
             raise ValueError(f"top_p must be in [0, 1], got {top_p}")
-        p_arr = (ctypes.c_int * len(prompt_tokens))(*prompt_tokens)
-        out_buf = (ctypes.c_int * max_new_tokens)()
+        if temperature < 0:
+            raise ValueError(f"temperature must be >=0, got {temperature}")
+        if max_new_tokens > self.config_struct.seq_len:
+            print(f"[cpp_backend] Warning: max_new_tokens {max_new_tokens} > seq_len {self.config_struct.seq_len}, will be truncated", file=sys.stderr)
 
-        n_gen = self.lib.llama_generate(
-            self.handle,
-            p_arr,
-            len(prompt_tokens),
-            max_new_tokens,
-            float(temperature),
-            float(top_p),
-            out_buf,
-        )
-        return [int(out_buf[i]) for i in range(n_gen)]
+        try:
+            p_arr = (ctypes.c_int * len(prompt_tokens))(*prompt_tokens)
+            out_buf = (ctypes.c_int * max_new_tokens)()
+
+            n_gen = self.lib.llama_generate(
+                self.handle,
+                p_arr,
+                len(prompt_tokens),
+                max_new_tokens,
+                float(temperature),
+                float(top_p),
+                out_buf,
+            )
+            if n_gen < 0:
+                raise RuntimeError(f"llama_generate returned error code {n_gen}")
+            if n_gen > max_new_tokens:
+                print(f"[cpp_backend] Warning: n_gen {n_gen} > max_new_tokens {max_new_tokens}, truncating", file=sys.stderr)
+                n_gen = max_new_tokens
+            result = [int(out_buf[i]) for i in range(n_gen)]
+            # Validate output tokens
+            if any(t < 0 or t >= self.vocab_size for t in result):
+                print(f"[cpp_backend] Warning: generated out-of-vocab tokens detected", file=sys.stderr)
+            return result
+        except Exception as e:
+            if isinstance(e, (ValueError, TypeError, RuntimeError)):
+                raise
+            raise RuntimeError(f"Generation failed: {e}") from e
 
     def train_step(
         self,

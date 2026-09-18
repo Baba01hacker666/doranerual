@@ -160,7 +160,8 @@ void rmsnorm_backward(float* dx, float* dweight, const float* dout, const float*
 }
 
 void matmul_forward_fp16(float* __restrict__ y, const float* __restrict__ x, const uint16_t* __restrict__ W, int n, int d) {
-    if (d <= 0 || n <= 0) return;
+    if (!y || !x || !W){ std::fprintf(stderr, "[matmul_fp16] null pointer\n"); return; }
+    if (d <= 0 || n <= 0){ std::fprintf(stderr, "[matmul_fp16] invalid dims n=%d d=%d\n", n, d); return; }
     if ((size_t)d * n < 16384) {
         for (int i = 0; i < d; i++) {
             const uint16_t* row = W + (size_t)i * n; float acc = 0.0f;
@@ -273,7 +274,8 @@ inline int32_t dot_u8_i8_vnni_64(const uint8_t* a, const int8_t* b, int n) {
 #endif
 
 void matmul_forward_int8(float* __restrict__ y, const float* __restrict__ x, const int8_t* __restrict__ W, const float* __restrict__ scales, int n, int d) {
-    if (d <= 0 || n <= 0) return;
+    if (!y || !x || !W || !scales){ std::fprintf(stderr, "[matmul_int8] null pointer\n"); return; }
+    if (d <= 0 || n <= 0){ std::fprintf(stderr, "[matmul_int8] invalid dims n=%d d=%d\n", n, d); return; }
     if ((size_t)d * n < 16384) {
         for (int i = 0; i < d; i++) { const int8_t* row = W + (size_t)i * n; float acc = 0.0f; for (int j = 0; j < n; j++) acc += (float)row[j] * x[j]; y[i] = acc * scales[i]; }
         return;
@@ -295,7 +297,8 @@ void matmul_forward_int8(float* __restrict__ y, const float* __restrict__ x, con
 }
 
 void matmul_forward_int8_vnni(float* __restrict__ y, const float* __restrict__ x, const int8_t* __restrict__ W, const float* __restrict__ scales, const int32_t* __restrict__ sums, int n, int d) {
-    if (d <= 0 || n <= 0) return;
+    if (!y || !x || !W || !scales){ std::fprintf(stderr, "[matmul_vnni] null pointer\n"); return; }
+    if (d <= 0 || n <= 0){ std::fprintf(stderr, "[matmul_vnni] invalid dims n=%d d=%d\n", n, d); return; }
     if ((size_t)d * n < 16384) {
         for (int i = 0; i < d; i++) { const int8_t* row = W + (size_t)i * n; float acc = 0.0f; for (int j = 0; j < n; j++) acc += (float)row[j] * x[j]; y[i] = acc * scales[i]; }
         return;
@@ -529,9 +532,48 @@ struct LlamaCppEngine {
 
 extern "C" {
 
-LlamaCppEngine* llama_create(const LlamaCppConfig* config, LlamaCppWeights* weights){ if(!config||!weights) return nullptr; return new LlamaCppEngine(config,weights); }
+LlamaCppEngine* llama_create(const LlamaCppConfig* config, LlamaCppWeights* weights){
+    if(!config||!weights){
+        std::fprintf(stderr, "[llama_create] null config or weights\n");
+        return nullptr;
+    }
+    // Validate config
+    if(config->dim<=0 || config->hidden_dim<=0 || config->n_layers<=0 || config->n_heads<=0 || config->n_kv_heads<=0 || config->vocab_size<=0 || config->seq_len<=0){
+        std::fprintf(stderr, "[llama_create] invalid config values dim=%d hidden=%d layers=%d heads=%d kv_heads=%d vocab=%d seq=%d\n",
+            config->dim, config->hidden_dim, config->n_layers, config->n_heads, config->n_kv_heads, config->vocab_size, config->seq_len);
+        return nullptr;
+    }
+    if(config->dim % config->n_heads != 0){
+        std::fprintf(stderr, "[llama_create] dim %d not divisible by n_heads %d\n", config->dim, config->n_heads);
+        return nullptr;
+    }
+    if(config->n_heads % config->n_kv_heads != 0){
+        std::fprintf(stderr, "[llama_create] n_heads %d not divisible by n_kv_heads %d\n", config->n_heads, config->n_kv_heads);
+        return nullptr;
+    }
+    if(!weights->token_embedding_table || !weights->rms_att_weight || !weights->wq || !weights->wk || !weights->wv || !weights->wo || !weights->rms_ffn_weight || !weights->w1 || !weights->w2 || !weights->w3 || !weights->rms_final_weight){
+        std::fprintf(stderr, "[llama_create] null weight pointer detected\n");
+        return nullptr;
+    }
+    // wcls can be null -> shared with token_embedding_table
+    try{
+        return new LlamaCppEngine(config,weights);
+    }catch(const std::exception& e){
+        std::fprintf(stderr, "[llama_create] exception: %s\n", e.what());
+        return nullptr;
+    }catch(...){
+        std::fprintf(stderr, "[llama_create] unknown exception during engine creation\n");
+        return nullptr;
+    }
+}
 void llama_free(LlamaCppEngine* engine){ if(engine) delete engine; }
-void llama_reset_cache(LlamaCppEngine* engine){ if(engine) engine->reset_kv_cache(); }
+void llama_reset_cache(LlamaCppEngine* engine){
+    if(!engine){
+        std::fprintf(stderr, "[llama_reset_cache] null engine\n");
+        return;
+    }
+    engine->reset_kv_cache();
+}
 int llama_get_threads(){
 #ifdef _OPENMP
     return omp_get_max_threads();
@@ -546,8 +588,22 @@ void llama_set_threads(int num_threads){
 }
 
 void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits){
-    if(!engine||token<0||token>=engine->config.vocab_size) return;
-    if(pos>=engine->config.seq_len) return;
+    if(!engine){
+        std::fprintf(stderr, "[llama_forward] null engine\n");
+        return;
+    }
+    if(pos<0 || pos>=engine->config.seq_len){
+        std::fprintf(stderr, "[llama_forward] pos %d out of range [0,%d)\n", pos, engine->config.seq_len);
+        return;
+    }
+    if(token<0||token>=engine->config.vocab_size){
+        std::fprintf(stderr, "[llama_forward] token %d out of vocab range [0,%d)\n", token, engine->config.vocab_size);
+        return;
+    }
+    if(!engine->weights.token_embedding_table){
+        std::fprintf(stderr, "[llama_forward] null token_embedding_table\n");
+        return;
+    }
     const LlamaCppConfig& p=engine->config; const LlamaCppWeights& w=engine->weights;
     int head_size=p.dim/p.n_heads; int half=head_size/2; int kv_dim=(p.dim*p.n_kv_heads)/p.n_heads; int kv_mul=p.n_heads/p.n_kv_heads;
     const float* emb_row=w.token_embedding_table + (size_t)token * p.dim;
@@ -713,7 +769,15 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
 }
 
 int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p){
-    if(!engine) return 0; const int vocab_size=engine->config.vocab_size;
+    if(!engine){
+        std::fprintf(stderr, "[llama_sample_token] null engine\n");
+        return 0;
+    }
+    const int vocab_size=engine->config.vocab_size;
+    if(vocab_size<=0 || (int)engine->logits.size() < vocab_size){
+        std::fprintf(stderr, "[llama_sample_token] invalid vocab_size %d\n", vocab_size);
+        return 0;
+    }
     if(temperature<=0.0f){ int best_i=0; float best_v=engine->logits[0]; for(int i=1;i<vocab_size;i++) if(engine->logits[i]>best_v){ best_v=engine->logits[i]; best_i=i; } return best_i; }
     std::memcpy(engine->sample_probs.data(), engine->logits.data(), (size_t)vocab_size*sizeof(float));
     float inv_temp=1.0f/temperature; for(int i=0;i<vocab_size;i++) engine->sample_probs[i]*=inv_temp;
@@ -739,7 +803,38 @@ int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p){
 }
 
 int llama_generate(LlamaCppEngine* engine, const int* prompt_tokens, int prompt_len, int max_new_tokens, float temperature, float top_p, int* out_tokens){
-    if(!engine||!prompt_tokens||prompt_len<=0||!out_tokens||prompt_len>=engine->config.seq_len||max_new_tokens<0) return 0;
+    if(!engine){
+        std::fprintf(stderr, "[llama_generate] null engine\n");
+        return 0;
+    }
+    if(!prompt_tokens){
+        std::fprintf(stderr, "[llama_generate] null prompt_tokens\n");
+        return 0;
+    }
+    if(!out_tokens){
+        std::fprintf(stderr, "[llama_generate] null out_tokens\n");
+        return 0;
+    }
+    if(prompt_len<=0){
+        std::fprintf(stderr, "[llama_generate] prompt_len %d <=0\n", prompt_len);
+        return 0;
+    }
+    if(prompt_len>=engine->config.seq_len){
+        std::fprintf(stderr, "[llama_generate] prompt_len %d >= seq_len %d\n", prompt_len, engine->config.seq_len);
+        return 0;
+    }
+    if(max_new_tokens<0){
+        std::fprintf(stderr, "[llama_generate] max_new_tokens %d <0\n", max_new_tokens);
+        return 0;
+    }
+    if(temperature<0){
+        std::fprintf(stderr, "[llama_generate] temperature %f <0, clamping to 0\n", temperature);
+        temperature=0;
+    }
+    if(top_p<0.0f || top_p>1.0f){
+        std::fprintf(stderr, "[llama_generate] top_p %f out of [0,1], clamping\n", top_p);
+        top_p = std::max(0.0f, std::min(1.0f, top_p));
+    }
     engine->reset_kv_cache(); int pos=0;
     for(int i=0;i<prompt_len;i++){ if(i==prompt_len-1) llama_forward(engine,prompt_tokens[i],pos,engine->logits.data()); else llama_forward(engine,prompt_tokens[i],pos,nullptr); pos++; }
     int generated_count=0;
