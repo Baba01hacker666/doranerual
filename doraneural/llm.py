@@ -1163,6 +1163,7 @@ class LlamaLLM:
         shuffle: bool,
         seed: int,
         max_eval_steps: Optional[int],
+        max_batches: Optional[int] = None,
     ) -> dict:
         """Native C++ full-transformer training loop."""
         if self.cpp_engine is None:
@@ -1196,19 +1197,21 @@ class LlamaLLM:
             raise ValueError("training text does not contain a usable sequence")
 
         rng = np.random.default_rng(seed)
+        steps_per_epoch = len(starts) if max_batches is None else min(len(starts), max_batches)
         history = {
             "loss": [],
             "tokens": len(tokens),
-            "windows_per_epoch": len(starts),
-            "total_steps": len(starts) * epochs,
+            "windows_per_epoch": steps_per_epoch,
+            "total_steps": steps_per_epoch * epochs,
             "backend": "native_cpp",
             "threads": self.num_threads,
         }
         if verbose:
+            capped = f" (capped by max_batches={max_batches})" if max_batches is not None and max_batches < len(starts) else ""
             print(
                 f"[Full BP/C++] workflow: {len(tokens):,} tokens -> "
-                f"{len(starts):,} windows/epoch x {epochs:,} epoch(s) = "
-                f"{len(starts) * epochs:,} native updates; threads={self.num_threads:,}",
+                f"{len(starts):,} windows/epoch{capped} x {epochs:,} epoch(s) = "
+                f"{steps_per_epoch * epochs:,} native updates; threads={self.num_threads:,}",
                 flush=True,
             )
         if eval_tokens is not None:
@@ -1218,14 +1221,28 @@ class LlamaLLM:
             order = starts.copy()
             if shuffle:
                 rng.shuffle(order)
+            if max_batches is not None:
+                order = order[:max_batches]
             total = 0.0
-            for start in order:
+            progress_every = max(1, len(order) // 20)
+            for step_idx, start in enumerate(order):
                 total += self.cpp_engine.full_train_step(
                     tokens[start : start + seq_len],
                     tokens[start + 1 : start + seq_len + 1],
                     lr=lr,
                     weight_decay=weight_decay,
                 )
+                if verbose and progress_every > 1 and (step_idx + 1) % progress_every == 0 and step_idx + 1 < len(order):
+                    elapsed = max(time.perf_counter() - training_started, 1e-9)
+                    done = epoch * steps_per_epoch + step_idx + 1
+                    rate = done / elapsed
+                    avg_loss = total / (step_idx + 1)
+                    remaining = max((steps_per_epoch * epochs - done) / max(rate, 1e-9), 0.0)
+                    print(
+                        f"[Full BP/C++] step {done:,}/{steps_per_epoch * epochs:,} "
+                        f"avg_loss={avg_loss:.4f} speed={rate:.2f} updates/s ETA={remaining:.0f}s",
+                        flush=True,
+                    )
             history["loss"].append(total / len(order))
             if eval_tokens is not None:
                 history["val_loss"].append(self._evaluate_tokens(
@@ -1262,6 +1279,7 @@ class LlamaLLM:
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
         native: bool = True,
+        max_batches: Optional[int] = None,
     ) -> dict:
         """Fine-tune every transformer parameter using native C++ or NumPy autograd.
 
@@ -1282,6 +1300,7 @@ class LlamaLLM:
             return self._train_full_native(
                 text, epochs, lr, seq_len, weight_decay, verbose,
                 eval_text, validation_split, stride, shuffle, seed, max_eval_steps,
+                max_batches=max_batches,
             )
 
         def encode_nonempty(value: str, label: str) -> List[int]:
@@ -1318,6 +1337,7 @@ class LlamaLLM:
             seed=seed,
             eval_tokens=eval_tokens,
             max_eval_steps=max_eval_steps,
+            max_batches=max_batches,
             verbose=verbose,
         )
         self.reset_cache()

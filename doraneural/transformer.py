@@ -596,6 +596,7 @@ class TransformerDecoderLM(Module):
         seed: int = 42,
         eval_tokens: Optional[Sequence[int]] = None,
         max_eval_steps: Optional[int] = None,
+        max_batches: Optional[int] = None,
         verbose: int = 1,
     ) -> dict:
         """Train all transformer parameters on next-token sequences."""
@@ -622,6 +623,8 @@ class TransformerDecoderLM(Module):
             order = starts.copy()
             if shuffle:
                 rng.shuffle(order)
+            if max_batches is not None:
+                order = order[:max_batches]
             total = 0.0
             for start in order:
                 total += self.train_batch(tokens[start : start + seq_len], tokens[start + 1 : start + seq_len + 1], optimizer)
