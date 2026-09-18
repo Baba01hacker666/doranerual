@@ -1164,8 +1164,9 @@ class LlamaLLM:
         seed: int,
         max_eval_steps: Optional[int],
         max_batches: Optional[int] = None,
+        grad_clip: float = 1.0,
     ) -> dict:
-        """Native C++ full-transformer training loop."""
+        """Native C++ full-transformer training loop with LR schedule and gradient clipping."""
         if self.cpp_engine is None:
             raise RuntimeError("Native full backpropagation requires the C++ backend")
         if eval_text is not None and validation_split:
@@ -1198,11 +1199,14 @@ class LlamaLLM:
 
         rng = np.random.default_rng(seed)
         steps_per_epoch = len(starts) if max_batches is None else min(len(starts), max_batches)
+        total_steps = steps_per_epoch * epochs
+        warmup_steps = max(1, int(0.05 * total_steps))
+        min_lr = lr * 0.1
         history = {
             "loss": [],
             "tokens": len(tokens),
             "windows_per_epoch": steps_per_epoch,
-            "total_steps": steps_per_epoch * epochs,
+            "total_steps": total_steps,
             "backend": "native_cpp",
             "threads": self.num_threads,
         }
@@ -1211,12 +1215,13 @@ class LlamaLLM:
             print(
                 f"[Full BP/C++] workflow: {len(tokens):,} tokens -> "
                 f"{len(starts):,} windows/epoch{capped} x {epochs:,} epoch(s) = "
-                f"{steps_per_epoch * epochs:,} native updates; threads={self.num_threads:,}",
+                f"{total_steps:,} native updates; threads={self.num_threads:,}; grad_clip={grad_clip}",
                 flush=True,
             )
         if eval_tokens is not None:
             history["val_loss"] = []
         training_started = time.perf_counter()
+        global_step = 0
         for epoch in range(epochs):
             order = starts.copy()
             if shuffle:
@@ -1226,21 +1231,30 @@ class LlamaLLM:
             total = 0.0
             progress_every = max(1, len(order) // 20)
             for step_idx, start in enumerate(order):
+                # Cosine learning rate schedule with linear warmup
+                if global_step < warmup_steps:
+                    cur_lr = lr * ((global_step + 1) / warmup_steps)
+                else:
+                    progress = (global_step - warmup_steps) / max(1, total_steps - warmup_steps)
+                    cur_lr = min_lr + 0.5 * (lr - min_lr) * (1.0 + math.cos(math.pi * progress))
+
                 total += self.cpp_engine.full_train_step(
                     tokens[start : start + seq_len],
                     tokens[start + 1 : start + seq_len + 1],
-                    lr=lr,
+                    lr=cur_lr,
                     weight_decay=weight_decay,
+                    grad_clip=grad_clip,
                 )
+                global_step += 1
                 if verbose and progress_every > 1 and (step_idx + 1) % progress_every == 0 and step_idx + 1 < len(order):
                     elapsed = max(time.perf_counter() - training_started, 1e-9)
                     done = epoch * steps_per_epoch + step_idx + 1
                     rate = done / elapsed
                     avg_loss = total / (step_idx + 1)
-                    remaining = max((steps_per_epoch * epochs - done) / max(rate, 1e-9), 0.0)
+                    remaining = max((total_steps - done) / max(rate, 1e-9), 0.0)
                     print(
-                        f"[Full BP/C++] step {done:,}/{steps_per_epoch * epochs:,} "
-                        f"avg_loss={avg_loss:.4f} speed={rate:.2f} updates/s ETA={remaining:.0f}s",
+                        f"[Full BP/C++] step {done:,}/{total_steps:,} "
+                        f"avg_loss={avg_loss:.4f} lr={cur_lr:.2e} speed={rate:.2f} updates/s ETA={remaining:.0f}s",
                         flush=True,
                     )
             history["loss"].append(total / len(order))
@@ -1268,8 +1282,8 @@ class LlamaLLM:
         self,
         text: str,
         epochs: int = 3,
-        lr: float = 1e-4,
-        seq_len: int = 32,
+        lr: float = 5e-4,
+        seq_len: int = 64,
         weight_decay: float = 0.01,
         verbose: int = 1,
         eval_text: Optional[str] = None,
@@ -1280,6 +1294,7 @@ class LlamaLLM:
         max_eval_steps: Optional[int] = None,
         native: bool = True,
         max_batches: Optional[int] = None,
+        grad_clip: float = 1.0,
     ) -> dict:
         """Fine-tune every transformer parameter using native C++ or NumPy autograd.
 
@@ -1300,7 +1315,7 @@ class LlamaLLM:
             return self._train_full_native(
                 text, epochs, lr, seq_len, weight_decay, verbose,
                 eval_text, validation_split, stride, shuffle, seed, max_eval_steps,
-                max_batches=max_batches,
+                max_batches=max_batches, grad_clip=grad_clip,
             )
 
         def encode_nonempty(value: str, label: str) -> List[int]:
@@ -1432,6 +1447,7 @@ class LlamaLLM:
         lora_alpha: float = 16.0,
         lora_targets: Optional[Sequence[str]] = None,
         adapter_path: Optional[Union[str, Path]] = None,
+        grad_clip: float = 1.0,
     ) -> dict:
         """Fine-tune the model on custom text with reproducible validation.
 
@@ -1496,6 +1512,7 @@ class LlamaLLM:
                 seed=seed,
                 max_eval_steps=max_eval_steps,
                 native=native_full,
+                grad_clip=grad_clip,
             )
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")

@@ -1200,7 +1200,7 @@ void llama_get_profile(LlamaCppEngine* engine, double* out_stats){
     out_stats[7] = (double)engine->profile.count;
 }
 
-float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, const int* target_tokens, int seq_len, float lr, float weight_decay, float beta1, float beta2, float eps){
+float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, const int* target_tokens, int seq_len, float lr, float weight_decay, float beta1, float beta2, float eps, float grad_clip){
     if (!engine || !input_tokens || !target_tokens || seq_len <= 0 || seq_len >= engine->config.seq_len) return 0.0f;
     const LlamaCppConfig& p = engine->config; LlamaCppWeights& w = engine->weights;
     const int D = p.dim; const int H = p.n_heads; const int HD = D / H; const int KV = (D * p.n_kv_heads) / H;
@@ -1319,6 +1319,16 @@ float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, con
         }
     }
     float* gemb = grad + off_emb; for (int t = 0; t < seq_len; t++) { float* row = gemb + (size_t)input_tokens[t] * D; const float* dx = ws.d_states.data() + (size_t)t * D; for (int d = 0; d < D; d++) row[d] += dx[d]; }
+    // Gradient clipping: compute global norm and scale if needed
+    if (grad_clip > 0.0f) {
+        float global_norm = 0.0f;
+        for (size_t i = 0; i < engine->grad_buffer.size(); i++) global_norm += grad[i] * grad[i];
+        global_norm = std::sqrt(global_norm);
+        if (global_norm > grad_clip) {
+            float scale = grad_clip / (global_norm + 1e-6f);
+            for (size_t i = 0; i < engine->grad_buffer.size(); i++) grad[i] *= scale;
+        }
+    }
     engine->adam_step++; const float b1_corr = 1.0f - std::pow(beta1, (float)engine->adam_step); const float b2_corr = 1.0f - std::pow(beta2, (float)engine->adam_step); const float step_size = lr * std::sqrt(b2_corr) / std::max(b1_corr, 1e-12f);
     auto update_group = [&](float* params, size_t offset, size_t count){ float* g = grad + offset; float* m = engine->m_buffer.data() + offset; float* v = engine->v_buffer.data() + offset; for(size_t i=0;i<count;i++){ m[i]=beta1*m[i]+(1.0f-beta1)*g[i]; v[i]=beta2*v[i]+(1.0f-beta2)*g[i]*g[i]; params[i]-=lr*weight_decay*params[i]; params[i]-=step_size*m[i]/(std::sqrt(v[i])+eps); } };
     update_group(w.token_embedding_table, off_emb, (size_t)p.vocab_size * D); update_group(w.rms_att_weight, off_rms_att, (size_t)L * D); update_group(w.wq, off_wq, (size_t)L * D * D); update_group(w.wk, off_wk, (size_t)L * KV * D); update_group(w.wv, off_wv, (size_t)L * KV * D); update_group(w.wo, off_wo, (size_t)L * D * D); update_group(w.rms_ffn_weight, off_rms_ffn, (size_t)L * D); update_group(w.w1, off_w1, (size_t)L * Hidden * D); update_group(w.w2, off_w2, (size_t)L * D * Hidden); update_group(w.w3, off_w3, (size_t)L * Hidden * D); update_group(w.rms_final_weight, off_rms_final, D);

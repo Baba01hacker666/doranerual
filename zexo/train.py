@@ -142,6 +142,12 @@ def main():
         help="Maximum training steps/batches per epoch (useful for large datasets on CPU).",
     )
     parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Gradient clipping norm (default: 1.0, 0 to disable).",
+    )
+    parser.add_argument(
         "--test-prompt", "-p",
         default="Who are you?",
         help="Test prompt to evaluate conversational response before and after training.",
@@ -359,6 +365,7 @@ def main():
         lora_alpha=args.lora_alpha,
         lora_targets=[item.strip() for item in args.lora_targets.split(",") if item.strip()],
         adapter_path=args.adapter_output,
+        grad_clip=args.grad_clip,
     )
     duration = time.perf_counter() - t0
     final_report = f"Final loss: {hist['loss'][-1]:.4f}"

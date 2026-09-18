@@ -203,11 +203,13 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
         ]
         lib.llama_train_step.restype = ctypes.c_float
 
+        lib.llama_full_train_step.argtypes = []
         lib.llama_full_train_step.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(ctypes.c_int),
             ctypes.POINTER(ctypes.c_int),
             ctypes.c_int,
+            ctypes.c_float,
             ctypes.c_float,
             ctypes.c_float,
             ctypes.c_float,
@@ -652,6 +654,7 @@ class CppLlamaEngine:
         beta1: float = 0.9,
         beta2: float = 0.999,
         eps: float = 1e-8,
+        grad_clip: float = 0.0,
     ) -> float:
         """Run native full-transformer backpropagation and AdamW update."""
         seq_len = len(input_tokens)
@@ -671,5 +674,6 @@ class CppLlamaEngine:
             float(beta1),
             float(beta2),
             float(eps),
+            float(grad_clip),
         )
         return float(loss)

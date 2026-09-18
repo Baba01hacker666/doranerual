@@ -85,6 +85,7 @@ class ZexoModel:
         lora_alpha: float = 16.0,
         lora_targets: Optional[List[str]] = None,
         adapter_path: Optional[Union[str, Path]] = None,
+        grad_clip: float = 1.0,
     ) -> dict:
         """Fine-tune Zexo on custom text or conversational dialogue, optionally with full backprop or LoRA."""
         return self.llm.train(
@@ -108,6 +109,7 @@ class ZexoModel:
             lora_alpha=lora_alpha,
             lora_targets=lora_targets,
             adapter_path=adapter_path,
+            grad_clip=grad_clip,
         )
 
     def full_backprop_model(self):

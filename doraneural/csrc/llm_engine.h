@@ -96,7 +96,8 @@ float llama_full_train_step(
     float weight_decay,
     float beta1,
     float beta2,
-    float eps
+    float eps,
+    float grad_clip
 );
 
 // Threading controls
