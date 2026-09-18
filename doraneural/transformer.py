@@ -301,6 +301,11 @@ class TransformerDecoderLM(Module):
         if ids.ndim != 1 or len(ids) < 1 or len(ids) > self.seq_len:
             raise ValueError(f"token_ids must be 1D with length in [1, {self.seq_len}]")
         x = self.token_embedding[ids]
+        # A tied lm_head is the same parameter as the input embedding. Apply
+        # its adapter at both uses so merge_lora() remains exactly equivalent
+        # to the unmerged adapter path.
+        if self.lora_lm_head is not None and self.lm_head is self.token_embedding:
+            x = x + (self.lora_lm_head.B.T[ids] @ self.lora_lm_head.A.T) * self.lora_lm_head.scale
         cos, sin, mask = self._tables(len(ids))
         for layer in self.layers:
             x = layer.forward(x, cos, sin, mask, interleaved=self.rope_type != "hf")

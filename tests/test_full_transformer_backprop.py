@@ -107,6 +107,21 @@ def test_lora_trains_adapters_without_updating_pretrained_base(tmp_path):
     np.testing.assert_allclose(restored.forward(inputs).data, model.forward(inputs).data, rtol=1e-5, atol=1e-5)
 
 
+def test_tied_lm_head_lora_merge_preserves_logits():
+    np.random.seed(37)
+    model = TransformerDecoderLM(
+        dim=16, hidden_dim=32, n_layers=1, n_heads=4, n_kv_heads=2,
+        vocab_size=12, seq_len=16,
+    )
+    model.enable_lora(rank=2, alpha=4.0, target_modules=("lm_head",))
+    model.lora_lm_head.B.data[...] = np.random.randn(*model.lora_lm_head.B.shape).astype(np.float32) * 0.01
+    inputs = [1, 2, 3, 4]
+    before = model.forward(inputs).data.copy()
+    model.merge_lora()
+    after = model.forward(inputs).data
+    np.testing.assert_allclose(before, after, rtol=2e-5, atol=2e-5)
+
+
 def test_tiny_full_backprop_model_reduces_next_token_loss():
     np.random.seed(11)
     model = TransformerDecoderLM(
@@ -197,6 +212,46 @@ def _write_tiny_llama_checkpoint(path: Path, model: TransformerDecoderLM) -> Non
         ))
         for array in arrays:
             np.asarray(array, dtype=np.float32).tofile(handle)
+
+
+def test_native_cpp_matches_numpy_one_step_on_gqa_checkpoint(tmp_path):
+    np.random.seed(39)
+    source = TransformerDecoderLM(
+        dim=16,
+        hidden_dim=32,
+        n_layers=1,
+        n_heads=4,
+        n_kv_heads=2,
+        vocab_size=512,
+        seq_len=16,
+    )
+    checkpoint = tmp_path / "parity-tiny.bin"
+    _write_tiny_llama_checkpoint(checkpoint, source)
+    tokenizer = REPO_ROOT / "zexo" / "tokenizer" / "tok512.bin"
+    try:
+        native = LlamaLLM(checkpoint, tokenizer, backend="cpp")
+    except RuntimeError as error:
+        pytest.skip(f"native C++ engine unavailable: {error}")
+    reference = LlamaLLM(checkpoint, tokenizer, backend="numpy")
+    model = reference.full_backprop_model()
+    inputs = [1, 2, 3, 4, 5]
+    targets = [2, 3, 4, 5, 6]
+    numpy_loss = float(model.loss(inputs, targets).item())
+    native_loss = native.cpp_engine.full_train_step(
+        inputs, targets, lr=0.001, weight_decay=0.01,
+    )
+    optimizer = TensorAdamW(model.parameters(), lr=0.001, weight_decay=0.01)
+    model.train_batch(inputs, targets, optimizer)
+    model.copy_to_llama()
+    assert abs(native_loss - numpy_loss) < 2e-5
+    for native_array, reference_array in (
+        (native.tok_emb, reference.tok_emb),
+        (native.wq, reference.wq),
+        (native.wk, reference.wk),
+        (native.w1, reference.w1),
+        (native.rms_final, reference.rms_final),
+    ):
+        np.testing.assert_allclose(native_array, reference_array, rtol=2e-5, atol=2e-5)
 
 
 def test_native_cpp_full_backprop_reduces_loss_and_updates_attention(tmp_path):
