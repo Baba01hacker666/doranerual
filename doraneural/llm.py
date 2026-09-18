@@ -5,22 +5,24 @@ Implements full autoregressive Transformer decoder inference in pure NumPy with:
 - RMSNorm
 - Multi-Head Attention with KV-Caching (including Grouped-Query Attention)
 - SwiGLU Feed-Forward Network
-- SentencePiece Byte-Fallback BPE Tokenizer (binary .bin or HuggingFace tokenizer.json)
-- SafeTensors loader for HuggingFace models (zero PyTorch dependency)
+- Heap-accelerated, cached SentencePiece Byte-Fallback BPE Tokenizer (binary .bin or HuggingFace tokenizer.json)
+- SafeTensors loader for single-file, BF16, and sharded HuggingFace models (zero PyTorch dependency)
 - Nucleus (Top-p) & Temperature Sampling
 - Streaming Generation Generator
 - Automatic download from Hugging Face Hub (any LlamaForCausalLM repo)
 """
 
+import heapq
 import json
 import os
+import re
 import struct
 import sys
 import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Generator, List, Optional, Tuple, Union
+from typing import Dict, Generator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -90,49 +92,105 @@ class LlamaTokenizer:
                 self.scores.append(score)
 
         self.str_to_id = {s: i for i, s in enumerate(self.vocab)}
+        self._pair_cache: Dict[Tuple[int, int], int] = {}
+        self._encode_cache: Dict[Tuple[str, bool], Tuple[int, ...]] = {}
+        self._encode_cache_limit = 2048
+
+    def _pair_id(self, left: int, right: int) -> int:
+        """Look up a merge pair, caching hot adjacent-token lookups."""
+        key = (left, right)
+        cached = self._pair_cache.get(key)
+        if cached is not None:
+            return cached
+        candidate = self.str_to_id.get(self.vocab[left] + self.vocab[right], -1)
+        if len(self._pair_cache) < 100_000:
+            self._pair_cache[key] = candidate
+        return candidate
+
+    def _merge_tokens(self, tokens: List[int]) -> List[int]:
+        """Merge SentencePiece tokens with a heap instead of repeated scans.
+
+        The old implementation rescanned every adjacent pair after each merge,
+        which is quadratic in the number of input symbols. A linked list plus a
+        max-heap keeps the same leftmost tie-breaking behavior while reducing
+        the common case to O(n log n).
+        """
+        if len(tokens) < 2:
+            return tokens
+
+        next_idx = list(range(1, len(tokens))) + [-1]
+        prev_idx = [-1] + list(range(len(tokens) - 1))
+        alive = [True] * len(tokens)
+        heap: List[Tuple[float, int, int]] = []
+
+        def push_pair(left: int) -> None:
+            right = next_idx[left]
+            if right < 0 or not alive[left] or not alive[right]:
+                return
+            candidate = self._pair_id(tokens[left], tokens[right])
+            if candidate >= 0:
+                # Higher SentencePiece score wins; smaller index preserves
+                # the original left-to-right tie break.
+                heapq.heappush(heap, (-self.scores[candidate], left, candidate))
+
+        for idx in range(len(tokens) - 1):
+            push_pair(idx)
+
+        while heap:
+            _, left, candidate = heapq.heappop(heap)
+            right = next_idx[left]
+            if right < 0 or not alive[left] or not alive[right]:
+                continue
+            if self._pair_id(tokens[left], tokens[right]) != candidate:
+                continue
+
+            tokens[left] = candidate
+            next_right = next_idx[right]
+            next_idx[left] = next_right
+            if next_right >= 0:
+                prev_idx[next_right] = left
+            alive[right] = False
+            push_pair(prev_idx[left])
+            push_pair(left)
+
+        merged: List[int] = []
+        idx = 0
+        while idx >= 0:
+            if alive[idx]:
+                merged.append(tokens[idx])
+            idx = next_idx[idx]
+        return merged
 
     def encode(self, text: str, bos: bool = True) -> List[int]:
-        """Encode a string into a list of token IDs with BPE merge loop."""
-        tokens: List[int] = []
-        if bos:
-            tokens.append(1)  # BOS token
+        """Encode text with cached, heap-based SentencePiece BPE merges."""
+        cache_key = (text, bool(bos))
+        cached = self._encode_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
 
+        tokens: List[int] = [1] if bos else []  # BOS token
         if text:
-            # Add SentencePiece leading space prefix
-            dummy = self.str_to_id.get(" ", self.str_to_id.get(" ", None))
-            if dummy is not None:
-                tokens.append(dummy)
+            # llama2.c's tokenizer uses a leading space token when present.
+            space_id = self.str_to_id.get(" ")
+            if space_id is not None:
+                tokens.append(space_id)
 
         for ch in text:
-            if ch in self.str_to_id:
-                tokens.append(self.str_to_id[ch])
+            token_id = self.str_to_id.get(ch)
+            if token_id is not None:
+                tokens.append(token_id)
             else:
-                for b in ch.encode("utf-8"):
-                    tokens.append(b + 3)
+                tokens.extend(b + 3 for b in ch.encode("utf-8"))
 
-        # Iteratively merge highest-scoring adjacent pairs
-        while len(tokens) >= 2:
-            best_score = -1e10
-            best_id = -1
-            best_idx = -1
+        result = self._merge_tokens(tokens)
+        if len(self._encode_cache) >= self._encode_cache_limit:
+            self._encode_cache.pop(next(iter(self._encode_cache)))
+        self._encode_cache[cache_key] = tuple(result)
+        return result
 
-            for i in range(len(tokens) - 1):
-                pair_str = self.vocab[tokens[i]] + self.vocab[tokens[i + 1]]
-                if pair_str in self.str_to_id:
-                    candidate_id = self.str_to_id[pair_str]
-                    candidate_score = self.scores[candidate_id]
-                    if candidate_score > best_score:
-                        best_score = candidate_score
-                        best_id = candidate_id
-                        best_idx = i
-
-            if best_idx == -1:
-                break
-
-            tokens[best_idx] = best_id
-            tokens.pop(best_idx + 1)
-
-        return tokens
+    def encode_batch(self, texts: Sequence[str], bos: bool = True) -> List[List[int]]:
+        """Encode multiple strings while reusing the tokenizer's merge caches."""
+        return [self.encode(text, bos=bos) for text in texts]
 
     def decode_token(self, token_id: int) -> str:
         """Decode a single token ID into its string representation."""
@@ -154,6 +212,10 @@ class LlamaTokenizer:
                 continue
             pieces.append(self.decode_token(t))
         return "".join(pieces)
+
+    def decode_batch(self, batches: Sequence[List[int]]) -> List[str]:
+        """Decode multiple token sequences."""
+        return [self.decode(tokens) for tokens in batches]
 
 
 class HFTokenizer:
@@ -185,59 +247,102 @@ class HFTokenizer:
             parts = m.split(" ")
             if len(parts) == 2:
                 self.bpe_ranks[(parts[0], parts[1])] = i
-        self._cache: Dict[str, List[int]] = {}
+        self._cache: Dict[str, Tuple[int, ...]] = {}
+        self._encode_cache: Dict[Tuple[str, bool], Tuple[int, ...]] = {}
+        self._encode_cache_limit = 2048
+        self._chunk_pattern = re.compile(r"(\n+|" + re.escape(self.SPIECE) + r")")
 
     def _encode_piece(self, piece: str) -> List[int]:
-        """Encode a single small piece/word with memoization."""
-        if piece in self._cache:
-            return self._cache[piece]
+        """Encode one piece using a heap-based BPE merge loop."""
+        cached = self._cache.get(piece)
+        if cached is not None:
+            return list(cached)
         if piece in self.vocab:
-            res = [self.vocab[piece]]
-            self._cache[piece] = res
-            return res
+            result = (self.vocab[piece],)
+            self._cache[piece] = result
+            return list(result)
 
-        current = list(piece)
-        while len(current) > 1:
-            pairs = [(current[i], current[i + 1]) for i in range(len(current) - 1)]
-            best = min(pairs, key=lambda p: self.bpe_ranks.get(p, float("inf")))
-            if best not in self.bpe_ranks:
-                break
-            new_word: List[str] = []
-            i = 0
-            while i < len(current):
-                if i < len(current) - 1 and (current[i], current[i + 1]) == best:
-                    new_word.append(best[0] + best[1])
-                    i += 2
-                else:
-                    new_word.append(current[i])
-                    i += 1
-            current = new_word
+        symbols = list(piece)
+        if len(symbols) > 1:
+            next_idx = list(range(1, len(symbols))) + [-1]
+            prev_idx = [-1] + list(range(len(symbols) - 1))
+            alive = [True] * len(symbols)
+            heap: List[Tuple[int, int, str, str]] = []
 
-        res: List[int] = []
-        for symbol in current:
-            if symbol in self.vocab:
-                res.append(self.vocab[symbol])
+            def push_pair(left: int) -> None:
+                right = next_idx[left]
+                if right < 0 or not alive[left] or not alive[right]:
+                    return
+                pair = (symbols[left], symbols[right])
+                rank = self.bpe_ranks.get(pair)
+                if rank is not None:
+                    heapq.heappush(heap, (rank, left, pair[0], pair[1]))
+
+            for idx in range(len(symbols) - 1):
+                push_pair(idx)
+
+            while heap:
+                rank, left, first, second = heapq.heappop(heap)
+                right = next_idx[left]
+                if right < 0 or not alive[left] or not alive[right]:
+                    continue
+                if symbols[left] != first or symbols[right] != second:
+                    continue
+                if self.bpe_ranks.get((first, second)) != rank:
+                    continue
+
+                symbols[left] = first + second
+                next_right = next_idx[right]
+                next_idx[left] = next_right
+                if next_right >= 0:
+                    prev_idx[next_right] = left
+                alive[right] = False
+                push_pair(prev_idx[left])
+                push_pair(left)
+
+            merged: List[str] = []
+            idx = 0
+            while idx >= 0:
+                if alive[idx]:
+                    merged.append(symbols[idx])
+                idx = next_idx[idx]
+            symbols = merged
+
+        result_ids: List[int] = []
+        unk_id = self.vocab.get("<unk>", 0)
+        for symbol in symbols:
+            token_id = self.vocab.get(symbol)
+            if token_id is not None:
+                result_ids.append(token_id)
             else:
-                for b in symbol.encode("utf-8"):
-                    byte_token = f"<0x{b:02X}>"
-                    res.append(self.vocab.get(byte_token, self.vocab.get("<unk>", 0)))
-        self._cache[piece] = res
-        return res
+                for byte in symbol.encode("utf-8"):
+                    result_ids.append(self.vocab.get(f"<0x{byte:02X}>", unk_id))
+        result = tuple(result_ids)
+        self._cache[piece] = result
+        return list(result)
 
     def encode(self, text: str, bos: bool = True) -> List[int]:
-        """Encode a string into token IDs with fast SentencePiece BPE merges."""
-        import re
-        tokens: List[int] = [1] if bos else []  # BOS = 1
-        if not text:
-            return tokens
+        """Encode text with compiled chunking and cached BPE pieces."""
+        cache_key = (text, bool(bos))
+        cached = self._encode_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
 
-        norm = self.SPIECE + text.replace(" ", self.SPIECE)
-        chunks = re.split(r"(\n+|" + self.SPIECE + r")", norm)
-        for c in chunks:
-            if not c:
-                continue
-            tokens.extend(self._encode_piece(c))
+        tokens: List[int] = [1] if bos else []  # BOS = 1
+        if text:
+            norm = self.SPIECE + text.replace(" ", self.SPIECE)
+            for chunk in self._chunk_pattern.split(norm):
+                if chunk:
+                    tokens.extend(self._encode_piece(chunk))
+
+        if len(self._encode_cache) >= self._encode_cache_limit:
+            self._encode_cache.pop(next(iter(self._encode_cache)))
+        self._encode_cache[cache_key] = tuple(tokens)
         return tokens
+
+    def encode_batch(self, texts: Sequence[str], bos: bool = True) -> List[List[int]]:
+        """Encode multiple strings with shared piece and text caches."""
+        return [self.encode(text, bos=bos) for text in texts]
 
     def decode_token(self, token_id: int) -> str:
         """Decode a single token ID to its string piece."""
@@ -261,17 +366,49 @@ class HFTokenizer:
             text = text[1:]  # Strip leading space from SentencePiece prefix
         return text
 
+    def decode_batch(self, batches: Sequence[List[int]]) -> List[str]:
+        """Decode multiple token sequences."""
+        return [self.decode(tokens) for tokens in batches]
+
 
 def load_safetensors(path: Union[str, Path]) -> Dict[str, np.ndarray]:
-    """Load all tensors from a .safetensors file into a dict of NumPy arrays (float32).
+    """Load a safetensors file or sharded ``*.index.json`` into NumPy arrays.
 
-    Pure Python reader — zero PyTorch / safetensors library dependency.
+    The reader intentionally has no PyTorch dependency. Model shards are
+    merged by tensor name, so ordinary HuggingFace sharded checkpoints can be
+    passed directly to :class:`LlamaLLM`.
     """
-    _DTYPE_MAP = {"F16": np.float16, "F32": np.float32, "BF16": np.float16, "I32": np.int32}
+    _DTYPE_MAP = {
+        "F16": np.float16,
+        "F32": np.float32,
+        "F64": np.float64,
+        "I8": np.int8,
+        "I16": np.int16,
+        "I32": np.int32,
+        "I64": np.int64,
+        "U8": np.uint8,
+    }
     path = Path(path)
-    tensors: Dict[str, np.ndarray] = {}
-    with open(path, "rb") as f:
-        header_len = struct.unpack("<Q", f.read(8))[0]
+    if path.name.endswith(".index.json"):
+        with path.open("r", encoding="utf-8") as handle:
+            index = json.load(handle)
+        shard_names = sorted(set(index.get("weight_map", {}).values()))
+        if not shard_names:
+            raise ValueError(f"Safetensors index contains no weight_map: {path}")
+        tensors: Dict[str, np.ndarray] = {}
+        for shard_name in shard_names:
+            shard_path = path.parent / shard_name
+            if not shard_path.exists():
+                raise FileNotFoundError(f"Safetensors shard listed by {path} is missing: {shard_path}")
+            tensors.update(load_safetensors(shard_path))
+        return tensors
+
+    tensors = {}
+    with path.open("rb") as f:
+        header_len_bytes = f.read(8)
+        if len(header_len_bytes) != 8:
+            raise ValueError(f"Invalid safetensors header: {path}")
+        header_len = struct.unpack("<Q", header_len_bytes)[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         data_start = 8 + header_len
 
@@ -281,10 +418,18 @@ def load_safetensors(path: Union[str, Path]) -> Dict[str, np.ndarray]:
             dtype_str = info["dtype"]
             shape = info["shape"]
             start, end = info["data_offsets"]
-            np_dtype = _DTYPE_MAP.get(dtype_str, np.float32)
             f.seek(data_start + start)
             raw_bytes = f.read(end - start)
-            arr = np.frombuffer(raw_bytes, dtype=np_dtype).astype(np.float32).reshape(shape)
+            if dtype_str == "BF16":
+                # Safetensors stores bfloat16 as the high 16 bits of an
+                # IEEE float32 word; interpreting it as float16 is incorrect.
+                words = np.frombuffer(raw_bytes, dtype=np.uint16).astype(np.uint32)
+                arr = (words << 16).view(np.float32).reshape(shape)
+            else:
+                np_dtype = _DTYPE_MAP.get(dtype_str)
+                if np_dtype is None:
+                    raise ValueError(f"Unsupported safetensors dtype: {dtype_str}")
+                arr = np.frombuffer(raw_bytes, dtype=np_dtype).astype(np.float32).reshape(shape)
             tensors[name] = arr
     return tensors
 
@@ -311,7 +456,10 @@ class LlamaLLM:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
 
-        is_safetensors = str(self.model_path).endswith(".safetensors")
+        is_safetensors = (
+            str(self.model_path).endswith(".safetensors")
+            or str(self.model_path).endswith(".safetensors.index.json")
+        )
 
         if is_safetensors:
             self._load_safetensors(config_path)
@@ -479,6 +627,20 @@ class LlamaLLM:
         else:
             self.wcls = self.tok_emb
             self.shared_weights = True
+
+    def set_num_threads(self, num_threads: int) -> None:
+        """Set native OpenMP threads when the C++ backend is active."""
+        if num_threads <= 0:
+            raise ValueError(f"num_threads must be positive, got {num_threads}")
+        if self.cpp_engine is not None:
+            self.cpp_engine.set_threads(num_threads)
+
+    @property
+    def num_threads(self) -> int:
+        """Return native thread count, or one for the pure NumPy backend."""
+        if self.cpp_engine is not None:
+            return self.cpp_engine.threads
+        return 1
 
     def reset_cache(self) -> None:
         """Clear key-value cache arenas."""
@@ -648,11 +810,19 @@ class LlamaLLM:
         Returns:
             Generated text string, or Generator of token strings.
         """
+        if max_tokens < 0:
+            raise ValueError(f"max_tokens must be non-negative, got {max_tokens}")
+        if not 0.0 <= top_p <= 1.0:
+            raise ValueError(f"top_p must be in [0, 1], got {top_p}")
         self.reset_cache()
         prompt_tokens = self.tokenizer.encode(prompt, bos=True)
 
         if not prompt_tokens:
             prompt_tokens = [1]
+        # Keep one context slot available for at least one generated token.
+        # This prevents native cache writes past the end for long prompts.
+        if len(prompt_tokens) >= self.config.seq_len:
+            prompt_tokens = prompt_tokens[-(self.config.seq_len - 1):]
 
         # Fast path: C++ non-streaming generation executes entirely in native C++
         if not stream and self.cpp_engine is not None:
@@ -1133,9 +1303,18 @@ def download_hf_model(model_name: str = "stories260K", target_dir: Optional[Unio
     config_path = save_dir / "config.json"
     _fetch_file(f"{base_url}/config.json", config_path)
 
-    # Detect model file format: try model.safetensors first
+    # Detect model file format. Prefer a single safetensors file, then fall
+    # back to HuggingFace's sharded index and download every referenced shard.
     model_path = save_dir / "model.safetensors"
-    _fetch_file(f"{base_url}/model.safetensors", model_path)
+    try:
+        _fetch_file(f"{base_url}/model.safetensors", model_path)
+    except Exception:
+        model_path = save_dir / "model.safetensors.index.json"
+        _fetch_file(f"{base_url}/model.safetensors.index.json", model_path)
+        with model_path.open("r", encoding="utf-8") as handle:
+            shard_names = sorted(set(json.load(handle).get("weight_map", {}).values()))
+        for shard_name in shard_names:
+            _fetch_file(f"{base_url}/{shard_name}", save_dir / shard_name)
 
     # Try tokenizer.json (HuggingFace standard)
     tok_path = save_dir / "tokenizer.json"

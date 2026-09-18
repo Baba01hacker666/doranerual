@@ -68,7 +68,11 @@ def build_cpp_library(force: bool = False) -> Optional[Path]:
     if not cpp_file.exists():
         return None
 
-    if so_file.exists() and not force:
+    if (
+        so_file.exists()
+        and not force
+        and so_file.stat().st_mtime_ns >= cpp_file.stat().st_mtime_ns
+    ):
         return so_file
 
     compiler = _find_compiler()
@@ -202,12 +206,17 @@ class CppLlamaEngine:
             rope_type=getattr(config, "rope_type_int", 0),
         )
 
+        self._contiguous_refs: List[np.ndarray] = []
+
         def _ptr(arr: np.ndarray) -> ctypes.POINTER(ctypes.c_float):
-            if not arr.flags["C_CONTIGUOUS"]:
-                arr = np.ascontiguousarray(arr)
+            if arr.dtype != np.float32 or not arr.flags["C_CONTIGUOUS"]:
+                arr = np.ascontiguousarray(arr, dtype=np.float32)
+                # Keep converted storage alive for the entire native engine
+                # lifetime; a temporary ctypes pointer is not sufficient.
+                self._contiguous_refs.append(arr)
             return arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
-        self._weights_ref = weights_dict  # Keep alive in Python
+        self._weights_ref = weights_dict  # Keep original Python arrays alive
         is_shared = int(weights_dict.get("shared_classifier", 1))
 
         self.weights_struct = LlamaCppWeightsStruct(
@@ -235,11 +244,28 @@ class CppLlamaEngine:
 
         self.vocab_size = config.vocab_size
         self._logits_buf = np.empty(self.vocab_size, dtype=np.float32)
+        requested_threads = os.environ.get("DORANEURAL_NUM_THREADS")
+        if requested_threads:
+            try:
+                self.set_threads(int(requested_threads))
+            except ValueError:
+                pass
 
     def __del__(self) -> None:
         if hasattr(self, "handle") and self.handle and self.lib:
             self.lib.llama_free(self.handle)
             self.handle = None
+
+    @property
+    def threads(self) -> int:
+        """Return the native OpenMP thread count."""
+        return int(self.lib.llama_get_threads())
+
+    def set_threads(self, num_threads: int) -> None:
+        """Tune native inference/training parallelism for the current process."""
+        if num_threads <= 0:
+            raise ValueError(f"num_threads must be positive, got {num_threads}")
+        self.lib.llama_set_threads(int(num_threads))
 
     def reset_cache(self) -> None:
         """Reset key-value cache arenas."""
@@ -263,6 +289,14 @@ class CppLlamaEngine:
         top_p: float = 0.9,
     ) -> List[int]:
         """Generate tokens autoregressively in pure C++ without GIL or Python overhead."""
+        if not prompt_tokens:
+            raise ValueError("prompt_tokens must not be empty")
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be non-negative")
+        if len(prompt_tokens) >= self.config_struct.seq_len:
+            raise ValueError("prompt_tokens must fit inside the model context window")
+        if not 0.0 <= top_p <= 1.0:
+            raise ValueError(f"top_p must be in [0, 1], got {top_p}")
         p_arr = (ctypes.c_int * len(prompt_tokens))(*prompt_tokens)
         out_buf = (ctypes.c_int * max_new_tokens)()
 

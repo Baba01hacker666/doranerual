@@ -786,7 +786,10 @@ int llama_generate(
     float top_p,
     int* out_tokens
 ) {
-    if (!engine || !prompt_tokens || prompt_len <= 0 || !out_tokens) return 0;
+    if (
+        !engine || !prompt_tokens || prompt_len <= 0 || !out_tokens
+        || prompt_len >= engine->config.seq_len || max_new_tokens < 0
+    ) return 0;
 
     engine->reset_kv_cache();
 
