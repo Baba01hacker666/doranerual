@@ -49,11 +49,11 @@ on:
         required: false
         default: "128"
         type: string
-      fast:
-        description: "Enable fast mode (all CPU cores, OpenMP parallelization, unbuffered streaming)"
+      threads:
+        description: "Number of OpenMP threads for native C++ training (default: runner CPU count)"
         required: false
-        default: true
-        type: boolean
+        default: "0"
+        type: string
       test_prompt:
         description: "Test prompt to evaluate conversational response before and after training"
         required: false
@@ -130,6 +130,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           export OMP_NUM_THREADS="$(nproc)"
+          echo "GitHub Actions runner CPU count: $(nproc)"
           DATASET="${{ github.event.inputs.dataset || 'zexo/data/zexo_quality_v1_train.txt' }}"
           if [ ! -f "$DATASET" ]; then
             DATASET="zexo/data/step1_conversational_base.txt"
@@ -142,17 +143,17 @@ jobs:
           SEQLEN="${{ github.event.inputs.seq_len || '128' }}"
           PROMPT="${{ github.event.inputs.test_prompt || 'User: Who are you?\nZexo:' }}"
           FROM_SCRATCH="${{ github.event.inputs.from_scratch || 'false' }}"
-          FAST="${{ github.event.inputs.fast || 'true' }}"
+          THREADS="${{ github.event.inputs.threads || '0' }}"
+          if [ "$THREADS" = "0" ]; then
+            THREADS="$(nproc)"
+          fi
 
           SCRATCH_FLAG=""
           if [ "$FROM_SCRATCH" = "true" ] || [ ! -f "zexo/checkpoints/latest.bin" ]; then
             SCRATCH_FLAG="--from-scratch"
           fi
 
-          FAST_FLAG=""
-          if [ "$FAST" != "false" ]; then
-            FAST_FLAG="--fast"
-          fi
+          THREADS_FLAG="--threads $THREADS"
 
           HF_ARG=""
           if [ -n "$HF_DATASET" ]; then
@@ -169,7 +170,7 @@ jobs:
             --test-prompt "$PROMPT" \
             --tag "zexo_run_${{ github.run_number }}" \
             $SCRATCH_FLAG \
-            $FAST_FLAG \
+            $THREADS_FLAG \
             $HF_ARG
 
       - name: Save Updated Checkpoint to Cache
