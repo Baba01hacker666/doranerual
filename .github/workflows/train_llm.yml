@@ -104,7 +104,7 @@ jobs:
           python -c "import doraneural as dn; print('C++ Backend Available:', dn.is_cpp_available())"
 
       - name: Restore Previous Checkpoint from Cache
-        if: ${{ github.event_name == 'push' || github.event.inputs.from_scratch != 'true' }}
+        if: ${{ github.event.inputs.from_scratch != 'true' }}
         uses: actions/cache/restore@v4
         id: checkpoint-cache
         with:
@@ -175,7 +175,7 @@ jobs:
 
       - name: Save Updated Checkpoint to Cache
         uses: actions/cache/save@v4
-        if: always()
+        if: ${{ success() }}
         with:
           path: zexo/checkpoints/
           key: zexo-checkpoint-${{ github.event.inputs.tier || 'mini' }}-${{ github.ref_name }}-${{ github.run_id }}
