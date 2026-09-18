@@ -427,8 +427,13 @@ class TransformerDecoderLM(Module):
             raise ValueError("target_ids must have one target per input token")
         max_logits = Tensor(np.max(logits.data, axis=-1, keepdims=True), dtype=logits.dtype)
         log_norm = (logits - max_logits).exp().sum(axis=-1, keepdims=True).log() + max_logits
-        selected = logits[np.arange(len(targets)), targets]
-        return (log_norm.reshape(-1) - selected).mean()
+        # SFT masking: target < 0 means "prompt token, ignore". Clip for safe
+        # indexing, then zero out masked positions and average over actives.
+        active = (targets >= 0).astype(logits.dtype)
+        safe_targets = np.clip(targets, 0, self.vocab_size - 1)
+        selected = logits[np.arange(len(targets)), safe_targets]
+        nll = (log_norm.reshape(-1) - selected) * Tensor(active, dtype=logits.dtype)
+        return nll.sum() / float(max(1, int(active.sum())))
 
     def train_batch(self, token_ids: Sequence[int], target_ids: Sequence[int], optimizer: TensorAdamW) -> float:
         optimizer.zero_grad()
@@ -450,6 +455,7 @@ class TransformerDecoderLM(Module):
         eval_tokens: Optional[Sequence[int]] = None,
         max_eval_steps: Optional[int] = None,
         verbose: int = 1,
+        batches: Optional[Sequence[tuple]] = None,
     ) -> dict:
         """Fine-tune only LoRA parameters while leaving the base checkpoint fixed."""
         if epochs <= 0:
@@ -458,28 +464,44 @@ class TransformerDecoderLM(Module):
             raise ValueError(f"lr must be positive, got {lr}")
         if not 1 <= seq_len < self.seq_len:
             raise ValueError(f"seq_len must be in [1, {self.seq_len - 1}]")
-        if len(tokens) < seq_len + 1:
-            raise ValueError("tokens must contain at least seq_len + 1 tokens")
-        step = stride or seq_len
-        if not 1 <= step <= seq_len:
-            raise ValueError(f"stride must be in [1, seq_len], got {step}")
-        starts = list(range(0, len(tokens) - seq_len, step))
+        if batches is not None:
+            if not batches:
+                raise ValueError("batches must not be empty")
+            step = stride or seq_len
+            windows = [(list(b[0]), list(b[1])) for b in batches]
+        else:
+            if len(tokens) < seq_len + 1:
+                raise ValueError("tokens must contain at least seq_len + 1 tokens")
+            step = stride or seq_len
+            if not 1 <= step <= seq_len:
+                raise ValueError(f"stride must be in [1, seq_len], got {step}")
+            starts = list(range(0, len(tokens) - seq_len, step))
+            windows = None
         optimizer = TensorAdamW(self.lora_parameters(), lr=lr, weight_decay=weight_decay)
         rng = np.random.default_rng(seed)
         history = {"loss": []}
         if eval_tokens is not None:
             history["val_loss"] = []
         for epoch in range(epochs):
-            order = starts.copy()
-            if shuffle:
-                rng.shuffle(order)
+            if windows is not None:
+                order_idx = list(range(len(windows)))
+                if shuffle:
+                    rng.shuffle(order_idx)
+                order = [windows[i] for i in order_idx]
+            else:
+                order = starts.copy()
+                if shuffle:
+                    rng.shuffle(order)
             total = 0.0
-            for start in order:
-                total += self.train_batch(
-                    tokens[start : start + seq_len],
-                    tokens[start + 1 : start + seq_len + 1],
-                    optimizer,
-                )
+            for item in order:
+                if windows is not None:
+                    total += self.train_batch(item[0], item[1], optimizer)
+                else:
+                    total += self.train_batch(
+                        tokens[item : item + seq_len],
+                        tokens[item + 1 : item + seq_len + 1],
+                        optimizer,
+                    )
             history["loss"].append(total / len(order))
             if eval_tokens is not None:
                 eval_starts = list(range(0, len(eval_tokens) - seq_len, step))
@@ -598,8 +620,13 @@ class TransformerDecoderLM(Module):
         max_eval_steps: Optional[int] = None,
         max_batches: Optional[int] = None,
         verbose: int = 1,
+        batches: Optional[Sequence[tuple]] = None,
     ) -> dict:
-        """Train all transformer parameters on next-token sequences."""
+        """Train all transformer parameters on next-token sequences.
+
+        When `batches` (list of (inputs, targets) with -1 SFT-masked targets)
+        is given, those windows are used directly instead of slicing `tokens`.
+        """
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
         if lr <= 0.0:
@@ -608,26 +635,45 @@ class TransformerDecoderLM(Module):
             raise ValueError(f"seq_len must be in [1, {self.seq_len - 1}]")
         if stride is not None and not 1 <= stride <= seq_len:
             raise ValueError(f"stride must be in [1, seq_len], got {stride}")
-        if len(tokens) < seq_len + 1:
-            raise ValueError("tokens must contain at least seq_len + 1 tokens")
-        step = stride or seq_len
-        starts = list(range(0, len(tokens) - seq_len, step))
-        if not starts:
-            raise ValueError("no training windows available")
+        if batches is not None:
+            if not batches:
+                raise ValueError("batches must not be empty")
+            step = stride or seq_len
+            windows = [(list(b[0]), list(b[1])) for b in batches]
+            starts = None
+        else:
+            if len(tokens) < seq_len + 1:
+                raise ValueError("tokens must contain at least seq_len + 1 tokens")
+            step = stride or seq_len
+            starts = list(range(0, len(tokens) - seq_len, step))
+            if not starts:
+                raise ValueError("no training windows available")
+            windows = None
         optimizer = TensorAdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
         rng = np.random.default_rng(seed)
         history = {"loss": []}
         if eval_tokens is not None:
             history["val_loss"] = []
         for epoch in range(epochs):
-            order = starts.copy()
-            if shuffle:
-                rng.shuffle(order)
-            if max_batches is not None:
-                order = order[:max_batches]
+            if windows is not None:
+                order_idx = list(range(len(windows)))
+                if shuffle:
+                    rng.shuffle(order_idx)
+                if max_batches is not None:
+                    order_idx = order_idx[:max_batches]
+                order = [windows[i] for i in order_idx]
+            else:
+                order = starts.copy()
+                if shuffle:
+                    rng.shuffle(order)
+                if max_batches is not None:
+                    order = order[:max_batches]
             total = 0.0
-            for start in order:
-                total += self.train_batch(tokens[start : start + seq_len], tokens[start + 1 : start + seq_len + 1], optimizer)
+            for item in order:
+                if windows is not None:
+                    total += self.train_batch(item[0], item[1], optimizer)
+                else:
+                    total += self.train_batch(tokens[item : item + seq_len], tokens[item + 1 : item + seq_len + 1], optimizer)
             history["loss"].append(total / len(order))
             if eval_tokens is not None:
                 eval_starts = list(range(0, len(eval_tokens) - seq_len, step))

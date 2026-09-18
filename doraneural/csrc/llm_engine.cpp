@@ -1208,7 +1208,8 @@ float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, con
     FullTrainWorkspace& ws = engine->full_workspace;
     ws.resize(seq_len, L, D, KV, H, Hidden);
     for (int t = 0; t < seq_len; t++) {
-        if (input_tokens[t] < 0 || input_tokens[t] >= p.vocab_size || target_tokens[t] < 0 || target_tokens[t] >= p.vocab_size) return 0.0f;
+        if (input_tokens[t] < 0 || input_tokens[t] >= p.vocab_size) return 0.0f;
+        if (target_tokens[t] < -1 || target_tokens[t] >= p.vocab_size) return 0.0f;
         std::memcpy(ws.states.data() + (size_t)t * D, w.token_embedding_table + (size_t)input_tokens[t] * D, (size_t)D * sizeof(float));
     }
     std::fill(engine->grad_buffer.begin(), engine->grad_buffer.end(), 0.0f);
@@ -1265,14 +1266,19 @@ float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, con
             float* next = state_at(l + 1, t); matmul_forward(engine->xb.data(), swiglu, w.w2 + (size_t)l * D * Hidden, Hidden, D); for (int d = 0; d < D; d++) next[d] = attn_state[d] + engine->xb[d];
         }
     }
-    float total_loss = 0.0f; std::fill(ws.final_norm.begin(), ws.final_norm.end(), 0.0f); const float inv_seq = 1.0f / seq_len; const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table;
+    float total_loss = 0.0f; std::fill(ws.final_norm.begin(), ws.final_norm.end(), 0.0f); const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table;
+    int active_targets = 0; for (int t = 0; t < seq_len; t++) { int tg = target_tokens[t]; if (tg >= 0 && tg < p.vocab_size) active_targets++; }
+    if (active_targets == 0) return 0.0f;
+    const float inv_active = 1.0f / (float)active_targets;
     for (int t = 0; t < seq_len; t++) {
+        int target = target_tokens[t];
+        if (target < 0 || target >= p.vocab_size) continue; // SFT-masked prompt position: forward ran above, skip loss/grad
         float* final = ws.final_norm.data() + (size_t)t * D; rmsnorm_forward(final, state_at(L, t), w.rms_final_weight, D);
         float max_logit = -1e30f; for (int v = 0; v < p.vocab_size; v++) { float value = dot_product_simd(cls_w + (size_t)v * D, final, D); engine->train_step_logits[v] = value; if (value > max_logit) max_logit = value; }
         float sum_exp = 0.0f; for (int v = 0; v < p.vocab_size; v++) { engine->train_probs[v] = std::exp(engine->train_step_logits[v] - max_logit); sum_exp += engine->train_probs[v]; }
-        float inv_sum = 1.0f / std::max(sum_exp, 1e-20f); int target = target_tokens[t]; float target_prob = std::max(engine->train_probs[target] * inv_sum, 1e-20f); total_loss -= std::log(target_prob);
+        float inv_sum = 1.0f / std::max(sum_exp, 1e-20f); float target_prob = std::max(engine->train_probs[target] * inv_sum, 1e-20f); total_loss -= std::log(target_prob);
         float* d_final = ws.d_final.data() + (size_t)t * D; std::fill(d_final, d_final + D, 0.0f);
-        for (int v = 0; v < p.vocab_size; v++) { float dlogit = (engine->train_probs[v] * inv_sum - (v == target ? 1.0f : 0.0f)) * inv_seq; float* dcls = grad + (w.shared_classifier ? off_emb : off_wcls) + (size_t)v * D; const float* cls_row = cls_w + (size_t)v * D; for (int d = 0; d < D; d++) { dcls[d] += dlogit * final[d]; d_final[d] += dlogit * cls_row[d]; } }
+        for (int v = 0; v < p.vocab_size; v++) { float dlogit = (engine->train_probs[v] * inv_sum - (v == target ? 1.0f : 0.0f)) * inv_active; float* dcls = grad + (w.shared_classifier ? off_emb : off_wcls) + (size_t)v * D; const float* cls_row = cls_w + (size_t)v * D; for (int d = 0; d < D; d++) { dcls[d] += dlogit * final[d]; d_final[d] += dlogit * cls_row[d]; } }
     }
     for (int t = 0; t < seq_len; t++) { float* d_final = ws.d_final.data() + (size_t)t * D; float* dx_final = ws.d_states.data() + ((size_t)L * seq_len + t) * D; rmsnorm_backward(dx_final, grad + off_rms_final, d_final, state_at(L, t), w.rms_final_weight, D); }
     for (int l = L - 1; l >= 0; l--) {
@@ -1333,7 +1339,7 @@ float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, con
     auto update_group = [&](float* params, size_t offset, size_t count){ float* g = grad + offset; float* m = engine->m_buffer.data() + offset; float* v = engine->v_buffer.data() + offset; for(size_t i=0;i<count;i++){ m[i]=beta1*m[i]+(1.0f-beta1)*g[i]; v[i]=beta2*v[i]+(1.0f-beta2)*g[i]*g[i]; params[i]-=lr*weight_decay*params[i]; params[i]-=step_size*m[i]/(std::sqrt(v[i])+eps); } };
     update_group(w.token_embedding_table, off_emb, (size_t)p.vocab_size * D); update_group(w.rms_att_weight, off_rms_att, (size_t)L * D); update_group(w.wq, off_wq, (size_t)L * D * D); update_group(w.wk, off_wk, (size_t)L * KV * D); update_group(w.wv, off_wv, (size_t)L * KV * D); update_group(w.wo, off_wo, (size_t)L * D * D); update_group(w.rms_ffn_weight, off_rms_ffn, (size_t)L * D); update_group(w.w1, off_w1, (size_t)L * Hidden * D); update_group(w.w2, off_w2, (size_t)L * D * Hidden); update_group(w.w3, off_w3, (size_t)L * Hidden * D); update_group(w.rms_final_weight, off_rms_final, D);
     if (!w.shared_classifier && w.wcls && w.wcls != w.token_embedding_table) update_group(w.wcls, off_wcls, (size_t)p.vocab_size * D);
-    return total_loss * inv_seq;
+    return total_loss * inv_active;
 }
 
 float llama_train_step(LlamaCppEngine* engine, const int* input_tokens, const int* target_tokens, int seq_len, float lr, float weight_decay, float beta1, float beta2, float eps){

@@ -492,6 +492,18 @@ class LlamaLLM:
         dim_idx_inter = np.arange(0, p.head_size, 2, dtype=np.float32)
         self._rope_inv_freq_interleaved = 1.0 / (_theta ** (dim_idx_inter / p.head_size))
 
+        # Normalize weight arrays to float32 C-contiguous BEFORE exposing them
+        # to the C++ engine: the native trainer updates weights in place through
+        # these buffers, so the engine must alias these exact arrays (not
+        # converted copies) for save() to persist trained weights.
+        for _wname in (
+            "tok_emb", "rms_att", "wq", "wk", "wv", "wo",
+            "rms_ffn", "w1", "w2", "w3", "rms_final", "wcls",
+        ):
+            _arr = getattr(self, _wname, None)
+            if isinstance(_arr, np.ndarray) and (_arr.dtype != np.float32 or not _arr.flags["C_CONTIGUOUS"]):
+                setattr(self, _wname, np.ascontiguousarray(_arr, dtype=np.float32))
+
         # C++ Backend Integration
         self.weights_dict = {
             "token_embedding_table": self.tok_emb,
@@ -1077,8 +1089,8 @@ class LlamaLLM:
                 matches = list(turn_pattern.finditer(d))
                 if not matches:
                     continue
-                d_inputs = []
-                d_targets = []
+                d_inputs = [1]  # BOS prefix matches inference-time encode(bos=True)
+                d_targets = [-1]
                 for m in matches:
                     prompt_text = m.group(1)
                     resp_text = m.group(2).strip() + "\n"
@@ -1100,7 +1112,7 @@ class LlamaLLM:
             print(f"📦 Packed {len(batches):,} training batches ({len(batches) * seq_len:,} sequence tokens).", flush=True)
         else:
             print(f"🔤 Tokenizing pretraining corpus ({len(text):,} chars)...", flush=True)
-            tokens = self.tokenizer.encode(text, bos=False)
+            tokens = [1] + self.tokenizer.encode(text, bos=False)  # BOS matches inference-time encode(bos=True)
             if len(tokens) < seq_len + 1:
                 tokens = tokens * ((seq_len + 2) // max(1, len(tokens)) + 1)
             for j in range(0, len(tokens) - seq_len, seq_len):
@@ -1119,6 +1131,7 @@ class LlamaLLM:
         max_steps: Optional[int] = None,
     ) -> float:
         """Measure next-token cross-entropy without changing model weights."""
+        tokens = [1] + list(tokens)  # BOS prefix matches training windows
         if len(tokens) < seq_len + 1:
             return float("nan")
         step = stride or seq_len
@@ -1165,6 +1178,7 @@ class LlamaLLM:
         max_eval_steps: Optional[int],
         max_batches: Optional[int] = None,
         grad_clip: float = 1.0,
+        mask_prompts: bool = True,
     ) -> dict:
         """Native C++ full-transformer training loop with LR schedule and gradient clipping."""
         if self.cpp_engine is None:
@@ -1178,43 +1192,68 @@ class LlamaLLM:
                 raise ValueError(f"{label} produced no tokens")
             return encoded
 
-        tokens = encode_nonempty(text, "training text")
-        if eval_text is not None:
-            eval_tokens = encode_nonempty(eval_text, "evaluation text")
-        elif validation_split > 0.0:
-            split_at = int(len(tokens) * (1.0 - validation_split))
-            split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
-            eval_tokens = tokens[split_at:]
-            tokens = tokens[:split_at]
+        is_dialogue = bool(re.search(r'(?:^|\n)User:\s*', text, re.IGNORECASE))
+        masked_batches: Optional[List[Tuple[List[int], List[int]]]] = None
+        if is_dialogue and mask_prompts:
+            masked_batches = self._prepare_training_batches(
+                text, seq_len=seq_len, mask_prompts=True, max_batches=max_batches,
+            )
+            if not masked_batches:
+                raise ValueError("No training batches generated from corpus.")
+            tokens = []
+            starts = None
+            total_tokens = len(masked_batches) * seq_len
+            step = seq_len
         else:
-            eval_tokens = None
-        if len(tokens) < seq_len + 1:
-            tokens = tokens * (((seq_len + 1) // len(tokens)) + 1)
-        step = stride or seq_len
-        if not 1 <= step <= seq_len:
-            raise ValueError(f"stride must be in [1, seq_len], got {step}")
-        starts = list(range(0, len(tokens) - seq_len, step))
-        if not starts:
-            raise ValueError("training text does not contain a usable sequence")
+            tokens = [1] + encode_nonempty(text, "training text")  # BOS matches inference
+        if masked_batches is not None:
+            if eval_text is not None:
+                eval_tokens = encode_nonempty(eval_text, "evaluation text")
+            else:
+                eval_tokens = None
+            starts = None
+            step = seq_len
+            n_windows = len(masked_batches)
+        else:
+            if eval_text is not None:
+                eval_tokens = encode_nonempty(eval_text, "evaluation text")
+            elif validation_split > 0.0:
+                split_at = int(len(tokens) * (1.0 - validation_split))
+                split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
+                eval_tokens = tokens[split_at:]
+                tokens = tokens[:split_at]
+            else:
+                eval_tokens = None
+            if len(tokens) < seq_len + 1:
+                tokens = tokens * (((seq_len + 1) // len(tokens)) + 1)
+            step = stride or seq_len
+            if not 1 <= step <= seq_len:
+                raise ValueError(f"stride must be in [1, seq_len], got {step}")
+            starts = list(range(0, len(tokens) - seq_len, step))
+            if not starts:
+                raise ValueError("training text does not contain a usable sequence")
+            n_windows = len(starts)
+            total_tokens = len(tokens)
 
         rng = np.random.default_rng(seed)
-        steps_per_epoch = len(starts) if max_batches is None else min(len(starts), max_batches)
+        steps_per_epoch = n_windows if max_batches is None else min(n_windows, max_batches)
         total_steps = steps_per_epoch * epochs
         warmup_steps = max(1, int(0.05 * total_steps))
         min_lr = lr * 0.1
         history = {
             "loss": [],
-            "tokens": len(tokens),
+            "tokens": total_tokens,
             "windows_per_epoch": steps_per_epoch,
             "total_steps": total_steps,
             "backend": "native_cpp",
             "threads": self.num_threads,
+            "mask_prompts": masked_batches is not None,
         }
         if verbose:
-            capped = f" (capped by max_batches={max_batches})" if max_batches is not None and max_batches < len(starts) else ""
+            capped = f" (capped by max_batches={max_batches})" if max_batches is not None and max_batches < n_windows else ""
             print(
-                f"[Full BP/C++] workflow: {len(tokens):,} tokens -> "
-                f"{len(starts):,} windows/epoch{capped} x {epochs:,} epoch(s) = "
+                f"[Full BP/C++] workflow: {total_tokens:,} tokens -> "
+                f"{n_windows:,} windows/epoch{capped} x {epochs:,} epoch(s) = "
                 f"{total_steps:,} native updates; threads={self.num_threads:,}; grad_clip={grad_clip}",
                 flush=True,
             )
@@ -1223,14 +1262,22 @@ class LlamaLLM:
         training_started = time.perf_counter()
         global_step = 0
         for epoch in range(epochs):
-            order = starts.copy()
-            if shuffle:
-                rng.shuffle(order)
-            if max_batches is not None:
-                order = order[:max_batches]
+            if masked_batches is not None:
+                order_idx = list(range(len(masked_batches)))
+                if shuffle:
+                    rng.shuffle(order_idx)
+                if max_batches is not None:
+                    order_idx = order_idx[:max_batches]
+                order = [masked_batches[i] for i in order_idx]
+            else:
+                order = starts.copy()
+                if shuffle:
+                    rng.shuffle(order)
+                if max_batches is not None:
+                    order = order[:max_batches]
             total = 0.0
             progress_every = max(1, len(order) // 20)
-            for step_idx, start in enumerate(order):
+            for step_idx, item in enumerate(order):
                 # Cosine learning rate schedule with linear warmup
                 if global_step < warmup_steps:
                     cur_lr = lr * ((global_step + 1) / warmup_steps)
@@ -1238,9 +1285,15 @@ class LlamaLLM:
                     progress = (global_step - warmup_steps) / max(1, total_steps - warmup_steps)
                     cur_lr = min_lr + 0.5 * (lr - min_lr) * (1.0 + math.cos(math.pi * progress))
 
+                if masked_batches is not None:
+                    in_seq, tgt_seq = item
+                else:
+                    start = item
+                    in_seq = tokens[start : start + seq_len]
+                    tgt_seq = tokens[start + 1 : start + seq_len + 1]
                 total += self.cpp_engine.full_train_step(
-                    tokens[start : start + seq_len],
-                    tokens[start + 1 : start + seq_len + 1],
+                    in_seq,
+                    tgt_seq,
                     lr=cur_lr,
                     weight_decay=weight_decay,
                     grad_clip=grad_clip,
@@ -1295,6 +1348,7 @@ class LlamaLLM:
         native: bool = True,
         max_batches: Optional[int] = None,
         grad_clip: float = 1.0,
+        mask_prompts: bool = True,
     ) -> dict:
         """Fine-tune every transformer parameter using native C++ or NumPy autograd.
 
@@ -1316,6 +1370,7 @@ class LlamaLLM:
                 text, epochs, lr, seq_len, weight_decay, verbose,
                 eval_text, validation_split, stride, shuffle, seed, max_eval_steps,
                 max_batches=max_batches, grad_clip=grad_clip,
+                mask_prompts=mask_prompts,
             )
 
         def encode_nonempty(value: str, label: str) -> List[int]:
@@ -1324,19 +1379,31 @@ class LlamaLLM:
                 raise ValueError(f"{label} produced no tokens")
             return encoded
 
-        train_tokens = encode_nonempty(text, "training text")
-        if eval_text is not None:
-            eval_tokens = encode_nonempty(eval_text, "evaluation text")
-        elif validation_split > 0.0:
-            split_at = int(len(train_tokens) * (1.0 - validation_split))
-            split_at = min(max(split_at, seq_len + 1), len(train_tokens) - 1)
-            eval_tokens = train_tokens[split_at:]
-            train_tokens = train_tokens[:split_at]
+        masked_batches: Optional[List[Tuple[List[int], List[int]]]] = None
+        is_dialogue = bool(re.search(r'(?:^|\n)User:\s*', text, re.IGNORECASE))
+        if is_dialogue and mask_prompts:
+            masked_batches = self._prepare_training_batches(
+                text, seq_len=seq_len, mask_prompts=True, max_batches=max_batches,
+            )
+            if not masked_batches:
+                raise ValueError("No training batches generated from corpus.")
+            train_tokens = []
+            eval_tokens = encode_nonempty(eval_text, "evaluation text") if eval_text is not None else None
         else:
-            eval_tokens = None
-        if len(train_tokens) < seq_len + 1:
-            repeats = ((seq_len + 1) // len(train_tokens)) + 1
-            train_tokens = train_tokens * repeats
+            train_tokens = [1] + encode_nonempty(text, "training text")  # BOS matches inference
+            if eval_text is not None:
+                eval_tokens = encode_nonempty(eval_text, "evaluation text")
+            elif validation_split > 0.0:
+                split_at = int(len(train_tokens) * (1.0 - validation_split))
+                split_at = min(max(split_at, seq_len + 1), len(train_tokens) - 1)
+                eval_tokens = train_tokens[split_at:]
+                train_tokens = train_tokens[:split_at]
+            else:
+                eval_tokens = None
+        if masked_batches is None:
+            if len(train_tokens) < seq_len + 1:
+                repeats = ((seq_len + 1) // len(train_tokens)) + 1
+                train_tokens = train_tokens * repeats
         step = stride or seq_len
         if not 1 <= step <= seq_len:
             raise ValueError(f"stride must be in [1, seq_len], got {step}")
@@ -1354,6 +1421,7 @@ class LlamaLLM:
             max_eval_steps=max_eval_steps,
             max_batches=max_batches,
             verbose=verbose,
+            batches=masked_batches,
         )
         self.reset_cache()
         return history
@@ -1376,6 +1444,7 @@ class LlamaLLM:
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
         adapter_path: Optional[Union[str, Path]] = None,
+        mask_prompts: bool = True,
     ) -> dict:
         """Fine-tune a pretrained checkpoint with adapter-only LoRA weights."""
         if not text:
@@ -1386,16 +1455,27 @@ class LlamaLLM:
             raise ValueError("Pass either eval_text or validation_split, not both")
         model = self.full_backprop_model()
         model.enable_lora(rank=rank, alpha=alpha, target_modules=target_modules, freeze_base=True)
-        tokens = self.tokenizer.encode(text, bos=False)
-        eval_tokens = self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
-        if validation_split > 0.0:
-            split_at = int(len(tokens) * (1.0 - validation_split))
-            split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
-            eval_tokens = tokens[split_at:]
-            tokens = tokens[:split_at]
-        if len(tokens) < seq_len + 1:
-            repeats = ((seq_len + 1) // len(tokens)) + 1
-            tokens = tokens * repeats
+        masked_batches: Optional[List[Tuple[List[int], List[int]]]] = None
+        is_dialogue = bool(re.search(r'(?:^|\n)User:\s*', text, re.IGNORECASE))
+        if is_dialogue and mask_prompts:
+            masked_batches = self._prepare_training_batches(
+                text, seq_len=seq_len, mask_prompts=True, max_batches=None,
+            )
+            if not masked_batches:
+                raise ValueError("No training batches generated from corpus.")
+            tokens = []
+            eval_tokens = self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
+        else:
+            tokens = [1] + self.tokenizer.encode(text, bos=False)  # BOS matches inference
+            eval_tokens = self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
+            if validation_split > 0.0:
+                split_at = int(len(tokens) * (1.0 - validation_split))
+                split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
+                eval_tokens = tokens[split_at:]
+                tokens = tokens[:split_at]
+            if len(tokens) < seq_len + 1:
+                repeats = ((seq_len + 1) // len(tokens)) + 1
+                tokens = tokens * repeats
         history = model.fit_lora_tokens(
             tokens,
             epochs=epochs,
@@ -1408,6 +1488,7 @@ class LlamaLLM:
             eval_tokens=eval_tokens,
             max_eval_steps=max_eval_steps,
             verbose=verbose,
+            batches=masked_batches,
         )
         if adapter_path is not None:
             history["adapter_path"] = str(model.save_lora(adapter_path))
@@ -1496,6 +1577,7 @@ class LlamaLLM:
                 seed=seed,
                 max_eval_steps=max_eval_steps,
                 adapter_path=adapter_path,
+                mask_prompts=mask_prompts,
             )
         if full_backprop:
             return self.train_full(
@@ -1513,6 +1595,14 @@ class LlamaLLM:
                 max_eval_steps=max_eval_steps,
                 native=native_full,
                 grad_clip=grad_clip,
+                mask_prompts=mask_prompts,
+            )
+        if verbose:
+            print(
+                "HEAD-ONLY training: updating token embeddings + output classifier only; "
+                "transformer layers are frozen. Pass full_backprop=True (or --full-backprop) "
+                "to train all layers.",
+                flush=True,
             )
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
@@ -1538,7 +1628,7 @@ class LlamaLLM:
             starts = None
             total_tokens = len(batches) * seq_len
         else:
-            train_tokens = encode_nonempty(text, "training text")
+            train_tokens = [1] + encode_nonempty(text, "training text")  # BOS matches inference
             total_tokens = len(train_tokens)
             batches = None
 

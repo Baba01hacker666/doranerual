@@ -27,9 +27,11 @@ def print_banner(model_name: str, tier: str, params: int, backend: str):
     print("─" * 70 + "\n")
 
 
-def interactive_chat_loop(zexo, temperature: float = 0.7, max_tokens: int = 80):
+def interactive_chat_loop(zexo, temperature: float = 0.7, max_tokens: int = 80, top_k: int = 0):
     cfg = zexo.config
     print_banner(cfg.name, cfg.tier, cfg.parameter_count, zexo.llm.backend)
+    if top_k:
+        zexo.chat_session.top_k = int(top_k)
 
     while True:
         try:
@@ -101,6 +103,12 @@ def main():
         help="Maximum tokens to generate per response turn (default: 80).",
     )
     parser.add_argument(
+        "--top-k",
+        type=int,
+        default=0,
+        help="Top-K sampling cutoff, 0 disables (default: 0).",
+    )
+    parser.add_argument(
         "--backend",
         choices=["auto", "cpp", "numpy"],
         default="auto",
@@ -108,8 +116,10 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.top_k < 0:
+        parser.error("--top-k must be non-negative")
     zexo = load_zexo(checkpoint_path=args.checkpoint, tier=args.tier, backend=args.backend)
-    interactive_chat_loop(zexo, temperature=args.temp, max_tokens=args.max_tokens)
+    interactive_chat_loop(zexo, temperature=args.temp, max_tokens=args.max_tokens, top_k=args.top_k)
 
 
 if __name__ == "__main__":

@@ -45,10 +45,18 @@ class ZexoModel:
         temperature: float = 0.7,
         max_tokens: int = 80,
         stream: bool = False,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
     ) -> Union[str, any]:
         """Conduct a single conversational turn with Zexo, retaining multi-turn history."""
         self.chat_session.temperature = float(temperature)
         self.chat_session.max_new_tokens = int(max_tokens)
+        if top_k is not None:
+            if top_k < 0:
+                raise ValueError(f"top_k must be non-negative, got {top_k}")
+            self.chat_session.top_k = int(top_k)
+        if top_p is not None:
+            self.chat_session.top_p = float(top_p)
         if stream:
             return self.chat_session.stream_chat(user_input)
         return self.chat_session.chat(user_input)
@@ -58,10 +66,12 @@ class ZexoModel:
         prompt: str,
         max_tokens: int = 50,
         temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 0,
         stream: bool = False,
     ) -> Union[str, Generator[str, None, None]]:
         """Run raw autoregressive token completion."""
-        return self.llm.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, stream=stream)
+        return self.llm.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, stream=stream)
 
     def train(
         self,

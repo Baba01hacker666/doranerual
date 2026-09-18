@@ -61,6 +61,7 @@ class ChatSession:
         max_new_tokens: int = 64,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: int = 0,
         stop_sequences: Optional[List[str]] = None,
         assistant_prefix: str = "Assistant",
     ) -> None:
@@ -70,6 +71,9 @@ class ChatSession:
         self.max_new_tokens = max_new_tokens
         self.temperature = float(temperature)
         self.top_p = float(top_p)
+        if top_k < 0:
+            raise ValueError(f"top_k must be non-negative, got {top_k}")
+        self.top_k = int(top_k)
         self.stop_sequences = stop_sequences or list(self.DEFAULT_STOP_SEQUENCES)
         self.assistant_prefix = assistant_prefix
 
@@ -182,6 +186,7 @@ class ChatSession:
             max_tokens=self.max_new_tokens,
             temperature=self.temperature,
             top_p=self.top_p,
+            top_k=self.top_k,
             stream=True,
         ):
             buffer += piece
@@ -257,7 +262,7 @@ class ChatSession:
         print(f"Model:    {model_name} ({self.llm.config.dim} dim, {self.llm.config.n_layers} layer)")
         print(f"Backend:  {self.llm.backend.upper()} (Zero external dependencies)")
         print(f"Context:  {self.max_context_tokens} tokens max (Automatic Sliding Window)")
-        print(f"Commands: {YELLOW}/clear{RESET}, {YELLOW}/context{RESET}, {YELLOW}/temp <val>{RESET}, {YELLOW}/tokens <val>{RESET}, {YELLOW}/stats{RESET}, {YELLOW}/exit{RESET}")
+        print(f"Commands: {YELLOW}/clear{RESET}, {YELLOW}/context{RESET}, {YELLOW}/temp <val>{RESET}, {YELLOW}/tokens <val>{RESET}, {YELLOW}/topk <val>{RESET}, {YELLOW}/stats{RESET}, {YELLOW}/exit{RESET}")
         print("=" * 68)
         print(f"{DIM}System prompt: \"{self.system_prompt}\"{RESET}\n")
 
@@ -321,6 +326,20 @@ class ChatSession:
                             print(f"{YELLOW}Invalid number of tokens: {arg}{RESET}\n")
                     else:
                         print(f"Current max new tokens: {self.max_new_tokens}\n")
+                    continue
+
+                elif cmd == "/topk":
+                    if arg:
+                        try:
+                            val = int(arg)
+                            if val < 0:
+                                raise ValueError(str(val))
+                            self.top_k = val
+                            print(f"{YELLOW}Top-k set to {self.top_k}{RESET}\n")
+                        except ValueError:
+                            print(f"{YELLOW}Invalid top-k: {arg}{RESET}\n")
+                    else:
+                        print(f"Current top-k: {self.top_k}\n")
                     continue
 
                 elif cmd == "/system":
