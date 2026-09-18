@@ -366,11 +366,17 @@ def download_hf_dataset(
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            if e.code == 429 and collected_texts:
+                print(f"\n⚠️ Hugging Face rate limit reached (HTTP 429). Proceeding with {len(collected_texts):,} collected samples.")
+                break
             err_msg = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(
                 f"Failed to fetch dataset '{clean_id}' from Hugging Face (HTTP {e.code}): {err_msg}"
             ) from e
         except Exception as e:
+            if collected_texts:
+                print(f"\n⚠️ Connection interrupted ({e}). Proceeding with {len(collected_texts):,} collected samples.")
+                break
             raise RuntimeError(f"Error connecting to Hugging Face datasets server: {e}") from e
 
         rows_data = data.get("rows", [])
