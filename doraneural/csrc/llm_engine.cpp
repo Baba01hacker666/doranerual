@@ -290,7 +290,60 @@ inline void matmul_int8_core_4rows(float* y, const float* x, const int8_t* r0, c
     auto hsum = [](__m256 v){ __m128 low=_mm256_castps256_ps128(v); __m128 high=_mm256_extractf128_ps(v,1); __m128 s=_mm_add_ps(low,high); s=_mm_hadd_ps(s,s); s=_mm_hadd_ps(s,s); return _mm_cvtss_f32(s); };
     float acc0 = hsum(vsum0) * s0; float acc1 = rows>1? hsum(vsum1)*s1:0.0f; float acc2 = rows>2? hsum(vsum2)*s2:0.0f; float acc3 = rows>3? hsum(vsum3)*s3:0.0f;
     for (; j < n; j++) { float xj=x[j]; acc0+= (float)r0[j]*xj*s0; if(rows>1) acc1+= (float)r1[j]*xj*s1; if(rows>2) acc2+= (float)r2[j]*xj*s2; if(rows>3) acc3+= (float)r3[j]*xj*s3; }
-    y[0]=acc0; if(rows>1) y[1]=acc1; if(rows>2) y[2]=acc2; if(rows>3) y[3]=acc3;
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    float32x4_t s0_0 = vdupq_n_f32(0.0f), s0_1 = vdupq_n_f32(0.0f);
+    float32x4_t s1_0 = vdupq_n_f32(0.0f), s1_1 = vdupq_n_f32(0.0f);
+    float32x4_t s2_0 = vdupq_n_f32(0.0f), s2_1 = vdupq_n_f32(0.0f);
+    float32x4_t s3_0 = vdupq_n_f32(0.0f), s3_1 = vdupq_n_f32(0.0f);
+    int j = 0;
+    for (; j + 7 < n; j += 8) {
+        float32x4_t xv0 = vld1q_f32(x + j);
+        float32x4_t xv1 = vld1q_f32(x + j + 4);
+        if (rows > 0) {
+            int8x8_t b8 = vld1_s8(r0 + j);
+            int16x8_t b16 = vmovl_s8(b8);
+            float32x4_t w0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(b16)));
+            float32x4_t w1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(b16)));
+            s0_0 = vfmaq_f32(s0_0, w0, xv0);
+            s0_1 = vfmaq_f32(s0_1, w1, xv1);
+        }
+        if (rows > 1) {
+            int8x8_t b8 = vld1_s8(r1 + j);
+            int16x8_t b16 = vmovl_s8(b8);
+            float32x4_t w0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(b16)));
+            float32x4_t w1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(b16)));
+            s1_0 = vfmaq_f32(s1_0, w0, xv0);
+            s1_1 = vfmaq_f32(s1_1, w1, xv1);
+        }
+        if (rows > 2) {
+            int8x8_t b8 = vld1_s8(r2 + j);
+            int16x8_t b16 = vmovl_s8(b8);
+            float32x4_t w0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(b16)));
+            float32x4_t w1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(b16)));
+            s2_0 = vfmaq_f32(s2_0, w0, xv0);
+            s2_1 = vfmaq_f32(s2_1, w1, xv1);
+        }
+        if (rows > 3) {
+            int8x8_t b8 = vld1_s8(r3 + j);
+            int16x8_t b16 = vmovl_s8(b8);
+            float32x4_t w0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(b16)));
+            float32x4_t w1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(b16)));
+            s3_0 = vfmaq_f32(s3_0, w0, xv0);
+            s3_1 = vfmaq_f32(s3_1, w1, xv1);
+        }
+    }
+    float acc0 = vaddvq_f32(vaddq_f32(s0_0, s0_1)) * s0;
+    float acc1 = rows > 1 ? vaddvq_f32(vaddq_f32(s1_0, s1_1)) * s1 : 0.0f;
+    float acc2 = rows > 2 ? vaddvq_f32(vaddq_f32(s2_0, s2_1)) * s2 : 0.0f;
+    float acc3 = rows > 3 ? vaddvq_f32(vaddq_f32(s3_0, s3_1)) * s3 : 0.0f;
+    for (; j < n; j++) {
+        float xj = x[j];
+        acc0 += (float)r0[j] * xj * s0;
+        if (rows > 1) acc1 += (float)r1[j] * xj * s1;
+        if (rows > 2) acc2 += (float)r2[j] * xj * s2;
+        if (rows > 3) acc3 += (float)r3[j] * xj * s3;
+    }
+    y[0] = acc0; if (rows > 1) y[1] = acc1; if (rows > 2) y[2] = acc2; if (rows > 3) y[3] = acc3;
 #else
     float acc0=0,acc1=0,acc2=0,acc3=0;
     for(int j=0;j<n;j++){ float xj=x[j]; acc0+= (float)r0[j]*xj; if(rows>1) acc1+= (float)r1[j]*xj; if(rows>2) acc2+= (float)r2[j]*xj; if(rows>3) acc3+= (float)r3[j]*xj; }
