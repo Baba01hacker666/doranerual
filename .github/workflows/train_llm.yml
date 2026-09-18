@@ -50,7 +50,7 @@ on:
         default: "128"
         type: string
       threads:
-        description: "Number of OpenMP threads for native C++ training (default: runner CPU count)"
+        description: "Number of OpenMP threads for native C++ training (0 = auto-detect)"
         required: false
         default: "0"
         type: string
