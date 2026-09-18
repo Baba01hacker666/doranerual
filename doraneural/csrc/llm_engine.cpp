@@ -351,6 +351,89 @@ void softmax(float* x, int size) {
 
 } // namespace
 
+
+// Sequence activations used by the native full-transformer trainer. The
+// workspace is retained by the engine and resized only when the training
+// sequence shape changes, avoiding per-step heap churn.
+struct FullTrainWorkspace {
+    int seq = 0;
+    int layers = 0;
+    int dim = 0;
+    int kv_dim = 0;
+    int heads = 0;
+    int hidden = 0;
+
+    std::vector<float> states;       // (layers + 1, seq, dim)
+    std::vector<float> norm_att;     // (layers, seq, dim)
+    std::vector<float> q;            // (layers, seq, dim)
+    std::vector<float> k;            // (layers, seq, kv_dim)
+    std::vector<float> v;            // (layers, seq, kv_dim)
+    std::vector<float> scores;       // (layers, seq, heads, seq)
+    std::vector<float> attn_out;     // (layers, seq, dim)
+    std::vector<float> attn_state;   // (layers, seq, dim)
+    std::vector<float> norm_ffn;     // (layers, seq, dim)
+    std::vector<float> gate;         // (layers, seq, hidden)
+    std::vector<float> up;           // (layers, seq, hidden)
+    std::vector<float> swiglu;       // (layers, seq, hidden)
+    std::vector<float> final_norm;   // (seq, dim)
+    std::vector<float> d_final;      // (seq, dim), gradient of final norm
+
+    std::vector<float> d_states;
+    std::vector<float> d_norm_att;
+    std::vector<float> d_q;
+    std::vector<float> d_k;
+    std::vector<float> d_v;
+    std::vector<float> d_norm_ffn;
+    std::vector<float> d_gate;
+    std::vector<float> d_up;
+    std::vector<float> d_swiglu;
+    std::vector<float> d_attn_out;
+    std::vector<float> d_attn_state;
+
+    void resize(int new_seq, int new_layers, int new_dim, int new_kv_dim,
+                int new_heads, int new_hidden) {
+        if (seq == new_seq && layers == new_layers && dim == new_dim &&
+            kv_dim == new_kv_dim && heads == new_heads && hidden == new_hidden) {
+            return;
+        }
+        seq = new_seq;
+        layers = new_layers;
+        dim = new_dim;
+        kv_dim = new_kv_dim;
+        heads = new_heads;
+        hidden = new_hidden;
+        const size_t layer_dim = static_cast<size_t>(layers) * seq * dim;
+        const size_t layer_kv = static_cast<size_t>(layers) * seq * kv_dim;
+        const size_t layer_hidden = static_cast<size_t>(layers) * seq * hidden;
+        const size_t layer_scores = static_cast<size_t>(layers) * seq * heads * seq;
+        states.assign(static_cast<size_t>(layers + 1) * seq * dim, 0.0f);
+        norm_att.assign(layer_dim, 0.0f);
+        q.assign(layer_dim, 0.0f);
+        k.assign(layer_kv, 0.0f);
+        v.assign(layer_kv, 0.0f);
+        scores.assign(layer_scores, 0.0f);
+        attn_out.assign(layer_dim, 0.0f);
+        attn_state.assign(layer_dim, 0.0f);
+        norm_ffn.assign(layer_dim, 0.0f);
+        gate.assign(layer_hidden, 0.0f);
+        up.assign(layer_hidden, 0.0f);
+        swiglu.assign(layer_hidden, 0.0f);
+        final_norm.assign(static_cast<size_t>(seq) * dim, 0.0f);
+        d_final.assign(static_cast<size_t>(seq) * dim, 0.0f);
+        d_states.assign(states.size(), 0.0f);
+        d_norm_att.assign(layer_dim, 0.0f);
+        d_q.assign(layer_dim, 0.0f);
+        d_k.assign(layer_kv, 0.0f);
+        d_v.assign(layer_kv, 0.0f);
+        d_norm_ffn.assign(layer_dim, 0.0f);
+        d_gate.assign(layer_hidden, 0.0f);
+        d_up.assign(layer_hidden, 0.0f);
+        d_swiglu.assign(layer_hidden, 0.0f);
+        d_attn_out.assign(layer_dim, 0.0f);
+        d_attn_state.assign(layer_dim, 0.0f);
+    }
+};
+
 struct LlamaCppEngine {
     LlamaCppConfig config;
     LlamaCppWeights weights;
@@ -384,6 +467,10 @@ struct LlamaCppEngine {
     std::vector<float> train_step_logits;
     std::vector<float> train_dlogits;
     std::vector<float> train_probs;
+    std::vector<float> train_grad_embedding;
+
+    // Native full-transformer training workspace
+    FullTrainWorkspace full_workspace;
 
     // AdamW Optimizer State
     std::vector<float> grad_buffer;
@@ -423,6 +510,7 @@ struct LlamaCppEngine {
         train_step_logits.resize(config.vocab_size, 0.0f);
         train_dlogits.resize(config.vocab_size, 0.0f);
         train_probs.resize(config.vocab_size, 0.0f);
+        train_grad_embedding.resize(config.dim, 0.0f);
 
         // Precompute RoPE cos/sin cache across all positions and half-dimensions
         cos_cache.resize(config.seq_len * half, 0.0f);
@@ -786,7 +874,10 @@ int llama_generate(
     float top_p,
     int* out_tokens
 ) {
-    if (!engine || !prompt_tokens || prompt_len <= 0 || !out_tokens) return 0;
+    if (
+        !engine || !prompt_tokens || prompt_len <= 0 || !out_tokens
+        || prompt_len >= engine->config.seq_len || max_new_tokens < 0
+    ) return 0;
 
     engine->reset_kv_cache();
 
@@ -810,6 +901,404 @@ int llama_generate(
     }
 
     return generated_count;
+}
+
+float llama_full_train_step(
+    LlamaCppEngine* engine,
+    const int* input_tokens,
+    const int* target_tokens,
+    int seq_len,
+    float lr,
+    float weight_decay,
+    float beta1,
+    float beta2,
+    float eps
+) {
+    if (!engine || !input_tokens || !target_tokens || seq_len <= 0 ||
+        seq_len >= engine->config.seq_len) return 0.0f;
+
+    const LlamaCppConfig& p = engine->config;
+    LlamaCppWeights& w = engine->weights;
+    const int D = p.dim;
+    const int H = p.n_heads;
+    const int HD = D / H;
+    const int KV = (D * p.n_kv_heads) / H;
+    const int Hidden = p.hidden_dim;
+    const int L = p.n_layers;
+    const float inv_head = 1.0f / std::sqrt(static_cast<float>(HD));
+    FullTrainWorkspace& ws = engine->full_workspace;
+    ws.resize(seq_len, L, D, KV, H, Hidden);
+
+    for (int t = 0; t < seq_len; t++) {
+        if (input_tokens[t] < 0 || input_tokens[t] >= p.vocab_size ||
+            target_tokens[t] < 0 || target_tokens[t] >= p.vocab_size) return 0.0f;
+        std::memcpy(ws.states.data() + static_cast<size_t>(t) * D,
+                    w.token_embedding_table + input_tokens[t] * D,
+                    D * sizeof(float));
+    }
+    std::fill(engine->grad_buffer.begin(), engine->grad_buffer.end(), 0.0f);
+    std::fill(ws.d_states.begin(), ws.d_states.end(), 0.0f);
+    std::fill(ws.d_final.begin(), ws.d_final.end(), 0.0f);
+    std::fill(ws.d_norm_att.begin(), ws.d_norm_att.end(), 0.0f);
+    std::fill(ws.d_q.begin(), ws.d_q.end(), 0.0f);
+    std::fill(ws.d_k.begin(), ws.d_k.end(), 0.0f);
+    std::fill(ws.d_v.begin(), ws.d_v.end(), 0.0f);
+    std::fill(ws.d_norm_ffn.begin(), ws.d_norm_ffn.end(), 0.0f);
+    std::fill(ws.d_gate.begin(), ws.d_gate.end(), 0.0f);
+    std::fill(ws.d_up.begin(), ws.d_up.end(), 0.0f);
+    std::fill(ws.d_swiglu.begin(), ws.d_swiglu.end(), 0.0f);
+    std::fill(ws.d_attn_out.begin(), ws.d_attn_out.end(), 0.0f);
+    std::fill(ws.d_attn_state.begin(), ws.d_attn_state.end(), 0.0f);
+
+    // Parameter-gradient offsets match calculate_total_parameters().
+    size_t off_emb = 0;
+    size_t off_rms_att = off_emb + static_cast<size_t>(p.vocab_size) * D;
+    size_t off_wq = off_rms_att + static_cast<size_t>(L) * D;
+    size_t off_wk = off_wq + static_cast<size_t>(L) * D * D;
+    size_t off_wv = off_wk + static_cast<size_t>(L) * KV * D;
+    size_t off_wo = off_wv + static_cast<size_t>(L) * KV * D;
+    size_t off_rms_ffn = off_wo + static_cast<size_t>(L) * D * D;
+    size_t off_w1 = off_rms_ffn + static_cast<size_t>(L) * D;
+    size_t off_w2 = off_w1 + static_cast<size_t>(L) * Hidden * D;
+    size_t off_w3 = off_w2 + static_cast<size_t>(L) * D * Hidden;
+    size_t off_rms_final = off_w3 + static_cast<size_t>(L) * Hidden * D;
+    size_t off_wcls = off_rms_final + D;
+    float* grad = engine->grad_buffer.data();
+
+    auto state_at = [&](int layer, int t) -> float* {
+        return ws.states.data() + (static_cast<size_t>(layer) * seq_len + t) * D;
+    };
+    auto layer_dim_at = [&](std::vector<float>& data, int layer, int t) -> float* {
+        return data.data() + (static_cast<size_t>(layer) * seq_len + t) * D;
+    };
+    auto layer_kv_at = [&](std::vector<float>& data, int layer, int t) -> float* {
+        return data.data() + (static_cast<size_t>(layer) * seq_len + t) * KV;
+    };
+    auto layer_hidden_at = [&](std::vector<float>& data, int layer, int t) -> float* {
+        return data.data() + (static_cast<size_t>(layer) * seq_len + t) * Hidden;
+    };
+    auto score_at = [&](int layer, int t, int h) -> float* {
+        return ws.scores.data() +
+            ((static_cast<size_t>(layer) * seq_len + t) * H + h) * seq_len;
+    };
+
+    // Forward pass over the complete causal sequence, retaining activations.
+    for (int l = 0; l < L; l++) {
+        for (int t = 0; t < seq_len; t++) {
+            float* x = state_at(l, t);
+            float* norm = layer_dim_at(ws.norm_att, l, t);
+            rmsnorm_forward(norm, x, w.rms_att_weight + l * D, D);
+            matmul_forward(layer_dim_at(ws.q, l, t), norm, w.wq + static_cast<size_t>(l) * D * D, D, D);
+            matmul_forward(layer_kv_at(ws.k, l, t), norm, w.wk + static_cast<size_t>(l) * KV * D, D, KV);
+            matmul_forward(layer_kv_at(ws.v, l, t), norm, w.wv + static_cast<size_t>(l) * KV * D, D, KV);
+
+            float* q = layer_dim_at(ws.q, l, t);
+            float* k = layer_kv_at(ws.k, l, t);
+            const float* cos_ptr = engine->cos_cache.data() + t * (HD / 2);
+            const float* sin_ptr = engine->sin_cache.data() + t * (HD / 2);
+            if (p.rope_type == 1) {
+                const int half = HD / 2;
+                for (int h = 0; h < H; h++) {
+                    float* qh = q + h * HD;
+                    for (int i = 0; i < half; i++) {
+                        float q0 = qh[i], q1 = qh[i + half];
+                        qh[i] = q0 * cos_ptr[i] - q1 * sin_ptr[i];
+                        qh[i + half] = q1 * cos_ptr[i] + q0 * sin_ptr[i];
+                    }
+                }
+                for (int h = 0; h < p.n_kv_heads; h++) {
+                    float* kh = k + h * HD;
+                    for (int i = 0; i < half; i++) {
+                        float k0 = kh[i], k1 = kh[i + half];
+                        kh[i] = k0 * cos_ptr[i] - k1 * sin_ptr[i];
+                        kh[i + half] = k1 * cos_ptr[i] + k0 * sin_ptr[i];
+                    }
+                }
+            } else {
+                for (int i = 0; i < D; i += 2) {
+                    int r = (i % HD) / 2;
+                    float q0 = q[i], q1 = q[i + 1];
+                    q[i] = q0 * cos_ptr[r] - q1 * sin_ptr[r];
+                    q[i + 1] = q0 * sin_ptr[r] + q1 * cos_ptr[r];
+                    if (i < KV) {
+                        float k0 = k[i], k1 = k[i + 1];
+                        k[i] = k0 * cos_ptr[r] - k1 * sin_ptr[r];
+                        k[i + 1] = k0 * sin_ptr[r] + k1 * cos_ptr[r];
+                    }
+                }
+            }
+        }
+
+        for (int t = 0; t < seq_len; t++) {
+            float* out = layer_dim_at(ws.attn_out, l, t);
+            std::fill(out, out + D, 0.0f);
+            const int kv_mul = H / p.n_kv_heads;
+            for (int h = 0; h < H; h++) {
+                float* weights = score_at(l, t, h);
+                const float* qh = layer_dim_at(ws.q, l, t) + h * HD;
+                const int kv_h = h / kv_mul;
+                float max_score = -1e30f;
+                for (int u = 0; u <= t; u++) {
+                    const float* kh = layer_kv_at(ws.k, l, u) + kv_h * HD;
+                    weights[u] = dot_product_simd(qh, kh, HD) * inv_head;
+                    if (weights[u] > max_score) max_score = weights[u];
+                }
+                float sum = 0.0f;
+                for (int u = 0; u <= t; u++) {
+                    weights[u] = std::exp(weights[u] - max_score);
+                    sum += weights[u];
+                }
+                float inv_sum = 1.0f / std::max(sum, 1e-20f);
+                for (int u = 0; u < seq_len; u++) weights[u] = u <= t ? weights[u] * inv_sum : 0.0f;
+                float* out_head = out + h * HD;
+                for (int u = 0; u <= t; u++) {
+                    const float* vh = layer_kv_at(ws.v, l, u) + kv_h * HD;
+                    for (int d = 0; d < HD; d++) out_head[d] += weights[u] * vh[d];
+                }
+            }
+            float* attn_state = layer_dim_at(ws.attn_state, l, t);
+            matmul_forward(engine->xb.data(), out, w.wo + static_cast<size_t>(l) * D * D, D, D);
+            const float* x = state_at(l, t);
+            for (int d = 0; d < D; d++) attn_state[d] = x[d] + engine->xb[d];
+
+            float* norm_ffn = layer_dim_at(ws.norm_ffn, l, t);
+            rmsnorm_forward(norm_ffn, attn_state, w.rms_ffn_weight + l * D, D);
+            float* gate = layer_hidden_at(ws.gate, l, t);
+            float* up = layer_hidden_at(ws.up, l, t);
+            float* swiglu = layer_hidden_at(ws.swiglu, l, t);
+            matmul_forward(gate, norm_ffn, w.w1 + static_cast<size_t>(l) * Hidden * D, D, Hidden);
+            matmul_forward(up, norm_ffn, w.w3 + static_cast<size_t>(l) * Hidden * D, D, Hidden);
+            for (int j = 0; j < Hidden; j++) swiglu[j] = silu(gate[j]) * up[j];
+            float* next = state_at(l + 1, t);
+            matmul_forward(engine->xb.data(), swiglu, w.w2 + static_cast<size_t>(l) * D * Hidden, Hidden, D);
+            for (int d = 0; d < D; d++) next[d] = attn_state[d] + engine->xb[d];
+        }
+    }
+
+    // Final norm, classifier cross-entropy, and output-side gradients.
+    float total_loss = 0.0f;
+    std::fill(ws.final_norm.begin(), ws.final_norm.end(), 0.0f);
+    const float inv_seq = 1.0f / seq_len;
+    const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table;
+    for (int t = 0; t < seq_len; t++) {
+        float* final = ws.final_norm.data() + t * D;
+        rmsnorm_forward(final, state_at(L, t), w.rms_final_weight, D);
+        float max_logit = -1e30f;
+        for (int v = 0; v < p.vocab_size; v++) {
+            float value = dot_product_simd(cls_w + static_cast<size_t>(v) * D, final, D);
+            engine->train_step_logits[v] = value;
+            if (value > max_logit) max_logit = value;
+        }
+        float sum_exp = 0.0f;
+        for (int v = 0; v < p.vocab_size; v++) {
+            engine->train_probs[v] = std::exp(engine->train_step_logits[v] - max_logit);
+            sum_exp += engine->train_probs[v];
+        }
+        float inv_sum = 1.0f / std::max(sum_exp, 1e-20f);
+        int target = target_tokens[t];
+        float target_prob = std::max(engine->train_probs[target] * inv_sum, 1e-20f);
+        total_loss -= std::log(target_prob);
+        float* d_final = ws.d_final.data() + static_cast<size_t>(t) * D;
+        std::fill(d_final, d_final + D, 0.0f);
+        for (int v = 0; v < p.vocab_size; v++) {
+            float dlogit = (engine->train_probs[v] * inv_sum - (v == target ? 1.0f : 0.0f)) * inv_seq;
+            float* dcls = grad + (w.shared_classifier ? off_emb : off_wcls) + static_cast<size_t>(v) * D;
+            const float* cls_row = cls_w + static_cast<size_t>(v) * D;
+            for (int d = 0; d < D; d++) {
+                dcls[d] += dlogit * final[d];
+                d_final[d] += dlogit * cls_row[d];
+            }
+        }
+    }
+
+    // Reverse final RMSNorm and every decoder block.
+    for (int t = 0; t < seq_len; t++) {
+        float* d_final = ws.d_final.data() + static_cast<size_t>(t) * D;
+        float* dx_final = ws.d_states.data() + (static_cast<size_t>(L) * seq_len + t) * D;
+        rmsnorm_backward(dx_final, grad + off_rms_final, d_final,
+                         state_at(L, t), w.rms_final_weight, D);
+    }
+
+    for (int l = L - 1; l >= 0; l--) {
+        const size_t wq_off = off_wq + static_cast<size_t>(l) * D * D;
+        const size_t wk_off = off_wk + static_cast<size_t>(l) * KV * D;
+        const size_t wv_off = off_wv + static_cast<size_t>(l) * KV * D;
+        const size_t wo_off = off_wo + static_cast<size_t>(l) * D * D;
+        const size_t w1_off = off_w1 + static_cast<size_t>(l) * Hidden * D;
+        const size_t w2_off = off_w2 + static_cast<size_t>(l) * D * Hidden;
+        const size_t w3_off = off_w3 + static_cast<size_t>(l) * Hidden * D;
+        std::fill(ws.d_q.begin() + static_cast<size_t>(l) * seq_len * D,
+                  ws.d_q.begin() + static_cast<size_t>(l + 1) * seq_len * D, 0.0f);
+        std::fill(ws.d_k.begin() + static_cast<size_t>(l) * seq_len * KV,
+                  ws.d_k.begin() + static_cast<size_t>(l + 1) * seq_len * KV, 0.0f);
+        std::fill(ws.d_v.begin() + static_cast<size_t>(l) * seq_len * KV,
+                  ws.d_v.begin() + static_cast<size_t>(l + 1) * seq_len * KV, 0.0f);
+
+        // FFN and attention output projection backward.
+        for (int t = 0; t < seq_len; t++) {
+            float* d_out = ws.d_states.data() + (static_cast<size_t>(l + 1) * seq_len + t) * D;
+            float* d_attn_state = layer_dim_at(ws.d_attn_state, l, t);
+            float* d_norm_ffn = layer_dim_at(ws.d_norm_ffn, l, t);
+            float* d_gate = layer_hidden_at(ws.d_gate, l, t);
+            float* d_up = layer_hidden_at(ws.d_up, l, t);
+            float* d_swiglu = layer_hidden_at(ws.d_swiglu, l, t);
+            const float* gate = layer_hidden_at(ws.gate, l, t);
+            const float* up = layer_hidden_at(ws.up, l, t);
+            const float* norm_ffn = layer_dim_at(ws.norm_ffn, l, t);
+            const float* attn_state = layer_dim_at(ws.attn_state, l, t);
+            std::fill(d_norm_ffn, d_norm_ffn + D, 0.0f);
+            std::fill(d_gate, d_gate + Hidden, 0.0f);
+            std::fill(d_up, d_up + Hidden, 0.0f);
+            matmul_backward(d_swiglu, grad + w2_off, d_out,
+                            layer_hidden_at(ws.swiglu, l, t), w.w2 + static_cast<size_t>(l) * D * Hidden,
+                            Hidden, D);
+            for (int j = 0; j < Hidden; j++) {
+                float s = silu(gate[j]);
+                d_gate[j] = d_swiglu[j] * up[j] * silu_deriv(gate[j]);
+                d_up[j] = d_swiglu[j] * s;
+            }
+            matmul_backward(d_norm_ffn, grad + w1_off, d_gate, norm_ffn,
+                            w.w1 + static_cast<size_t>(l) * Hidden * D, D, Hidden);
+            matmul_backward(engine->xb.data(), grad + w3_off, d_up, norm_ffn,
+                            w.w3 + static_cast<size_t>(l) * Hidden * D, D, Hidden);
+            for (int d = 0; d < D; d++) d_norm_ffn[d] += engine->xb[d];
+            rmsnorm_backward(d_attn_state, grad + off_rms_ffn + static_cast<size_t>(l) * D,
+                             d_norm_ffn, attn_state, w.rms_ffn_weight + l * D, D);
+            for (int d = 0; d < D; d++) d_attn_state[d] += d_out[d];
+
+            float* d_attn_out = layer_dim_at(ws.d_attn_out, l, t);
+            matmul_backward(d_attn_out, grad + wo_off, d_attn_state,
+                            layer_dim_at(ws.attn_out, l, t), w.wo + static_cast<size_t>(l) * D * D,
+                            D, D);
+            float* d_input = ws.d_states.data() + (static_cast<size_t>(l) * seq_len + t) * D;
+            for (int d = 0; d < D; d++) d_input[d] += d_attn_state[d];
+        }
+
+        // Attention backward and projection gradients.
+        const int kv_mul = H / p.n_kv_heads;
+        for (int t = 0; t < seq_len; t++) {
+            for (int h = 0; h < H; h++) {
+                float* weights = score_at(l, t, h);
+                const float* dcontext = layer_dim_at(ws.d_attn_out, l, t) + h * HD;
+                const int kv_h = h / kv_mul;
+                float weighted = 0.0f;
+                for (int u = 0; u <= t; u++) {
+                    weighted += weights[u] * dot_product_simd(dcontext, layer_kv_at(ws.v, l, u) + kv_h * HD, HD);
+                }
+                for (int u = 0; u <= t; u++) {
+                    float dscore = weights[u] * (dot_product_simd(dcontext, layer_kv_at(ws.v, l, u) + kv_h * HD, HD) - weighted);
+                    float* dqh = layer_dim_at(ws.d_q, l, t) + h * HD;
+                    float* dkh = layer_kv_at(ws.d_k, l, u) + kv_h * HD;
+                    const float* kh = layer_kv_at(ws.k, l, u) + kv_h * HD;
+                    const float* qh = layer_dim_at(ws.q, l, t) + h * HD;
+                    float* dvh = layer_kv_at(ws.d_v, l, u) + kv_h * HD;
+                    const float* vh = layer_kv_at(ws.v, l, u) + kv_h * HD;
+                    for (int d = 0; d < HD; d++) {
+                        dqh[d] += dscore * kh[d] * inv_head;
+                        dkh[d] += dscore * qh[d] * inv_head;
+                        dvh[d] += weights[u] * dcontext[d];
+                    }
+                    (void)vh;
+                }
+            }
+        }
+
+        // Backpropagate through RoPE and Q/K/V projections.
+        for (int t = 0; t < seq_len; t++) {
+            float* dq = layer_dim_at(ws.d_q, l, t);
+            float* dk = layer_kv_at(ws.d_k, l, t);
+            const float* cos_ptr = engine->cos_cache.data() + t * (HD / 2);
+            const float* sin_ptr = engine->sin_cache.data() + t * (HD / 2);
+            if (p.rope_type == 1) {
+                const int half = HD / 2;
+                for (int h = 0; h < H; h++) {
+                    float* dqh = dq + h * HD;
+                    for (int i = 0; i < half; i++) {
+                        float d0 = dqh[i], d1 = dqh[i + half];
+                        dqh[i] = d0 * cos_ptr[i] + d1 * sin_ptr[i];
+                        dqh[i + half] = -d0 * sin_ptr[i] + d1 * cos_ptr[i];
+                    }
+                }
+                for (int h = 0; h < p.n_kv_heads; h++) {
+                    float* dkh = dk + h * HD;
+                    for (int i = 0; i < half; i++) {
+                        float d0 = dkh[i], d1 = dkh[i + half];
+                        dkh[i] = d0 * cos_ptr[i] + d1 * sin_ptr[i];
+                        dkh[i + half] = -d0 * sin_ptr[i] + d1 * cos_ptr[i];
+                    }
+                }
+            } else {
+                for (int i = 0; i < D; i += 2) {
+                    int r = (i % HD) / 2;
+                    float d0 = dq[i], d1 = dq[i + 1];
+                    dq[i] = d0 * cos_ptr[r] + d1 * sin_ptr[r];
+                    dq[i + 1] = -d0 * sin_ptr[r] + d1 * cos_ptr[r];
+                    if (i < KV) {
+                        float k0 = dk[i], k1 = dk[i + 1];
+                        dk[i] = k0 * cos_ptr[r] + k1 * sin_ptr[r];
+                        dk[i + 1] = -k0 * sin_ptr[r] + k1 * cos_ptr[r];
+                    }
+                }
+            }
+
+            const float* norm = layer_dim_at(ws.norm_att, l, t);
+            float* dnorm = layer_dim_at(ws.d_norm_att, l, t);
+            std::fill(dnorm, dnorm + D, 0.0f);
+            matmul_backward(dnorm, grad + wq_off, dq, norm,
+                            w.wq + static_cast<size_t>(l) * D * D, D, D);
+            matmul_backward(engine->xb.data(), grad + wk_off, dk, norm,
+                            w.wk + static_cast<size_t>(l) * KV * D, D, KV);
+            for (int d = 0; d < D; d++) dnorm[d] += engine->xb[d];
+            matmul_backward(engine->x.data(), grad + wv_off, layer_kv_at(ws.d_v, l, t), norm,
+                            w.wv + static_cast<size_t>(l) * KV * D, D, KV);
+            for (int d = 0; d < D; d++) dnorm[d] += engine->x[d];
+
+            float* d_input = ws.d_states.data() + (static_cast<size_t>(l) * seq_len + t) * D;
+            rmsnorm_backward(engine->x.data(), grad + off_rms_att + static_cast<size_t>(l) * D,
+                             dnorm, state_at(l, t), w.rms_att_weight + l * D, D);
+            for (int d = 0; d < D; d++) d_input[d] += engine->x[d];
+        }
+    }
+
+    // Input embedding gradients include both classifier tying and token lookup.
+    float* gemb = grad + off_emb;
+    for (int t = 0; t < seq_len; t++) {
+        float* row = gemb + static_cast<size_t>(input_tokens[t]) * D;
+        const float* dx = ws.d_states.data() + static_cast<size_t>(t) * D;
+        for (int d = 0; d < D; d++) row[d] += dx[d];
+    }
+
+    // Increment once per full sequence, not once per tensor group.
+    engine->adam_step++;
+    const float b1_corr = 1.0f - std::pow(beta1, static_cast<float>(engine->adam_step));
+    const float b2_corr = 1.0f - std::pow(beta2, static_cast<float>(engine->adam_step));
+    const float step_size = lr * std::sqrt(b2_corr) / std::max(b1_corr, 1e-12f);
+    auto update_group = [&](float* params, size_t offset, size_t count) {
+        float* g = grad + offset;
+        float* m = engine->m_buffer.data() + offset;
+        float* v = engine->v_buffer.data() + offset;
+        for (size_t i = 0; i < count; i++) {
+            m[i] = beta1 * m[i] + (1.0f - beta1) * g[i];
+            v[i] = beta2 * v[i] + (1.0f - beta2) * g[i] * g[i];
+            params[i] -= lr * weight_decay * params[i];
+            params[i] -= step_size * m[i] / (std::sqrt(v[i]) + eps);
+        }
+    };
+    update_group(w.token_embedding_table, off_emb, static_cast<size_t>(p.vocab_size) * D);
+    update_group(w.rms_att_weight, off_rms_att, static_cast<size_t>(L) * D);
+    update_group(w.wq, off_wq, static_cast<size_t>(L) * D * D);
+    update_group(w.wk, off_wk, static_cast<size_t>(L) * KV * D);
+    update_group(w.wv, off_wv, static_cast<size_t>(L) * KV * D);
+    update_group(w.wo, off_wo, static_cast<size_t>(L) * D * D);
+    update_group(w.rms_ffn_weight, off_rms_ffn, static_cast<size_t>(L) * D);
+    update_group(w.w1, off_w1, static_cast<size_t>(L) * Hidden * D);
+    update_group(w.w2, off_w2, static_cast<size_t>(L) * D * Hidden);
+    update_group(w.w3, off_w3, static_cast<size_t>(L) * Hidden * D);
+    update_group(w.rms_final_weight, off_rms_final, D);
+    if (!w.shared_classifier && w.wcls && w.wcls != w.token_embedding_table) {
+        update_group(w.wcls, off_wcls, static_cast<size_t>(p.vocab_size) * D);
+    }
+    return total_loss * inv_seq;
 }
 
 float llama_train_step(
@@ -893,8 +1382,11 @@ float llama_train_step(
         float* m_emb_row = engine->m_buffer.data() + in_tok * p.dim;
         float* v_emb_row = engine->v_buffer.data() + in_tok * p.dim;
 
-        // Fast vector-matrix product: g = cls_w^T @ dlogits
-        std::vector<float> g(p.dim, 0.0f);
+        // Fast vector-matrix product: g = cls_w^T @ dlogits.
+        // Reuse a preallocated buffer: allocating a std::vector for every
+        // token was a significant hot-loop cost on CPU-only fine-tuning.
+        std::fill(engine->train_grad_embedding.begin(), engine->train_grad_embedding.end(), 0.0f);
+        float* g = engine->train_grad_embedding.data();
         for (int v = 0; v < p.vocab_size; v++) {
             float dv = dlogits[v];
             if (v != target_tok && std::abs(dv) < 1e-5f) continue;

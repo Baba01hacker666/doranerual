@@ -11,7 +11,7 @@ Zexo is engineered across five scalable tiers, allowing seamless migration from 
 | Tier | Parameters | Dimensions | Hidden Dim | Layers | Heads / KV | Vocab | Context | Target Hardware |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 | **`micro`** | **280K** | 64 | 172 | 5 | 4 / 4 | 512 | 256 | Instant local test / CI runners |
-| **`mini`** | **15.2M** | 288 | 768 | 6 | 6 / 6 | 32,000 | 512 | Fast CPU local chat |
+| **`mini`** | **6.8M** | 192 | 1024 | 1 | 2 / 1 | 32,000 | 1,024 | Fast CPU local chat |
 | **`chat`** | **25.3M** | 384 | 1024 | 8 | 8 / 4 (GQA) | 32,000 | 1,024 | Multi-turn conversational dialogue |
 | **`base`** | **109.5M** | 768 | 2048 | 12 | 12 / 12 | 32,000 | 2,048 | Full reasoning & deep knowledge |
 | **`large`** | **221.5M** | 1024 | 2816 | 16 | 16 / 8 (GQA) | 32,000 | 4,096 | Scaled long-context conversational AI |
@@ -30,8 +30,13 @@ zexo/
 ├── chat.py                 # Interactive terminal chat REPL
 ├── init_weights.py         # Base checkpoint initializer (.bin)
 ├── data/
-│   ├── identity_conversations.txt  # Core persona & identity dialogue dataset
-│   └── multi_turn_chats.txt        # Multi-turn coding & reasoning dataset
+│   ├── quality_dialogues.jsonl     # Curated, validated gold conversations
+│   ├── zexo_quality_v1_train.txt  # Built training corpus (gold + technical data)
+│   ├── zexo_quality_v1_eval.txt   # Held-out evaluation corpus (never trained)
+│   ├── dataset_tools.py            # Validator, deduplicator, splitter, renderer
+│   ├── assemble_dataset.py         # Legacy technical corpus builder
+│   ├── identity_conversations.txt  # Small legacy persona set
+│   └── multi_turn_chats.txt        # Small legacy multi-turn set
 └── checkpoints/
     └── .gitkeep            # Directory for trained Zexo weights (.bin) & metadata
 ```
@@ -52,10 +57,14 @@ python zexo/chat.py
 
 ### 2. Fine-Tune Zexo on Custom Dialogues:
 ```bash
+python -m zexo.data.dataset_tools
 python zexo/train.py \
-  --data zexo/data/identity_conversations.txt \
-  --epochs 3 \
-  --lr 5e-4
+  --data zexo/data/zexo_quality_v1_train.txt \
+  --eval-data zexo/data/zexo_quality_v1_eval.txt \
+  --tier micro \
+  --epochs 5 \
+  --lr 5e-4 \
+  --seq-len 64
 ```
 
 ### 3. Fine-Tune Zexo on Hugging Face Datasets:
@@ -71,6 +80,54 @@ python zexo/train.py \
 ```bash
 # Create a fresh 25.3M parameter Zexo-Chat base checkpoint:
 python zexo/init_weights.py --tier chat
+```
+
+## 🧪 Quality Dataset Workflow
+
+The quality corpus uses JSONL records with explicit `user` and `assistant` roles. Each record is validated, deduplicated, balanced across categories, and split deterministically so evaluation examples never enter training:
+
+```bash
+python -m zexo.data.dataset_tools
+```
+
+The builder creates:
+
+- `zexo_quality_v1_train.txt`: curated conversations plus the existing technical corpus.
+- `zexo_quality_v1_eval.txt`: held-out conversations covering behavior, safety, coding, ML, math, and systems.
+- `zexo_quality_v1_manifest.json`: hashes, category counts, and split provenance.
+
+When adding data, prefer short, correct examples that demonstrate the desired behavior: ask clarifying questions when requirements are incomplete, state uncertainty, show safe alternatives, and avoid claiming tools or facts that were not verified. Keep evaluation prompts out of training data.
+
+The trainer supports shuffled windows, overlapping windows via `--stride`, held-out loss, deterministic seeds, and JSONL input. Training loss is a signal—not a substitute for held-out behavioral tests.
+
+The default trainer remains the fast head-only path. For real CPU NumPy backpropagation through every decoder layer, use `--full-backprop`; this updates embeddings, attention projections, RoPE-connected attention, RMSNorm scales, SwiGLU projections, and the output head. It is intentionally slower and is best suited to micro models, smoke tests, and small fine-tuning runs. Training metadata records which mode was used.
+
+The inference and native-training engine uses the optimized C++ path automatically when available. Set `DORANEURAL_NUM_THREADS` or call `llm.set_num_threads(n)` to tune native parallelism. The CLI also accepts `--threads N` / `--num-threads N`, including values such as 200 or 3000; omitted values keep normal OpenMP CPU auto-selection. Values above the CPUs exposed to the process are accepted but may oversubscribe and become slower. Tokenizers use heap-based merges and bounded caches, and HuggingFace single-file, BF16, and sharded safetensors checkpoints are supported without PyTorch.
+
+For pretrained-checkpoint adaptation, LoRA keeps the base weights frozen and saves only small adapter matrices:
+
+```bash
+python zexo/train.py \
+  --tier micro \
+  --checkpoint path/to/pretrained.bin \
+  --data zexo/data/zexo_quality_v1_train.txt \
+  --lora-rank 8 \
+  --lora-alpha 16 \
+  --lora-targets q,v \
+  --adapter-output zexo/checkpoints/zexo_style.npz
+```
+
+`--full-backprop` now selects the native C++ full-transformer trainer automatically when the C++ engine is available. Use `--numpy-full` only when you specifically want the reference autograd implementation for debugging or numerical experiments.
+
+```bash
+# Full transformer backpropagation (CPU/NumPy reference trainer)
+python zexo/train.py \
+  --tier micro \
+  --data zexo/data/zexo_quality_v1_train.txt \
+  --eval-data zexo/data/zexo_quality_v1_eval.txt \
+  --full-backprop \
+  --epochs 1 \
+  --seq-len 64
 ```
 
 ---

@@ -68,21 +68,55 @@ class ZexoModel:
         text: str,
         epochs: int = 3,
         lr: float = 5e-4,
-        seq_len: int = 16,
+        weight_decay: float = 0.01,
+        seq_len: int = 64,
         verbose: int = 1,
         mask_prompts: bool = True,
         max_batches: Optional[int] = None,
+        eval_text: Optional[str] = None,
+        validation_split: float = 0.0,
+        stride: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        max_eval_steps: Optional[int] = None,
+        full_backprop: bool = False,
+        native_full: bool = True,
+        lora_rank: Optional[int] = None,
+        lora_alpha: float = 16.0,
+        lora_targets: Optional[List[str]] = None,
+        adapter_path: Optional[Union[str, Path]] = None,
     ) -> dict:
-        """Fine-tune Zexo on custom text or conversational dialogue."""
+        """Fine-tune Zexo on custom text or conversational dialogue, optionally with full backprop or LoRA."""
         return self.llm.train(
             text,
             epochs=epochs,
             lr=lr,
+            weight_decay=weight_decay,
             seq_len=seq_len,
             verbose=verbose,
             mask_prompts=mask_prompts,
             max_batches=max_batches,
+            eval_text=eval_text,
+            validation_split=validation_split,
+            stride=stride,
+            shuffle=shuffle,
+            seed=seed,
+            max_eval_steps=max_eval_steps,
+            full_backprop=full_backprop,
+            native_full=native_full,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            lora_targets=lora_targets,
+            adapter_path=adapter_path,
         )
+
+    def full_backprop_model(self):
+        """Expose the CPU autograd model for advanced full-layer training."""
+        return self.llm.full_backprop_model()
+
+    def load_lora(self, adapter_path: Union[str, Path]):
+        """Load a saved LoRA adapter on top of the current pretrained checkpoint."""
+        return self.llm.load_lora(adapter_path)
 
     def reset(self) -> None:
         """Clear active conversation context and model KV cache."""

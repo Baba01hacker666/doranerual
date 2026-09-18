@@ -31,7 +31,11 @@ class ZexoConfig:
     vocab_size: int = 32000
     seq_len: int = 1024
     rope_type: str = "interleaved"
-    system_prompt: str = "You are Zexo, an intelligent, thoughtful, and creative conversational AI assistant."
+    system_prompt: str = (
+        "You are Zexo, an intelligent, thoughtful, and creative conversational AI assistant. "
+        "You communicate with clarity, warmth, and precision. You love helping users explore ideas, "
+        "solve challenging problems, explain complex topics simply, and hold engaging, meaningful conversations."
+    )
     version: str = "1.0.0"
 
     @property

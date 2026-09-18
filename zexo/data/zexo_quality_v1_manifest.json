@@ -1,0 +1,26 @@
+{
+  "format_version": "1",
+  "source": "zexo/data/quality_dialogues.jsonl",
+  "train_file": "zexo/data/zexo_quality_v1_train.txt",
+  "eval_file": "zexo/data/zexo_quality_v1_eval.txt",
+  "records": 36,
+  "train_records": 26,
+  "eval_records": 10,
+  "eval_ratio": 0.15,
+  "categories": {
+    "behavior": 4,
+    "communication": 3,
+    "machine_learning": 5,
+    "math": 3,
+    "persona": 3,
+    "programming": 5,
+    "project": 2,
+    "safety": 4,
+    "systems": 3,
+    "zexo": 4
+  },
+  "supplemental_legacy_file": "zexo/data/step1_conversational_expanded.txt",
+  "supplemental_legacy_words": 12937,
+  "source_sha256": "c6762cbbf0b60e43aa01fa40296d9b8b7b9348b83a20d7927ff21075cab699b6",
+  "legacy_sha256": "d8c1007194ce2fa20e4df5e0ec0a8129fe3303cdbdfdc203e4e26c5948726e47"
+}

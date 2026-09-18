@@ -5,13 +5,14 @@ Implements full autoregressive Transformer decoder inference in pure NumPy with:
 - RMSNorm
 - Multi-Head Attention with KV-Caching (including Grouped-Query Attention)
 - SwiGLU Feed-Forward Network
-- SentencePiece Byte-Fallback BPE Tokenizer (binary .bin or HuggingFace tokenizer.json)
-- SafeTensors loader for HuggingFace models (zero PyTorch dependency)
+- Heap-accelerated, cached SentencePiece Byte-Fallback BPE Tokenizer (binary .bin or HuggingFace tokenizer.json)
+- SafeTensors loader for single-file, BF16, and sharded HuggingFace models (zero PyTorch dependency)
 - Nucleus (Top-p) & Temperature Sampling
 - Streaming Generation Generator
 - Automatic download from Hugging Face Hub (any LlamaForCausalLM repo)
 """
 
+import heapq
 import json
 import math
 import os
@@ -22,7 +23,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Generator, List, Optional, Tuple, Union
+from typing import Dict, Generator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -92,49 +93,108 @@ class LlamaTokenizer:
                 self.scores.append(score)
 
         self.str_to_id = {s: i for i, s in enumerate(self.vocab)}
+        self._pair_cache: Dict[Tuple[int, int], int] = {}
+        self._encode_cache: Dict[Tuple[str, bool], Tuple[int, ...]] = {}
+        self._encode_cache_limit = 2048
+
+    def _pair_id(self, left: int, right: int) -> int:
+        """Look up a merge pair, caching hot adjacent-token lookups."""
+        key = (left, right)
+        cached = self._pair_cache.get(key)
+        if cached is not None:
+            return cached
+        candidate = self.str_to_id.get(self.vocab[left] + self.vocab[right], -1)
+        if len(self._pair_cache) < 100_000:
+            self._pair_cache[key] = candidate
+        return candidate
+
+    def _merge_tokens(self, tokens: List[int]) -> List[int]:
+        """Merge SentencePiece tokens with a heap instead of repeated scans.
+
+        The old implementation rescanned every adjacent pair after each merge,
+        which is quadratic in the number of input symbols. A linked list plus a
+        max-heap keeps the same leftmost tie-breaking behavior while reducing
+        the common case to O(n log n).
+        """
+        if len(tokens) < 2:
+            return tokens
+
+        next_idx = list(range(1, len(tokens))) + [-1]
+        prev_idx = [-1] + list(range(len(tokens) - 1))
+        alive = [True] * len(tokens)
+        heap: List[Tuple[float, int, int]] = []
+
+        def push_pair(left: int) -> None:
+            right = next_idx[left]
+            if right < 0 or not alive[left] or not alive[right]:
+                return
+            candidate = self._pair_id(tokens[left], tokens[right])
+            if candidate >= 0:
+                # Higher SentencePiece score wins; smaller index preserves
+                # the original left-to-right tie break.
+                heapq.heappush(heap, (-self.scores[candidate], left, candidate))
+
+        for idx in range(len(tokens) - 1):
+            push_pair(idx)
+
+        while heap:
+            _, left, candidate = heapq.heappop(heap)
+            right = next_idx[left]
+            if right < 0 or not alive[left] or not alive[right]:
+                continue
+            if self._pair_id(tokens[left], tokens[right]) != candidate:
+                continue
+
+            tokens[left] = candidate
+            next_right = next_idx[right]
+            next_idx[left] = next_right
+            if next_right >= 0:
+                prev_idx[next_right] = left
+            alive[right] = False
+            push_pair(prev_idx[left])
+            push_pair(left)
+
+        merged: List[int] = []
+        idx = 0
+        while idx >= 0:
+            if alive[idx]:
+                merged.append(tokens[idx])
+            idx = next_idx[idx]
+        return merged
 
     def encode(self, text: str, bos: bool = True) -> List[int]:
-        """Encode a string into a list of token IDs with BPE merge loop."""
-        tokens: List[int] = []
-        if bos:
-            tokens.append(1)  # BOS token
+        """Encode text with cached, heap-based SentencePiece BPE merges."""
+        cache_key = (text, bool(bos))
+        cached = self._encode_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
 
+        tokens: List[int] = [1] if bos else []  # BOS token
         if text:
-            # Add SentencePiece leading space prefix
-            dummy = self.str_to_id.get(" ", self.str_to_id.get(" ", None))
-            if dummy is not None:
-                tokens.append(dummy)
+            # llama2.c's tokenizer uses a leading space token when present.
+            space_id = self.str_to_id.get(" ")
+            if space_id is not None:
+                tokens.append(space_id)
 
         for ch in text:
-            if ch in self.str_to_id:
-                tokens.append(self.str_to_id[ch])
+            token_id = self.str_to_id.get(ch)
+            if token_id is not None:
+                tokens.append(token_id)
             else:
-                for b in ch.encode("utf-8"):
-                    tokens.append(b + 3)
+                unknown_id = self.str_to_id.get("<unk>", 0)
+                for byte in ch.encode("utf-8"):
+                    fallback_id = byte + 3
+                    tokens.append(fallback_id if fallback_id < len(self.vocab) else unknown_id)
 
-        # Iteratively merge highest-scoring adjacent pairs
-        while len(tokens) >= 2:
-            best_score = -1e10
-            best_id = -1
-            best_idx = -1
+        result = self._merge_tokens(tokens)
+        if len(self._encode_cache) >= self._encode_cache_limit:
+            self._encode_cache.pop(next(iter(self._encode_cache)))
+        self._encode_cache[cache_key] = tuple(result)
+        return result
 
-            for i in range(len(tokens) - 1):
-                pair_str = self.vocab[tokens[i]] + self.vocab[tokens[i + 1]]
-                if pair_str in self.str_to_id:
-                    candidate_id = self.str_to_id[pair_str]
-                    candidate_score = self.scores[candidate_id]
-                    if candidate_score > best_score:
-                        best_score = candidate_score
-                        best_id = candidate_id
-                        best_idx = i
-
-            if best_idx == -1:
-                break
-
-            tokens[best_idx] = best_id
-            tokens.pop(best_idx + 1)
-
-        return tokens
+    def encode_batch(self, texts: Sequence[str], bos: bool = True) -> List[List[int]]:
+        """Encode multiple strings while reusing the tokenizer's merge caches."""
+        return [self.encode(text, bos=bos) for text in texts]
 
     def decode_token(self, token_id: int) -> str:
         """Decode a single token ID into its string representation."""
@@ -156,6 +216,10 @@ class LlamaTokenizer:
                 continue
             pieces.append(self.decode_token(t))
         return "".join(pieces)
+
+    def decode_batch(self, batches: Sequence[List[int]]) -> List[str]:
+        """Decode multiple token sequences."""
+        return [self.decode(tokens) for tokens in batches]
 
 
 class HFTokenizer:
@@ -187,59 +251,102 @@ class HFTokenizer:
             parts = m.split(" ")
             if len(parts) == 2:
                 self.bpe_ranks[(parts[0], parts[1])] = i
-        self._cache: Dict[str, List[int]] = {}
+        self._cache: Dict[str, Tuple[int, ...]] = {}
+        self._encode_cache: Dict[Tuple[str, bool], Tuple[int, ...]] = {}
+        self._encode_cache_limit = 2048
+        self._chunk_pattern = re.compile(r"(\n+|" + re.escape(self.SPIECE) + r")")
 
     def _encode_piece(self, piece: str) -> List[int]:
-        """Encode a single small piece/word with memoization."""
-        if piece in self._cache:
-            return self._cache[piece]
+        """Encode one piece using a heap-based BPE merge loop."""
+        cached = self._cache.get(piece)
+        if cached is not None:
+            return list(cached)
         if piece in self.vocab:
-            res = [self.vocab[piece]]
-            self._cache[piece] = res
-            return res
+            result = (self.vocab[piece],)
+            self._cache[piece] = result
+            return list(result)
 
-        current = list(piece)
-        while len(current) > 1:
-            pairs = [(current[i], current[i + 1]) for i in range(len(current) - 1)]
-            best = min(pairs, key=lambda p: self.bpe_ranks.get(p, float("inf")))
-            if best not in self.bpe_ranks:
-                break
-            new_word: List[str] = []
-            i = 0
-            while i < len(current):
-                if i < len(current) - 1 and (current[i], current[i + 1]) == best:
-                    new_word.append(best[0] + best[1])
-                    i += 2
-                else:
-                    new_word.append(current[i])
-                    i += 1
-            current = new_word
+        symbols = list(piece)
+        if len(symbols) > 1:
+            next_idx = list(range(1, len(symbols))) + [-1]
+            prev_idx = [-1] + list(range(len(symbols) - 1))
+            alive = [True] * len(symbols)
+            heap: List[Tuple[int, int, str, str]] = []
 
-        res: List[int] = []
-        for symbol in current:
-            if symbol in self.vocab:
-                res.append(self.vocab[symbol])
+            def push_pair(left: int) -> None:
+                right = next_idx[left]
+                if right < 0 or not alive[left] or not alive[right]:
+                    return
+                pair = (symbols[left], symbols[right])
+                rank = self.bpe_ranks.get(pair)
+                if rank is not None:
+                    heapq.heappush(heap, (rank, left, pair[0], pair[1]))
+
+            for idx in range(len(symbols) - 1):
+                push_pair(idx)
+
+            while heap:
+                rank, left, first, second = heapq.heappop(heap)
+                right = next_idx[left]
+                if right < 0 or not alive[left] or not alive[right]:
+                    continue
+                if symbols[left] != first or symbols[right] != second:
+                    continue
+                if self.bpe_ranks.get((first, second)) != rank:
+                    continue
+
+                symbols[left] = first + second
+                next_right = next_idx[right]
+                next_idx[left] = next_right
+                if next_right >= 0:
+                    prev_idx[next_right] = left
+                alive[right] = False
+                push_pair(prev_idx[left])
+                push_pair(left)
+
+            merged: List[str] = []
+            idx = 0
+            while idx >= 0:
+                if alive[idx]:
+                    merged.append(symbols[idx])
+                idx = next_idx[idx]
+            symbols = merged
+
+        result_ids: List[int] = []
+        unk_id = self.vocab.get("<unk>", 0)
+        for symbol in symbols:
+            token_id = self.vocab.get(symbol)
+            if token_id is not None:
+                result_ids.append(token_id)
             else:
-                for b in symbol.encode("utf-8"):
-                    byte_token = f"<0x{b:02X}>"
-                    res.append(self.vocab.get(byte_token, self.vocab.get("<unk>", 0)))
-        self._cache[piece] = res
-        return res
+                for byte in symbol.encode("utf-8"):
+                    result_ids.append(self.vocab.get(f"<0x{byte:02X}>", unk_id))
+        result = tuple(result_ids)
+        self._cache[piece] = result
+        return list(result)
 
     def encode(self, text: str, bos: bool = True) -> List[int]:
-        """Encode a string into token IDs with fast SentencePiece BPE merges."""
-        import re
-        tokens: List[int] = [1] if bos else []  # BOS = 1
-        if not text:
-            return tokens
+        """Encode text with compiled chunking and cached BPE pieces."""
+        cache_key = (text, bool(bos))
+        cached = self._encode_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
 
-        norm = self.SPIECE + text.replace(" ", self.SPIECE)
-        chunks = re.split(r"(\n+|" + self.SPIECE + r")", norm)
-        for c in chunks:
-            if not c:
-                continue
-            tokens.extend(self._encode_piece(c))
+        tokens: List[int] = [1] if bos else []  # BOS = 1
+        if text:
+            norm = self.SPIECE + text.replace(" ", self.SPIECE)
+            for chunk in self._chunk_pattern.split(norm):
+                if chunk:
+                    tokens.extend(self._encode_piece(chunk))
+
+        if len(self._encode_cache) >= self._encode_cache_limit:
+            self._encode_cache.pop(next(iter(self._encode_cache)))
+        self._encode_cache[cache_key] = tuple(tokens)
         return tokens
+
+    def encode_batch(self, texts: Sequence[str], bos: bool = True) -> List[List[int]]:
+        """Encode multiple strings with shared piece and text caches."""
+        return [self.encode(text, bos=bos) for text in texts]
 
     def decode_token(self, token_id: int) -> str:
         """Decode a single token ID to its string piece."""
@@ -263,17 +370,49 @@ class HFTokenizer:
             text = text[1:]  # Strip leading space from SentencePiece prefix
         return text
 
+    def decode_batch(self, batches: Sequence[List[int]]) -> List[str]:
+        """Decode multiple token sequences."""
+        return [self.decode(tokens) for tokens in batches]
+
 
 def load_safetensors(path: Union[str, Path]) -> Dict[str, np.ndarray]:
-    """Load all tensors from a .safetensors file into a dict of NumPy arrays (float32).
+    """Load a safetensors file or sharded ``*.index.json`` into NumPy arrays.
 
-    Pure Python reader — zero PyTorch / safetensors library dependency.
+    The reader intentionally has no PyTorch dependency. Model shards are
+    merged by tensor name, so ordinary HuggingFace sharded checkpoints can be
+    passed directly to :class:`LlamaLLM`.
     """
-    _DTYPE_MAP = {"F16": np.float16, "F32": np.float32, "BF16": np.float16, "I32": np.int32}
+    _DTYPE_MAP = {
+        "F16": np.float16,
+        "F32": np.float32,
+        "F64": np.float64,
+        "I8": np.int8,
+        "I16": np.int16,
+        "I32": np.int32,
+        "I64": np.int64,
+        "U8": np.uint8,
+    }
     path = Path(path)
-    tensors: Dict[str, np.ndarray] = {}
-    with open(path, "rb") as f:
-        header_len = struct.unpack("<Q", f.read(8))[0]
+    if path.name.endswith(".index.json"):
+        with path.open("r", encoding="utf-8") as handle:
+            index = json.load(handle)
+        shard_names = sorted(set(index.get("weight_map", {}).values()))
+        if not shard_names:
+            raise ValueError(f"Safetensors index contains no weight_map: {path}")
+        tensors: Dict[str, np.ndarray] = {}
+        for shard_name in shard_names:
+            shard_path = path.parent / shard_name
+            if not shard_path.exists():
+                raise FileNotFoundError(f"Safetensors shard listed by {path} is missing: {shard_path}")
+            tensors.update(load_safetensors(shard_path))
+        return tensors
+
+    tensors = {}
+    with path.open("rb") as f:
+        header_len_bytes = f.read(8)
+        if len(header_len_bytes) != 8:
+            raise ValueError(f"Invalid safetensors header: {path}")
+        header_len = struct.unpack("<Q", header_len_bytes)[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         data_start = 8 + header_len
 
@@ -283,10 +422,18 @@ def load_safetensors(path: Union[str, Path]) -> Dict[str, np.ndarray]:
             dtype_str = info["dtype"]
             shape = info["shape"]
             start, end = info["data_offsets"]
-            np_dtype = _DTYPE_MAP.get(dtype_str, np.float32)
             f.seek(data_start + start)
             raw_bytes = f.read(end - start)
-            arr = np.frombuffer(raw_bytes, dtype=np_dtype).astype(np.float32).reshape(shape)
+            if dtype_str == "BF16":
+                # Safetensors stores bfloat16 as the high 16 bits of an
+                # IEEE float32 word; interpreting it as float16 is incorrect.
+                words = np.frombuffer(raw_bytes, dtype=np.uint16).astype(np.uint32)
+                arr = (words << 16).view(np.float32).reshape(shape)
+            else:
+                np_dtype = _DTYPE_MAP.get(dtype_str)
+                if np_dtype is None:
+                    raise ValueError(f"Unsupported safetensors dtype: {dtype_str}")
+                arr = np.frombuffer(raw_bytes, dtype=np_dtype).astype(np.float32).reshape(shape)
             tensors[name] = arr
     return tensors
 
@@ -313,7 +460,10 @@ class LlamaLLM:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
 
-        is_safetensors = str(self.model_path).endswith(".safetensors")
+        is_safetensors = (
+            str(self.model_path).endswith(".safetensors")
+            or str(self.model_path).endswith(".safetensors.index.json")
+        )
 
         if is_safetensors:
             self._load_safetensors(config_path)
@@ -481,6 +631,20 @@ class LlamaLLM:
         else:
             self.wcls = self.tok_emb
             self.shared_weights = True
+
+    def set_num_threads(self, num_threads: int) -> None:
+        """Set native OpenMP threads when the C++ backend is active."""
+        if num_threads <= 0:
+            raise ValueError(f"num_threads must be positive, got {num_threads}")
+        if self.cpp_engine is not None:
+            self.cpp_engine.set_threads(num_threads)
+
+    @property
+    def num_threads(self) -> int:
+        """Return native thread count, or one for the pure NumPy backend."""
+        if self.cpp_engine is not None:
+            return self.cpp_engine.threads
+        return 1
 
     def reset_cache(self) -> None:
         """Clear key-value cache arenas."""
@@ -650,11 +814,19 @@ class LlamaLLM:
         Returns:
             Generated text string, or Generator of token strings.
         """
+        if max_tokens < 0:
+            raise ValueError(f"max_tokens must be non-negative, got {max_tokens}")
+        if not 0.0 <= top_p <= 1.0:
+            raise ValueError(f"top_p must be in [0, 1], got {top_p}")
         self.reset_cache()
         prompt_tokens = self.tokenizer.encode(prompt, bos=True)
 
         if not prompt_tokens:
             prompt_tokens = [1]
+        # Keep one context slot available for at least one generated token.
+        # This prevents native cache writes past the end for long prompts.
+        if len(prompt_tokens) >= self.config.seq_len:
+            prompt_tokens = prompt_tokens[-(self.config.seq_len - 1):]
 
         # Fast path: C++ non-streaming generation executes entirely in native C++
         if not stream and self.cpp_engine is not None:
@@ -888,6 +1060,285 @@ class LlamaLLM:
 
         return batches
 
+    def _evaluate_tokens(
+        self,
+        tokens: List[int],
+        seq_len: int,
+        stride: Optional[int] = None,
+        max_steps: Optional[int] = None,
+    ) -> float:
+        """Measure next-token cross-entropy without changing model weights."""
+        if len(tokens) < seq_len + 1:
+            return float("nan")
+        step = stride or seq_len
+        starts = list(range(0, len(tokens) - seq_len, step))
+        if max_steps is not None:
+            starts = starts[:max(0, max_steps)]
+        total_nll = 0.0
+        total_tokens = 0
+        for start_idx in starts:
+            self.reset_cache()
+            inputs = tokens[start_idx : start_idx + seq_len]
+            targets = tokens[start_idx + 1 : start_idx + seq_len + 1]
+            for pos, (input_token, target_token) in enumerate(zip(inputs, targets)):
+                logits = self.forward(input_token, pos)
+                max_logit = float(np.max(logits))
+                log_norm = max_logit + float(np.log(np.sum(np.exp(logits - max_logit))))
+                total_nll += log_norm - float(logits[target_token])
+                total_tokens += 1
+        self.reset_cache()
+        return total_nll / max(1, total_tokens)
+
+    def full_backprop_model(self):
+        """Return the CPU NumPy model that differentiates the whole transformer."""
+        from .transformer import TransformerDecoderLM
+        model = getattr(self, "_full_backprop_model", None)
+        if model is None:
+            model = TransformerDecoderLM.from_llama(self)
+            self._full_backprop_model = model
+        return model
+
+    def _train_full_native(
+        self,
+        text: str,
+        epochs: int,
+        lr: float,
+        seq_len: int,
+        weight_decay: float,
+        verbose: int,
+        eval_text: Optional[str],
+        validation_split: float,
+        stride: Optional[int],
+        shuffle: bool,
+        seed: int,
+        max_eval_steps: Optional[int],
+    ) -> dict:
+        """Native C++ full-transformer training loop."""
+        if self.cpp_engine is None:
+            raise RuntimeError("Native full backpropagation requires the C++ backend")
+        if eval_text is not None and validation_split:
+            raise ValueError("Pass either eval_text or validation_split, not both")
+
+        def encode_nonempty(value: str, label: str) -> List[int]:
+            encoded = self.tokenizer.encode(value, bos=False)
+            if not encoded:
+                raise ValueError(f"{label} produced no tokens")
+            return encoded
+
+        tokens = encode_nonempty(text, "training text")
+        if eval_text is not None:
+            eval_tokens = encode_nonempty(eval_text, "evaluation text")
+        elif validation_split > 0.0:
+            split_at = int(len(tokens) * (1.0 - validation_split))
+            split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
+            eval_tokens = tokens[split_at:]
+            tokens = tokens[:split_at]
+        else:
+            eval_tokens = None
+        if len(tokens) < seq_len + 1:
+            tokens = tokens * (((seq_len + 1) // len(tokens)) + 1)
+        step = stride or seq_len
+        if not 1 <= step <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {step}")
+        starts = list(range(0, len(tokens) - seq_len, step))
+        if not starts:
+            raise ValueError("training text does not contain a usable sequence")
+
+        rng = np.random.default_rng(seed)
+        history = {
+            "loss": [],
+            "tokens": len(tokens),
+            "windows_per_epoch": len(starts),
+            "total_steps": len(starts) * epochs,
+            "backend": "native_cpp",
+            "threads": self.num_threads,
+        }
+        if verbose:
+            print(
+                f"[Full BP/C++] workflow: {len(tokens):,} tokens -> "
+                f"{len(starts):,} windows/epoch x {epochs:,} epoch(s) = "
+                f"{len(starts) * epochs:,} native updates; threads={self.num_threads:,}",
+                flush=True,
+            )
+        if eval_tokens is not None:
+            history["val_loss"] = []
+        training_started = time.perf_counter()
+        for epoch in range(epochs):
+            order = starts.copy()
+            if shuffle:
+                rng.shuffle(order)
+            total = 0.0
+            for start in order:
+                total += self.cpp_engine.full_train_step(
+                    tokens[start : start + seq_len],
+                    tokens[start + 1 : start + seq_len + 1],
+                    lr=lr,
+                    weight_decay=weight_decay,
+                )
+            history["loss"].append(total / len(order))
+            if eval_tokens is not None:
+                history["val_loss"].append(self._evaluate_tokens(
+                    eval_tokens, seq_len, stride=step, max_steps=max_eval_steps,
+                ))
+            if verbose:
+                elapsed = max(time.perf_counter() - training_started, 1e-9)
+                updates_done = (epoch + 1) * len(order)
+                rate = updates_done / elapsed
+                remaining = max((epochs * len(order) - updates_done) / max(rate, 1e-9), 0.0)
+                message = (
+                    f"[Full BP/C++] Epoch {epoch + 1}/{epochs} "
+                    f"loss={history['loss'][-1]:.4f} "
+                    f"speed={rate:.2f} updates/s ETA={remaining:.1f}s"
+                )
+                if "val_loss" in history:
+                    message += f" val_loss={history['val_loss'][-1]:.4f}"
+                print(message, flush=True)
+        self.reset_cache()
+        return history
+
+    def train_full(
+        self,
+        text: str,
+        epochs: int = 3,
+        lr: float = 1e-4,
+        seq_len: int = 32,
+        weight_decay: float = 0.01,
+        verbose: int = 1,
+        eval_text: Optional[str] = None,
+        validation_split: float = 0.0,
+        stride: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        max_eval_steps: Optional[int] = None,
+        native: bool = True,
+    ) -> dict:
+        """Fine-tune every transformer parameter using native C++ or NumPy autograd.
+
+        This is deliberately separate from the historical head-only trainer:
+        it is slower and intended for small CPU runs, validation, and research.
+        """
+        if epochs <= 0:
+            raise ValueError(f"epochs must be positive, got {epochs}")
+        if lr <= 0.0:
+            raise ValueError(f"lr must be positive, got {lr}")
+        if not 1 <= seq_len < self.config.seq_len:
+            raise ValueError(f"seq_len must be in [1, {self.config.seq_len - 1}], got {seq_len}")
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must be in [0, 1)")
+        if eval_text is not None and validation_split:
+            raise ValueError("Pass either eval_text or validation_split, not both")
+        if native and self.cpp_engine is not None:
+            return self._train_full_native(
+                text, epochs, lr, seq_len, weight_decay, verbose,
+                eval_text, validation_split, stride, shuffle, seed, max_eval_steps,
+            )
+
+        def encode_nonempty(value: str, label: str) -> List[int]:
+            encoded = self.tokenizer.encode(value, bos=False)
+            if not encoded:
+                raise ValueError(f"{label} produced no tokens")
+            return encoded
+
+        train_tokens = encode_nonempty(text, "training text")
+        if eval_text is not None:
+            eval_tokens = encode_nonempty(eval_text, "evaluation text")
+        elif validation_split > 0.0:
+            split_at = int(len(train_tokens) * (1.0 - validation_split))
+            split_at = min(max(split_at, seq_len + 1), len(train_tokens) - 1)
+            eval_tokens = train_tokens[split_at:]
+            train_tokens = train_tokens[:split_at]
+        else:
+            eval_tokens = None
+        if len(train_tokens) < seq_len + 1:
+            repeats = ((seq_len + 1) // len(train_tokens)) + 1
+            train_tokens = train_tokens * repeats
+        step = stride or seq_len
+        if not 1 <= step <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {step}")
+
+        history = self.full_backprop_model().fit_tokens(
+            train_tokens,
+            epochs=epochs,
+            seq_len=seq_len,
+            lr=lr,
+            weight_decay=weight_decay,
+            stride=step,
+            shuffle=shuffle,
+            seed=seed,
+            eval_tokens=eval_tokens,
+            max_eval_steps=max_eval_steps,
+            verbose=verbose,
+        )
+        self.reset_cache()
+        return history
+
+    def train_lora(
+        self,
+        text: str,
+        rank: int = 8,
+        alpha: float = 16.0,
+        target_modules: Sequence[str] = ("q", "v"),
+        epochs: int = 3,
+        lr: float = 1e-3,
+        seq_len: int = 32,
+        weight_decay: float = 0.0,
+        verbose: int = 1,
+        eval_text: Optional[str] = None,
+        validation_split: float = 0.0,
+        stride: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        max_eval_steps: Optional[int] = None,
+        adapter_path: Optional[Union[str, Path]] = None,
+    ) -> dict:
+        """Fine-tune a pretrained checkpoint with adapter-only LoRA weights."""
+        if not text:
+            raise ValueError("training text must not be empty")
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must be in [0, 1)")
+        if eval_text is not None and validation_split:
+            raise ValueError("Pass either eval_text or validation_split, not both")
+        model = self.full_backprop_model()
+        model.enable_lora(rank=rank, alpha=alpha, target_modules=target_modules, freeze_base=True)
+        tokens = self.tokenizer.encode(text, bos=False)
+        eval_tokens = self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
+        if validation_split > 0.0:
+            split_at = int(len(tokens) * (1.0 - validation_split))
+            split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
+            eval_tokens = tokens[split_at:]
+            tokens = tokens[:split_at]
+        if len(tokens) < seq_len + 1:
+            repeats = ((seq_len + 1) // len(tokens)) + 1
+            tokens = tokens * repeats
+        history = model.fit_lora_tokens(
+            tokens,
+            epochs=epochs,
+            seq_len=seq_len,
+            lr=lr,
+            weight_decay=weight_decay,
+            stride=stride,
+            shuffle=shuffle,
+            seed=seed,
+            eval_tokens=eval_tokens,
+            max_eval_steps=max_eval_steps,
+            verbose=verbose,
+        )
+        if adapter_path is not None:
+            history["adapter_path"] = str(model.save_lora(adapter_path))
+        # Keep chat/generation fast: fold the trained delta into the arrays
+        # already owned by the native engine after saving the standalone adapter.
+        model.merge_lora()
+        self.reset_cache()
+        return history
+
+    def load_lora(self, adapter_path: Union[str, Path]):
+        """Load and merge a saved adapter onto this checkpoint for fast inference."""
+        model = self.full_backprop_model()
+        model.load_lora(adapter_path)
+        model.merge_lora()
+        self.reset_cache()
+        return model
+
     def train(
         self,
         text: str,
@@ -898,8 +1349,20 @@ class LlamaLLM:
         verbose: int = 1,
         mask_prompts: bool = True,
         max_batches: Optional[int] = None,
+        eval_text: Optional[str] = None,
+        validation_split: float = 0.0,
+        stride: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        max_eval_steps: Optional[int] = None,
+        full_backprop: bool = False,
+        native_full: bool = True,
+        lora_rank: Optional[int] = None,
+        lora_alpha: float = 16.0,
+        lora_targets: Optional[Sequence[str]] = None,
+        adapter_path: Optional[Union[str, Path]] = None,
     ) -> dict:
-        """Fine-tune the model on custom text with cross-entropy loss and in-place updates.
+        """Fine-tune the model on custom text with reproducible validation.
 
         Args:
             text: Training text corpus.
@@ -910,20 +1373,128 @@ class LlamaLLM:
             verbose: 1 to print epoch progress, 0 to silence.
             mask_prompts: If True and dialogue tags are present, mask prompt tokens.
             max_batches: Maximum batches/steps per epoch.
+            eval_text: Optional held-out evaluation corpus.
+            validation_split: Fraction of training text to reserve for validation if eval_text omitted.
+            stride: Stride for sequence windowing.
+            shuffle: Whether to shuffle sequence windows per epoch.
+            seed: Random seed for shuffling.
+            max_eval_steps: Maximum evaluation steps.
+            full_backprop: If True, differentiate through all transformer layers.
+            native_full: If True and full_backprop, use native C++ full backprop engine.
+            lora_rank: If specified, train LoRA adapter of this rank.
+            lora_alpha: LoRA scaling factor.
+            lora_targets: Module names targeted by LoRA (e.g. ("q", "v")).
+            adapter_path: Path to save trained LoRA adapter weights.
 
         Returns:
-            Dictionary containing 'loss' history list.
+            Dictionary containing 'loss' and optionally 'val_loss', 'tokens', 'windows_per_epoch', 'total_steps'.
         """
-        batches = self._prepare_training_batches(text, seq_len=seq_len, mask_prompts=mask_prompts, max_batches=max_batches)
-        if not batches:
-            raise ValueError("No training batches generated from corpus.")
+        if lora_rank is not None:
+            if full_backprop:
+                raise ValueError("Choose either lora_rank or full_backprop, not both")
+            return self.train_lora(
+                text,
+                rank=lora_rank,
+                alpha=lora_alpha,
+                target_modules=lora_targets or ("q", "v"),
+                epochs=epochs,
+                lr=lr,
+                seq_len=seq_len,
+                weight_decay=weight_decay,
+                verbose=verbose,
+                eval_text=eval_text,
+                validation_split=validation_split,
+                stride=stride,
+                shuffle=shuffle,
+                seed=seed,
+                max_eval_steps=max_eval_steps,
+                adapter_path=adapter_path,
+            )
+        if full_backprop:
+            return self.train_full(
+                text,
+                epochs=epochs,
+                lr=lr,
+                seq_len=seq_len,
+                weight_decay=weight_decay,
+                verbose=verbose,
+                eval_text=eval_text,
+                validation_split=validation_split,
+                stride=stride,
+                shuffle=shuffle,
+                seed=seed,
+                max_eval_steps=max_eval_steps,
+                native=native_full,
+            )
+        if epochs <= 0:
+            raise ValueError(f"epochs must be positive, got {epochs}")
+        if lr <= 0.0:
+            raise ValueError(f"lr must be positive, got {lr}")
+        if not 1 <= seq_len < self.config.seq_len:
+            raise ValueError(f"seq_len must be in [1, {self.config.seq_len - 1}], got {seq_len}")
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must be in [0, 1)")
 
+        def encode_nonempty(value: str, label: str) -> List[int]:
+            encoded = self.tokenizer.encode(value, bos=False)
+            if not encoded:
+                raise ValueError(f"{label} produced no tokens")
+            return encoded
+
+        is_dialogue = bool(re.search(r'(?:^|\n)User:\s*', text, re.IGNORECASE))
+        if is_dialogue and mask_prompts:
+            batches = self._prepare_training_batches(text, seq_len=seq_len, mask_prompts=mask_prompts, max_batches=max_batches)
+            if not batches:
+                raise ValueError("No training batches generated from corpus.")
+            train_tokens = []
+            starts = None
+            total_tokens = len(batches) * seq_len
+        else:
+            train_tokens = encode_nonempty(text, "training text")
+            total_tokens = len(train_tokens)
+            batches = None
+
+        if eval_text is not None and validation_split:
+            raise ValueError("Pass either eval_text or validation_split, not both")
+
+        if eval_text is not None:
+            eval_tokens = encode_nonempty(eval_text, "evaluation text")
+        elif validation_split > 0.0 and batches is None:
+            split_at = int(len(train_tokens) * (1.0 - validation_split))
+            split_at = min(max(split_at, seq_len + 1), len(train_tokens) - 1)
+            eval_tokens = train_tokens[split_at:]
+            train_tokens = train_tokens[:split_at]
+            total_tokens = len(train_tokens)
+        else:
+            eval_tokens = None
+
+        if batches is None:
+            if len(train_tokens) < seq_len + 1:
+                repeats = ((seq_len + 1) // len(train_tokens)) + 1
+                train_tokens = train_tokens * repeats
+            step = stride or seq_len
+            if not 1 <= step <= seq_len:
+                raise ValueError(f"stride must be in [1, seq_len], got {step}")
+            starts = list(range(0, len(train_tokens) - seq_len, step))
+            if not starts:
+                raise ValueError("training text does not contain a usable sequence")
+            if max_batches is not None:
+                starts = starts[:max_batches]
+
+        rng = np.random.default_rng(seed)
         history = {"loss": []}
-        total_steps_per_epoch = len(batches)
+        if eval_tokens is not None:
+            history["val_loss"] = []
+
+        total_steps_per_epoch = len(batches) if batches is not None else len(starts)
         total_steps = total_steps_per_epoch * epochs
         warmup_steps = max(1, int(0.05 * total_steps))
         min_lr = lr * 0.1
         log_step_cadence = min(25, max(1, total_steps_per_epoch // 20))
+
+        history["tokens"] = total_tokens
+        history["windows_per_epoch"] = total_steps_per_epoch
+        history["total_steps"] = total_steps
 
         if verbose:
             print(f"🚀 Starting training: {epochs} epochs, {total_steps_per_epoch:,} steps/epoch ({total_steps:,} total steps)...", flush=True)
@@ -935,7 +1506,21 @@ class LlamaLLM:
             t_ep_start = time.perf_counter()
             last_print_time = t_ep_start
 
-            for in_seq, target_seq in batches:
+            if batches is not None:
+                epoch_batches = list(batches)
+                if shuffle:
+                    rng.shuffle(epoch_batches)
+                batch_iter = epoch_batches
+            else:
+                order = starts.copy()
+                if shuffle:
+                    rng.shuffle(order)
+                batch_iter = [
+                    (train_tokens[idx : idx + seq_len], train_tokens[idx + 1 : idx + seq_len + 1])
+                    for idx in order
+                ]
+
+            for in_seq, target_seq in batch_iter:
                 # Cosine learning rate schedule with linear warmup
                 if global_step < warmup_steps:
                     cur_lr = lr * ((global_step + 1) / warmup_steps)
@@ -958,8 +1543,8 @@ class LlamaLLM:
 
                 if verbose and should_log:
                     last_print_time = now
-                    elapsed = now - t_ep_start
-                    tok_sec = (steps * seq_len) / max(1e-4, elapsed)
+                    elapsed = max(1e-4, now - t_ep_start)
+                    tok_sec = (steps * seq_len) / elapsed
                     rem_steps = total_steps_per_epoch - steps
                     eta_sec = rem_steps / max(1e-4, steps / elapsed)
                     pct = (steps / total_steps_per_epoch) * 100.0
@@ -971,12 +1556,20 @@ class LlamaLLM:
 
             avg_loss = ep_loss / max(1, steps)
             history["loss"].append(avg_loss)
+            if eval_tokens is not None:
+                step = stride or seq_len
+                val_loss = self._evaluate_tokens(eval_tokens, seq_len, stride=step, max_steps=max_eval_steps)
+                history["val_loss"].append(val_loss)
+
             ep_time = time.perf_counter() - t_ep_start
             if verbose:
+                suffix = ""
+                if eval_tokens is not None:
+                    suffix = f" | Val Loss: {history['val_loss'][-1]:.4f}"
                 print(
                     f"✓ Epoch {ep:2d}/{epochs} finished in {ep_time:.1f}s | "
-                    f"Avg Loss: {avg_loss:.4f} (Engine: {self.backend.upper()})\n",
-                    flush=True
+                    f"Avg Loss: {avg_loss:.4f}{suffix} (Engine: {self.backend.upper()})\n",
+                    flush=True,
                 )
 
         return history
@@ -1094,9 +1687,18 @@ def download_hf_model(model_name: str = "stories260K", target_dir: Optional[Unio
     config_path = save_dir / "config.json"
     _fetch_file(f"{base_url}/config.json", config_path)
 
-    # Detect model file format: try model.safetensors first
+    # Detect model file format. Prefer a single safetensors file, then fall
+    # back to HuggingFace's sharded index and download every referenced shard.
     model_path = save_dir / "model.safetensors"
-    _fetch_file(f"{base_url}/model.safetensors", model_path)
+    try:
+        _fetch_file(f"{base_url}/model.safetensors", model_path)
+    except Exception:
+        model_path = save_dir / "model.safetensors.index.json"
+        _fetch_file(f"{base_url}/model.safetensors.index.json", model_path)
+        with model_path.open("r", encoding="utf-8") as handle:
+            shard_names = sorted(set(json.load(handle).get("weight_map", {}).values()))
+        for shard_name in shard_names:
+            _fetch_file(f"{base_url}/{shard_name}", save_dir / shard_name)
 
     # Try tokenizer.json (HuggingFace standard)
     tok_path = save_dir / "tokenizer.json"
