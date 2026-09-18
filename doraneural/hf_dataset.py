@@ -225,12 +225,18 @@ def download_file_to_disk(url: str, out_path: Union[str, Path], timeout: int = 6
     import subprocess
     if shutil.which("curl"):
         try:
-            cmd = ["curl", "-s", "-L", "--retry", "3", "--max-time", str(timeout), "-o", str(p), url]
+            # --fail makes curl treat HTTP 4xx/5xx as errors instead of writing
+            # the error page body to disk (which would silently corrupt the
+            # dataset/tokenizer); --show-error keeps the failure readable.
+            cmd = ["curl", "-sS", "-f", "-L", "--retry", "3", "--max-time", str(timeout), "-o", str(p), url]
             proc = subprocess.run(cmd)
             if proc.returncode == 0 and p.exists() and p.stat().st_size > 0:
                 return p
         except Exception:
             pass
+        # Remove any partial/failed artifact so the urllib fallback re-downloads.
+        if p.exists() and p.stat().st_size == 0:
+            p.unlink()
 
     req = urllib.request.Request(url, headers={"User-Agent": "doraneural/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(p, "wb") as f:

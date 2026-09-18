@@ -9,7 +9,7 @@
   "vocab_size": 512,
   "seq_len": 256,
   "rope_type": "interleaved",
-  "system_prompt": "You are Zexo, an intelligent, thoughtful, and creative conversational AI assistant.",
+  "system_prompt": "You are Zexo, an intelligent, thoughtful, and creative conversational AI assistant. You communicate with clarity, warmth, and precision. You love helping users explore ideas, solve challenging problems, explain complex topics simply, and hold engaging, meaningful conversations.",
   "version": "1.0.0",
   "parameters": 280512
 }

@@ -46,6 +46,10 @@ def initialize_zexo_checkpoint(
     # Variance scaling for deep transformer stability
     emb_std = 1.0 / np.sqrt(p.dim)
     proj_std = 0.02 / np.sqrt(2.0 * p.n_layers)
+    # Output projections must NOT be exact zeros: a zero wo (attention out)
+    # or w2 (FFN down) makes those residual branches contribute nothing, so
+    # with a frozen base (LoRA) the adapters there receive zero gradient
+    # forever. Small nonzero init keeps every gradient path alive.
 
     print(f"🔧 Initializing Zexo-{config.tier.capitalize()} Base Weights...")
     print(f"   Architecture: {p.dim} dim, {p.hidden_dim} hidden, {p.n_layers} layers, {p.n_heads} heads, {p.n_kv_heads} kv-heads")
@@ -64,14 +68,14 @@ def initialize_zexo_checkpoint(
         rng.normal(0.0, proj_std, (p.n_layers, p.kv_dim, p.dim)).astype(np.float32).tofile(f)
         # 5. Value projection
         rng.normal(0.0, proj_std, (p.n_layers, p.kv_dim, p.dim)).astype(np.float32).tofile(f)
-        # 6. Output projection
-        np.zeros((p.n_layers, p.dim, p.dim), dtype=np.float32).tofile(f)
+        # 6. Output projection (nonzero: see note above)
+        rng.normal(0.0, proj_std, (p.n_layers, p.dim, p.dim)).astype(np.float32).tofile(f)
         # 7. FFN RMSNorm weights
         np.ones((p.n_layers, p.dim), dtype=np.float32).tofile(f)
         # 8. Gate projection (w1)
         rng.normal(0.0, proj_std, (p.n_layers, p.hidden_dim, p.dim)).astype(np.float32).tofile(f)
-        # 9. Down projection (w2)
-        np.zeros((p.n_layers, p.dim, p.hidden_dim), dtype=np.float32).tofile(f)
+        # 9. Down projection (w2, nonzero: see note above)
+        rng.normal(0.0, proj_std, (p.n_layers, p.dim, p.hidden_dim)).astype(np.float32).tofile(f)
         # 10. Up projection (w3)
         rng.normal(0.0, proj_std, (p.n_layers, p.hidden_dim, p.dim)).astype(np.float32).tofile(f)
         # 11. Final RMSNorm

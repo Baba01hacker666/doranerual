@@ -60,7 +60,9 @@ int llama_generate(
     int* out_tokens
 );
 
-// Extended generation supporting top-k, custom eos, and fused greedy mode
+// Extended generation supporting top-k, custom eos, and fused greedy mode.
+// eos_token_id_out (optional) receives the EOS token id when generation
+// stopped on EOS; the EOS token itself is never stored in out_tokens.
 int llama_generate_ex(
     LlamaCppEngine* engine,
     const int* prompt_tokens,
@@ -70,7 +72,8 @@ int llama_generate_ex(
     float top_p,
     int top_k,
     int eos_token_id,
-    int* out_tokens
+    int* out_tokens,
+    int* eos_token_id_out
 );
 
 // Training / Fine-tuning step with Cross Entropy & AdamW optimizer

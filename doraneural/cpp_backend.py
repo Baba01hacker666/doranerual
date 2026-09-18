@@ -242,6 +242,7 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
                 ctypes.c_int,
                 ctypes.c_int,
                 ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
             ]
             lib.llama_generate_ex.restype = ctypes.c_int
 
@@ -357,6 +358,8 @@ class CppLlamaEngine:
         )
 
         self._contiguous_refs: List[np.ndarray] = []
+        # Token id that stopped the most recent generate() call (-1 if none).
+        self.last_eos_token: int = -1
 
         def _ptr(arr: np.ndarray, name: str) -> ctypes.POINTER(ctypes.c_float):
             if arr is None:
@@ -542,6 +545,7 @@ class CppLlamaEngine:
         try:
             p_arr = (ctypes.c_int * len(prompt_tokens))(*prompt_tokens)
             out_buf = (ctypes.c_int * max_new_tokens)()
+            eos_buf = ctypes.c_int(-1)
             eos_id = eos_token_id if eos_token_id is not None else -1
 
             if hasattr(self.lib, "llama_generate_ex"):
@@ -555,6 +559,7 @@ class CppLlamaEngine:
                     int(top_k),
                     int(eos_id),
                     out_buf,
+                    ctypes.byref(eos_buf),
                 )
             else:
                 n_gen = self.lib.llama_generate(
@@ -575,6 +580,10 @@ class CppLlamaEngine:
             # Validate output tokens
             if any(t < 0 or t >= self.vocab_size for t in result):
                 print(f"[cpp_backend] Warning: generated out-of-vocab tokens detected", file=sys.stderr)
+            # EOS stopped generation and is intentionally excluded from the
+            # returned token list (the Python decoder would render it as
+            # literal text such as "</s>"). Record the stop reason instead.
+            self.last_eos_token = int(eos_buf.value) if n_gen >= 0 else -1
             return result
         except Exception as e:
             if isinstance(e, (ValueError, TypeError, RuntimeError)):

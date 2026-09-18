@@ -256,7 +256,7 @@ class HFTokenizer:
         self._cache: Dict[str, Tuple[int, ...]] = {}
         self._encode_cache: Dict[Tuple[str, bool], Tuple[int, ...]] = {}
         self._encode_cache_limit = 2048
-        self._chunk_pattern = re.compile(r"(\n+|" + re.escape(self.SPIECE) + r")")
+        self._chunk_pattern = re.compile(r"(\n+)")
 
     def _encode_piece(self, piece: str) -> List[int]:
         """Encode one piece using a heap-based BPE merge loop."""
@@ -336,6 +336,9 @@ class HFTokenizer:
 
         tokens: List[int] = [1] if bos else []  # BOS = 1
         if text:
+            # SentencePiece boundary marker (\u2581) must stay INSIDE the BPE
+            # pieces: merges are learned over '\u2581word' strings, so splitting
+            # on it would defeat merging entirely (char-level output).
             norm = self.SPIECE + text.replace(" ", self.SPIECE)
             for chunk in self._chunk_pattern.split(norm):
                 if chunk:
@@ -887,7 +890,12 @@ class LlamaLLM:
         # Keep one context slot available for at least one generated token.
         # This prevents native cache writes past the end for long prompts.
         if len(prompt_tokens) >= self.config.seq_len:
-            prompt_tokens = prompt_tokens[-(self.config.seq_len - 1):]
+            # Preserve BOS at the front so position ids stay consistent with
+            # training (encode() places BOS at index 0 of every window).
+            trimmed = prompt_tokens[-(self.config.seq_len - 1):]
+            if prompt_tokens[0] == 1 and trimmed[0] != 1:
+                trimmed = [1] + trimmed[1:]
+            prompt_tokens = trimmed
 
         # Fast path: C++ non-streaming generation executes entirely in native C++
         if not stream and self.cpp_engine is not None:
@@ -1388,11 +1396,12 @@ class LlamaLLM:
             if not masked_batches:
                 raise ValueError("No training batches generated from corpus.")
             train_tokens = []
-            eval_tokens = encode_nonempty(eval_text, "evaluation text") if eval_text is not None else None
+            # BOS prefix matches _evaluate_tokens()/training-window convention.
+            eval_tokens = [1] + encode_nonempty(eval_text, "evaluation text") if eval_text is not None else None
         else:
             train_tokens = [1] + encode_nonempty(text, "training text")  # BOS matches inference
             if eval_text is not None:
-                eval_tokens = encode_nonempty(eval_text, "evaluation text")
+                eval_tokens = [1] + encode_nonempty(eval_text, "evaluation text")
             elif validation_split > 0.0:
                 split_at = int(len(train_tokens) * (1.0 - validation_split))
                 split_at = min(max(split_at, seq_len + 1), len(train_tokens) - 1)
@@ -1464,10 +1473,11 @@ class LlamaLLM:
             if not masked_batches:
                 raise ValueError("No training batches generated from corpus.")
             tokens = []
-            eval_tokens = self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
+            # BOS prefix matches _evaluate_tokens()/training-window convention.
+            eval_tokens = [1] + self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
         else:
             tokens = [1] + self.tokenizer.encode(text, bos=False)  # BOS matches inference
-            eval_tokens = self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
+            eval_tokens = [1] + self.tokenizer.encode(eval_text, bos=False) if eval_text is not None else None
             if validation_split > 0.0:
                 split_at = int(len(tokens) * (1.0 - validation_split))
                 split_at = min(max(split_at, seq_len + 1), len(tokens) - 1)
@@ -1492,9 +1502,13 @@ class LlamaLLM:
         )
         if adapter_path is not None:
             history["adapter_path"] = str(model.save_lora(adapter_path))
-        # Keep chat/generation fast: fold the trained delta into the arrays
-        # already owned by the native engine after saving the standalone adapter.
+        # Fold the trained deltas into the autograd parameters, then sync them
+        # back into the LlamaLLM arrays owned by the native engine.
+        # copy_to_llama() must run AFTER merge_lora(): the autograd model holds
+        # copies of the engine's weight arrays, so merging only touches those
+        # copies and the engine would otherwise never see the LoRA update.
         model.merge_lora()
+        model.copy_to_llama()
         self.reset_cache()
         return history
 
@@ -1503,6 +1517,8 @@ class LlamaLLM:
         model = self.full_backprop_model()
         model.load_lora(adapter_path)
         model.merge_lora()
+        # Sync merged deltas into the engine-owned weight arrays (see train_lora).
+        model.copy_to_llama()
         self.reset_cache()
         return model
 

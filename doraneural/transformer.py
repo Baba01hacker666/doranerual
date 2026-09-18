@@ -224,6 +224,7 @@ class TransformerDecoderLM(Module):
         rope_type: str = "interleaved",
         weights: Optional[dict] = None,
         dtype: Any = np.float32,
+        **kwargs: Any,
     ) -> None:
         super().__init__()
         self.dim = int(dim)
@@ -234,6 +235,7 @@ class TransformerDecoderLM(Module):
         self.vocab_size = int(vocab_size)
         self.seq_len = int(seq_len)
         self.rope_type = rope_type
+        self.rope_theta = float(kwargs.pop("rope_theta", 10000.0))
         w = weights or {}
         self.token_embedding = Parameter(w.get("token_embedding", _normal(vocab_size, dim, dtype)), dtype=dtype)
         layer_weights = w.get("layers") or [{} for _ in range(n_layers)]
@@ -270,13 +272,14 @@ class TransformerDecoderLM(Module):
             "layers": layers,
             "rms_final": llm.rms_final,
         }
+        rope_theta = float(getattr(llm.config, "rope_theta", 10000.0) or 10000.0)
         if not llm.shared_weights:
             weights["lm_head"] = llm.wcls
         model = cls(
             dim=p.dim, hidden_dim=p.hidden_dim, n_layers=p.n_layers,
             n_heads=p.n_heads, n_kv_heads=p.n_kv_heads, vocab_size=p.vocab_size,
             seq_len=p.seq_len, rope_type=p.rope_type, weights=weights,
-            dtype=llm.tok_emb.dtype,
+            dtype=llm.tok_emb.dtype, rope_theta=rope_theta,
         )
         if not llm.shared_weights:
             # The classifier is stored as (vocab, dim), already matching the
@@ -289,7 +292,8 @@ class TransformerDecoderLM(Module):
         half = self.dim // self.n_heads // 2
         positions = np.arange(length, dtype=np.float32)[:, None]
         exponent = np.arange(half, dtype=np.float32)[None, :]
-        inv_freq = 1.0 / (10000.0 ** (2.0 * exponent / (self.dim // self.n_heads)))
+        theta = self.rope_theta if self.rope_theta > 0 else 10000.0
+        inv_freq = 1.0 / (theta ** (2.0 * exponent / (self.dim // self.n_heads)))
         angles = positions * inv_freq
         cos = Tensor(np.cos(angles).astype(self.token_embedding.dtype), dtype=self.token_embedding.dtype)
         sin = Tensor(np.sin(angles).astype(self.token_embedding.dtype), dtype=self.token_embedding.dtype)

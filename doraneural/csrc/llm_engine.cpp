@@ -32,6 +32,20 @@ inline float silu(float x) {
 inline float fast_silu(float x) {
     return silu(x);
 }
+
+// Numerically stable in-place softmax: subtract the max logit before the
+// exponential so large logits cannot overflow to inf/NaN. Raw-logit softmax
+// silently returns NaN once any logit exceeds ~88, which corrupts sampling
+// and the head-only trainer's loss/gradient.
+inline void softmax_stable(float* values, int n) {
+    if (n <= 0) return;
+    float max_v = values[0];
+    for (int i = 1; i < n; i++) if (values[i] > max_v) max_v = values[i];
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) { values[i] = std::exp(values[i] - max_v); sum += values[i]; }
+    float inv = 1.0f / std::max(sum, 1e-20f);
+    for (int i = 0; i < n; i++) values[i] *= inv;
+}
 inline float silu_deriv(float x) {
     if (x > 88.0f) return 1.0f;
     if (x < -88.0f) return 0.0f;
@@ -1085,7 +1099,7 @@ int llama_sample_token_ex(LlamaCppEngine* engine, float temperature, float top_p
     std::memcpy(engine->sample_probs.data(), engine->logits.data(), (size_t)vocab_size*sizeof(float));
     float inv_temp=1.0f/temperature;
     for(int i=0;i<vocab_size;i++) engine->sample_probs[i]*=inv_temp;
-    softmax(engine->sample_probs.data(), vocab_size);
+    softmax_stable(engine->sample_probs.data(), vocab_size);
 
     for(int i=0;i<vocab_size;i++) engine->sample_candidates[i]={engine->sample_probs[i], i};
 
@@ -1128,8 +1142,9 @@ int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p){
     return llama_sample_token_ex(engine, temperature, top_p, 0);
 }
 
-int llama_generate_ex(LlamaCppEngine* engine, const int* prompt_tokens, int prompt_len, int max_new_tokens, float temperature, float top_p, int top_k, int eos_token_id, int* out_tokens){
+int llama_generate_ex(LlamaCppEngine* engine, const int* prompt_tokens, int prompt_len, int max_new_tokens, float temperature, float top_p, int top_k, int eos_token_id, int* out_tokens, int* eos_token_id_out){
     if(!engine || !prompt_tokens || !out_tokens || prompt_len<=0 || prompt_len>=engine->config.seq_len || max_new_tokens<0) return 0;
+    if(eos_token_id_out) *eos_token_id_out=-1;
     if(temperature<0) temperature=0.0f;
     if(top_p<0.0f || top_p>1.0f) top_p = std::max(0.0f, std::min(1.0f, top_p));
 
@@ -1156,8 +1171,11 @@ int llama_generate_ex(LlamaCppEngine* engine, const int* prompt_tokens, int prom
             next_token = llama_sample_token_ex(engine, temperature, top_p, top_k);
         }
 
+        // Do not store EOS in the output buffer: the Python decoder renders
+        // special pieces as text (e.g. "</s>"). Hand it back via the out-param
+        // instead so callers can still observe the stop reason.
+        if(next_token==eos){ if(eos_token_id_out) *eos_token_id_out=next_token; break; }
         out_tokens[generated_count++]=next_token;
-        if(next_token==eos) break;
 
         if(step+1 < max_new_tokens && !is_greedy){
             llama_forward(engine, next_token, pos, engine->logits.data());
@@ -1168,7 +1186,8 @@ int llama_generate_ex(LlamaCppEngine* engine, const int* prompt_tokens, int prom
 }
 
 int llama_generate(LlamaCppEngine* engine, const int* prompt_tokens, int prompt_len, int max_new_tokens, float temperature, float top_p, int* out_tokens){
-    return llama_generate_ex(engine, prompt_tokens, prompt_len, max_new_tokens, temperature, top_p, 0, -1, out_tokens);
+    int eos_seen = -1;
+    return llama_generate_ex(engine, prompt_tokens, prompt_len, max_new_tokens, temperature, top_p, 0, -1, out_tokens, &eos_seen);
 }
 
 void llama_set_profile(LlamaCppEngine* engine, int enable){
@@ -1245,7 +1264,9 @@ float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, con
                 for (int h = 0; h < H; h++) { float* qh = q + (size_t)h * HD; for (int i = 0; i < half; i++) { float q0 = qh[i], q1 = qh[i + half]; qh[i] = q0 * cos_ptr[i] - q1 * sin_ptr[i]; qh[i + half] = q1 * cos_ptr[i] + q0 * sin_ptr[i]; } }
                 for (int h = 0; h < p.n_kv_heads; h++) { float* kh = k + (size_t)h * HD; for (int i = 0; i < half; i++) { float k0 = kh[i], k1 = kh[i + half]; kh[i] = k0 * cos_ptr[i] - k1 * sin_ptr[i]; kh[i + half] = k1 * cos_ptr[i] + k0 * sin_ptr[i]; } }
             } else {
-                for (int i = 0; i < D; i += 2) { int r = (i % HD) / 2; float q0 = q[i], q1 = q[i + 1]; q[i] = q0 * cos_ptr[r] - q1 * sin_ptr[r]; q[i + 1] = q0 * sin_ptr[r] + q1 * cos_ptr[r]; if (i < KV) { float k0 = k[i], k1 = k[i + 1]; k[i] = k0 * cos_ptr[r] - k1 * sin_ptr[r]; k[i + 1] = k0 * sin_ptr[r] + k1 * cos_ptr[r]; } }
+                // llama2.c interleaved pairs; KV can be odd under GQA, so the
+                // key loop must not touch k[i+1] beyond the vector end.
+                for (int i = 0; i < D; i += 2) { int r = (i % HD) / 2; float q0 = q[i], q1 = q[i + 1]; q[i] = q0 * cos_ptr[r] - q1 * sin_ptr[r]; q[i + 1] = q0 * sin_ptr[r] + q1 * cos_ptr[r]; if (i + 1 < KV) { float k0 = k[i], k1 = k[i + 1]; k[i] = k0 * cos_ptr[r] - k1 * sin_ptr[r]; k[i + 1] = k0 * sin_ptr[r] + k1 * cos_ptr[r]; } }
             }
         }
         for (int t = 0; t < seq_len; t++) {
@@ -1313,7 +1334,7 @@ float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, con
                 for (int h = 0; h < H; h++) { float* dqh = dq + (size_t)h * HD; for (int i = 0; i < half; i++) { float d0 = dqh[i], d1 = dqh[i + half]; dqh[i] = d0 * cos_ptr[i] + d1 * sin_ptr[i]; dqh[i + half] = -d0 * sin_ptr[i] + d1 * cos_ptr[i]; } }
                 for (int h = 0; h < p.n_kv_heads; h++) { float* dkh = dk + (size_t)h * HD; for (int i = 0; i < half; i++) { float d0 = dkh[i], d1 = dkh[i + half]; dkh[i] = d0 * cos_ptr[i] + d1 * sin_ptr[i]; dkh[i + half] = -d0 * sin_ptr[i] + d1 * cos_ptr[i]; } }
             } else {
-                for (int i = 0; i < D; i += 2) { int r = (i % HD) / 2; float d0 = dq[i], d1 = dq[i + 1]; dq[i] = d0 * cos_ptr[r] + d1 * sin_ptr[r]; dq[i + 1] = -d0 * sin_ptr[r] + d1 * cos_ptr[r]; if (i < KV) { float k0 = dk[i], k1 = dk[i + 1]; dk[i] = k0 * cos_ptr[r] + k1 * sin_ptr[r]; dk[i + 1] = -k0 * sin_ptr[r] + k1 * cos_ptr[r]; } }
+                for (int i = 0; i < D; i += 2) { int r = (i % HD) / 2; float d0 = dq[i], d1 = dq[i + 1]; dq[i] = d0 * cos_ptr[r] + d1 * sin_ptr[r]; dq[i + 1] = -d0 * sin_ptr[r] + d1 * cos_ptr[r]; if (i + 1 < KV) { float k0 = dk[i], k1 = dk[i + 1]; dk[i] = k0 * cos_ptr[r] + k1 * sin_ptr[r]; dk[i + 1] = -k0 * sin_ptr[r] + k1 * cos_ptr[r]; } }
             }
             const float* norm = layer_dim_at(ws.norm_att, l, t); float* dnorm = layer_dim_at(ws.d_norm_att, l, t); std::fill(dnorm, dnorm + D, 0.0f);
             matmul_backward(dnorm, grad + wq_off, dq, norm, w.wq + (size_t)l * D * D, D, D);
@@ -1356,7 +1377,8 @@ float llama_train_step(LlamaCppEngine* engine, const int* input_tokens, const in
     for (int pos = 0; pos < seq_len; pos++) {
         int in_tok = input_tokens[pos]; int target_tok = target_tokens[pos]; llama_forward(engine, in_tok, pos, step_logits);
         if (target_tok < 0 || target_tok >= p.vocab_size) continue;
-        std::memcpy(probs, step_logits, (size_t)p.vocab_size * sizeof(float)); softmax(probs, p.vocab_size);
+        std::memcpy(probs, step_logits, (size_t)p.vocab_size * sizeof(float));
+        softmax_stable(probs, p.vocab_size);
         float target_prob = std::max(1e-12f, probs[target_tok]); total_loss += -std::log(target_prob);
         for (int i = 0; i < p.vocab_size; i++) dlogits[i] = (probs[i] - (i == target_tok ? 1.0f : 0.0f)) * inv_targets;
         const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table; float* d_emb_row = w.token_embedding_table + (size_t)in_tok * p.dim; float* m_emb_row = engine->m_buffer.data() + (size_t)in_tok * p.dim; float* v_emb_row = engine->v_buffer.data() + (size_t)in_tok * p.dim;

@@ -47,7 +47,7 @@ class ZexoModel:
         stream: bool = False,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
-    ) -> Union[str, any]:
+    ) -> Union[str, Generator[str, None, None]]:
         """Conduct a single conversational turn with Zexo, retaining multi-turn history."""
         self.chat_session.temperature = float(temperature)
         self.chat_session.max_new_tokens = int(max_tokens)
@@ -183,6 +183,7 @@ def load_zexo(
             url = "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories260K/tok512.bin"
         else:
             tok_p = tok_dir / "tokenizer.json"
+            url = "https://huggingface.co/arnir0/Tiny-LLM/resolve/main/tokenizer.json"
         try:
             print(f"📥 Auto-downloading tokenizer: {tok_p.name}...")
             from doraneural.hf_dataset import download_file_to_disk
