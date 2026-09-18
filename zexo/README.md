@@ -102,7 +102,7 @@ The trainer supports shuffled windows, overlapping windows via `--stride`, held-
 
 The default trainer remains the fast head-only path. For real CPU NumPy backpropagation through every decoder layer, use `--full-backprop`; this updates embeddings, attention projections, RoPE-connected attention, RMSNorm scales, SwiGLU projections, and the output head. It is intentionally slower and is best suited to micro models, smoke tests, and small fine-tuning runs. Training metadata records which mode was used.
 
-The inference engine now uses the optimized C++ path automatically when available. Set `DORANEURAL_NUM_THREADS` or call `llm.set_num_threads(n)` to tune native parallelism. Tokenizers use heap-based merges and bounded caches, and HuggingFace single-file, BF16, and sharded safetensors checkpoints are supported without PyTorch.
+The inference and native-training engine uses the optimized C++ path automatically when available. Set `DORANEURAL_NUM_THREADS` or call `llm.set_num_threads(n)` to tune native parallelism. The CLI also accepts `--threads N` / `--num-threads N`, including values such as 200 or 3000; omitted values keep normal OpenMP CPU auto-selection. Values above the CPUs exposed to the process are accepted but may oversubscribe and become slower. Tokenizers use heap-based merges and bounded caches, and HuggingFace single-file, BF16, and sharded safetensors checkpoints are supported without PyTorch.
 
 For pretrained-checkpoint adaptation, LoRA keeps the base weights frozen and saves only small adapter matrices:
 

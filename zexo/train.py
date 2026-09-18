@@ -133,7 +133,7 @@ def main():
     parser.add_argument(
         "--full-backprop",
         action="store_true",
-        help="Train all transformer weights with the CPU-friendly NumPy autograd path (slower; head-only remains default).",
+        help="Train all transformer weights with native C++ (NumPy reference remains available via --numpy-full).",
     )
     parser.add_argument(
         "--numpy-full",
@@ -168,6 +168,13 @@ def main():
         help="Optional existing .npz LoRA adapter to load on the checkpoint before training/evaluation.",
     )
     parser.add_argument(
+        "--threads", "--num-threads",
+        dest="threads",
+        type=int,
+        default=None,
+        help="Native OpenMP thread count. Any positive value is accepted (for example 200 or 3000); default keeps normal runtime auto-selection.",
+    )
+    parser.add_argument(
         "--fast",
         action="store_true",
         help="Enable fast mode: uses all available CPU threads, optimized sequence length, and high-throughput execution.",
@@ -183,13 +190,27 @@ def main():
         parser.error("--full-backprop and --lora-rank are mutually exclusive")
     if args.lora_rank is not None and args.lora_rank <= 0:
         parser.error("--lora-rank must be positive")
+    if args.threads is not None and args.threads <= 0:
+        parser.error("--threads must be a positive integer")
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fast mode optimizations
+    # Thread selection is deliberately not capped to os.cpu_count(): OpenMP
+    # accepts larger pools for machines/containers that expose CPUs later.
+    # The default remains the normal runtime-selected CPU count.
+    requested_threads = args.threads
+    if requested_threads is None and args.fast:
+        requested_threads = os.cpu_count() or 4
+    if requested_threads is not None:
+        os.environ["OMP_NUM_THREADS"] = str(requested_threads)
+        os.environ["DORANEURAL_NUM_THREADS"] = str(requested_threads)
+        available_cpus = os.cpu_count() or 1
+        if requested_threads > available_cpus:
+            print(
+                f"⚠️ Requested {requested_threads:,} threads but this process currently exposes "
+                f"{available_cpus:,} CPU(s); this may oversubscribe and run slower."
+            )
     if args.fast:
-        n_cpus = os.cpu_count() or 4
-        os.environ["OMP_NUM_THREADS"] = str(n_cpus)
         os.environ["PYTHONUNBUFFERED"] = "1"
         if args.seq_len == 64:
             args.seq_len = 128
@@ -208,7 +229,8 @@ def main():
     )
     print(f"Training Mode:  {mode}")
     print(f"Weight Decay:   {args.weight_decay}")
-    print(f"Fast Mode:      {args.fast} ({os.environ.get('OMP_NUM_THREADS', 'auto')} OpenMP threads)")
+    print(f"Thread Request: {f'{requested_threads:,}' if requested_threads is not None else 'auto (normal CPU runtime)'}")
+    print(f"Fast Mode:      {args.fast}")
     print(f"Output Dir:     {out_dir}")
     print("─" * 72)
 
@@ -246,11 +268,16 @@ def main():
     # 2. Load or Initialize Zexo
     print("\n[1/4] Loading Zexo Model...")
     zexo = load_zexo(checkpoint_path=args.checkpoint, tier=args.tier, from_scratch=args.from_scratch)
+    if args.threads is not None:
+        # Apply explicitly after engine construction too; this covers a
+        # previously loaded shared library and makes the effective setting visible.
+        zexo.llm.set_num_threads(args.threads)
     if args.adapter_input:
         zexo.load_lora(args.adapter_input)
         print(f"  Loaded LoRA adapter: {args.adapter_input}")
     print(f"  Architecture: {zexo.config.dim} dim, {zexo.config.n_layers} layers, {zexo.config.parameter_count:,} params")
     print(f"  Backend:      {zexo.llm.backend.upper()}")
+    print(f"  Native threads: {zexo.llm.num_threads:,} (effective; NumPy fallback reports 1)")
 
     # 3. Test Baseline Answer
     print(f"\n[2/4] Baseline Conversational Reply (Before Training):")
@@ -327,6 +354,9 @@ def main():
             "lora" if args.lora_rank is not None else "head_only"
         ),
         "full_backprop_backend": "numpy" if args.numpy_full else "native_cpp",
+        "threads_requested": requested_threads,
+        "threads_effective": zexo.llm.num_threads,
+        "available_cpus": os.cpu_count(),
         "lora_rank": args.lora_rank,
         "lora_alpha": args.lora_alpha if args.lora_rank is not None else None,
         "lora_targets": [item.strip() for item in args.lora_targets.split(",") if item.strip()] if args.lora_rank is not None else None,
@@ -334,6 +364,9 @@ def main():
         "adapter_input": args.adapter_input,
         "loss_history": hist["loss"],
         "val_loss_history": hist.get("val_loss"),
+        "training_tokens": hist.get("tokens"),
+        "windows_per_epoch": hist.get("windows_per_epoch"),
+        "total_training_steps": hist.get("total_steps"),
         "test_prompt": args.test_prompt,
         "reply_before": ans_before,
         "reply_after": ans_after,

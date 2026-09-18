@@ -1034,9 +1034,24 @@ class LlamaLLM:
             raise ValueError("training text does not contain a usable sequence")
 
         rng = np.random.default_rng(seed)
-        history = {"loss": []}
+        history = {
+            "loss": [],
+            "tokens": len(tokens),
+            "windows_per_epoch": len(starts),
+            "total_steps": len(starts) * epochs,
+            "backend": "native_cpp",
+            "threads": self.num_threads,
+        }
+        if verbose:
+            print(
+                f"[Full BP/C++] workflow: {len(tokens):,} tokens -> "
+                f"{len(starts):,} windows/epoch x {epochs:,} epoch(s) = "
+                f"{len(starts) * epochs:,} native updates; threads={self.num_threads:,}",
+                flush=True,
+            )
         if eval_tokens is not None:
             history["val_loss"] = []
+        training_started = time.perf_counter()
         for epoch in range(epochs):
             order = starts.copy()
             if shuffle:
@@ -1055,7 +1070,15 @@ class LlamaLLM:
                     eval_tokens, seq_len, stride=step, max_steps=max_eval_steps,
                 ))
             if verbose:
-                message = f"[Full BP/C++] Epoch {epoch + 1}/{epochs} loss={history['loss'][-1]:.4f}"
+                elapsed = max(time.perf_counter() - training_started, 1e-9)
+                updates_done = (epoch + 1) * len(order)
+                rate = updates_done / elapsed
+                remaining = max((epochs * len(order) - updates_done) / max(rate, 1e-9), 0.0)
+                message = (
+                    f"[Full BP/C++] Epoch {epoch + 1}/{epochs} "
+                    f"loss={history['loss'][-1]:.4f} "
+                    f"speed={rate:.2f} updates/s ETA={remaining:.1f}s"
+                )
                 if "val_loss" in history:
                     message += f" val_loss={history['val_loss'][-1]:.4f}"
                 print(message, flush=True)
