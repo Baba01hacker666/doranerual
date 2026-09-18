@@ -127,11 +127,18 @@ def test_cpp_sampling_top_k_and_custom_eos():
     tok = llm.cpp_engine.sample(temperature=0.8, top_p=0.9, top_k=10)
     assert 0 <= tok < llm.config.vocab_size
 
-    # Custom EOS token id: set to the first token that would be generated
+    # Custom EOS token id: EOS is excluded from returned tokens, recorded in last_eos_token
     first_gen = llm.cpp_engine.forward_argmax(1, 0)
-    out = llm.cpp_engine.generate(prompt_tokens=[1], max_new_tokens=20, temperature=0.0, eos_token_id=first_gen)
+    out_immediate = llm.cpp_engine.generate(prompt_tokens=[1], max_new_tokens=20, temperature=0.0, eos_token_id=first_gen)
+    assert len(out_immediate) == 0
+    assert llm.cpp_engine.last_eos_token == first_gen
+
+    # Setting EOS to the second token yields exactly the first token
+    second_gen = llm.cpp_engine.forward_argmax(first_gen, 1)
+    out = llm.cpp_engine.generate(prompt_tokens=[1], max_new_tokens=20, temperature=0.0, eos_token_id=second_gen)
     assert len(out) == 1
     assert out[0] == first_gen
+    assert llm.cpp_engine.last_eos_token == second_gen
 
 
 def test_llama_config_theta_and_custom_eos():
