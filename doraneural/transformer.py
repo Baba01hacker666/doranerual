@@ -12,6 +12,7 @@ and C++ engines remain the fast inference paths.
 
 import json
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
@@ -737,11 +738,23 @@ class TransformerDecoderLM(Module):
                 if max_batches is not None:
                     order = order[:max_batches]
             total = 0.0
-            for item in order:
+            t_ep_start = time.perf_counter()
+            log_interval = max(1, len(order) // 10)
+            for b_idx, item in enumerate(order, 1):
                 if windows is not None:
-                    total += self.train_batch(item[0], item[1], optimizer)
+                    loss_val = self.train_batch(item[0], item[1], optimizer)
                 else:
-                    total += self.train_batch(tokens[item : item + seq_len], tokens[item + 1 : item + seq_len + 1], optimizer)
+                    loss_val = self.train_batch(tokens[item : item + seq_len], tokens[item + 1 : item + seq_len + 1], optimizer)
+                total += loss_val
+                if verbose and (b_idx == 1 or b_idx % log_interval == 0 or b_idx == len(order)):
+                    elapsed = time.perf_counter() - t_ep_start
+                    speed = b_idx / max(1e-4, elapsed)
+                    eta = (len(order) - b_idx) / max(1e-4, speed)
+                    print(
+                        f"  [Full BP] Epoch {epoch + 1}/{epochs} | Step {b_idx}/{len(order)} | "
+                        f"Loss: {loss_val:.4f} (Avg: {total / b_idx:.4f}) | {speed:.2f} batches/s | ETA: {eta:.0f}s",
+                        flush=True,
+                    )
             history["loss"].append(total / len(order))
             if eval_tokens is not None:
                 eval_starts = list(range(0, len(eval_tokens) - seq_len, step))
