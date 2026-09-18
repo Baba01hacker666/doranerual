@@ -34,6 +34,11 @@ on:
         required: false
         default: false
         type: boolean
+      full_backprop:
+        description: "Train ALL transformer weights with native C++ full backprop (slower; head-only fast path leaves layers frozen)"
+        required: false
+        default: false
+        type: boolean
       epochs:
         description: "Number of training epochs"
         required: false
@@ -143,6 +148,7 @@ jobs:
           SEQLEN="${{ github.event.inputs.seq_len || '128' }}"
           PROMPT="${{ github.event.inputs.test_prompt || 'User: Who are you?\nZexo:' }}"
           FROM_SCRATCH="${{ github.event.inputs.from_scratch || 'false' }}"
+          FULL_BACKPROP="${{ github.event.inputs.full_backprop || 'false' }}"
           THREADS="${{ github.event.inputs.threads || '0' }}"
           if [ "$THREADS" = "0" ]; then
             THREADS="$(nproc)"
@@ -154,6 +160,12 @@ jobs:
           fi
 
           THREADS_FLAG="--threads $THREADS"
+
+          FB_FLAG=""
+          if [ "$FULL_BACKPROP" = "true" ]; then
+            FB_FLAG="--full-backprop"
+            echo "Full-backprop mode enabled: training all transformer weights (native C++)."
+          fi
 
           HF_ARG=""
           if [ -n "$HF_DATASET" ]; then
@@ -171,6 +183,7 @@ jobs:
             --tag "zexo_run_${{ github.run_number }}" \
             $SCRATCH_FLAG \
             $THREADS_FLAG \
+            $FB_FLAG \
             $HF_ARG
 
       - name: Save Updated Checkpoint to Cache
