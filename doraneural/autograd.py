@@ -361,7 +361,11 @@ class Tensor:
 
     def exp(self) -> "Tensor":
         """Elementwise natural exponential."""
-        out_data = np.exp(np.clip(self.data, -88.0, 88.0))
+        clipped = np.clip(self.data, -88.0, 88.0)
+        out_data = np.exp(clipped)
+        # Preserve the mathematically correct exp(-inf) == 0. This is useful
+        # for exact causal-attention masks and avoids tiny future-token paths.
+        out_data = np.where(np.isneginf(self.data), 0.0, out_data)
         req_grad = _GRAD_ENABLED and self.requires_grad
         out = Tensor(out_data, requires_grad=req_grad, dtype=self.dtype, _children=(self,), _op="exp")
 

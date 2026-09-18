@@ -32,6 +32,8 @@ class TensorAdamW:
             raise ValueError(f"lr must be positive, got {lr}")
         if not 0.0 <= beta1 < 1.0 or not 0.0 <= beta2 < 1.0:
             raise ValueError("beta1 and beta2 must be in [0, 1)")
+        if weight_decay < 0.0:
+            raise ValueError(f"weight_decay must be non-negative, got {weight_decay}")
         self.params = list(params)
         self.lr = float(lr)
         self.beta1 = float(beta1)
@@ -241,7 +243,7 @@ class TransformerDecoderLM(Module):
         angles = positions * inv_freq
         cos = Tensor(np.cos(angles).astype(self.token_embedding.dtype), dtype=self.token_embedding.dtype)
         sin = Tensor(np.sin(angles).astype(self.token_embedding.dtype), dtype=self.token_embedding.dtype)
-        mask = np.triu(np.full((length, length), -1e9, dtype=self.token_embedding.dtype), 1)
+        mask = np.triu(np.full((length, length), -np.inf, dtype=self.token_embedding.dtype), 1)
         return cos, sin, Tensor(mask, dtype=self.token_embedding.dtype)
 
     def forward(self, token_ids: Sequence[int]) -> Tensor:

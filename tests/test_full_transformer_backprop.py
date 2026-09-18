@@ -2,6 +2,7 @@
 
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -75,6 +76,48 @@ def test_tiny_full_backprop_model_reduces_next_token_loss():
 
     final = float(model.loss(inputs, targets).item())
     assert final < initial * 0.25, (initial, final)
+
+
+def test_hf_layout_supports_split_rope_and_untied_output_head():
+    rng = np.random.default_rng(23)
+    dim, hidden, vocab = 16, 32, 17
+    llm = SimpleNamespace(
+        config=SimpleNamespace(
+            dim=dim,
+            hidden_dim=hidden,
+            n_layers=1,
+            n_heads=4,
+            n_kv_heads=2,
+            vocab_size=vocab,
+            seq_len=16,
+            rope_type="hf",
+        ),
+        tok_emb=rng.normal(size=(vocab, dim)).astype(np.float32),
+        rms_att=np.ones((1, dim), dtype=np.float32),
+        wq=rng.normal(size=(1, dim, dim)).astype(np.float32),
+        wk=rng.normal(size=(1, 8, dim)).astype(np.float32),
+        wv=rng.normal(size=(1, 8, dim)).astype(np.float32),
+        wo=rng.normal(size=(1, dim, dim)).astype(np.float32),
+        rms_ffn=np.ones((1, dim), dtype=np.float32),
+        w1=rng.normal(size=(1, hidden, dim)).astype(np.float32),
+        w2=rng.normal(size=(1, dim, hidden)).astype(np.float32),
+        w3=rng.normal(size=(1, hidden, dim)).astype(np.float32),
+        rms_final=np.ones(dim, dtype=np.float32),
+        wcls=rng.normal(size=(vocab, dim)).astype(np.float32),
+        shared_weights=False,
+        reset_cache=lambda: None,
+    )
+    model = TransformerDecoderLM.from_llama(llm)
+    assert model.rope_type == "hf"
+    assert model.lm_head is not model.token_embedding
+    assert model.layers[0].wk.shape == (dim, 8)
+
+    loss = model.loss([1, 2, 3, 4], [2, 3, 4, 5])
+    loss.backward()
+    assert model.lm_head.grad is not None
+    assert model.layers[0].wk.grad is not None
+    model.copy_to_llama()
+    np.testing.assert_allclose(llm.wcls, model.lm_head.data)
 
 
 def _write_tiny_llama_checkpoint(path: Path, model: TransformerDecoderLM) -> None:

@@ -109,6 +109,12 @@ def main():
         help="Learning rate (default: 0.0005).",
     )
     parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="AdamW/L2 weight decay (default: 0.01).",
+    )
+    parser.add_argument(
         "--seq-len",
         type=int,
         default=64,
@@ -162,6 +168,7 @@ def main():
     print(f"Target Tier:    {args.tier.upper()}")
     print(f"From Scratch:   {args.from_scratch}")
     print(f"Training Mode:  {'FULL TRANSFORMER BACKPROP' if args.full_backprop else 'HEAD-ONLY FAST PATH'}")
+    print(f"Weight Decay:   {args.weight_decay}")
     print(f"Fast Mode:      {args.fast} ({os.environ.get('OMP_NUM_THREADS', 'auto')} OpenMP threads)")
     print(f"Output Dir:     {out_dir}")
     print("─" * 72)
@@ -218,6 +225,7 @@ def main():
         text,
         epochs=args.epochs,
         lr=args.lr,
+        weight_decay=args.weight_decay,
         seq_len=args.seq_len,
         verbose=1,
         eval_text=eval_text,
@@ -264,6 +272,7 @@ def main():
         "words": len(text.split()),
         "epochs": args.epochs,
         "lr": args.lr,
+        "weight_decay": args.weight_decay,
         "seq_len": args.seq_len,
         "stride": args.stride or args.seq_len,
         "seed": args.seed,

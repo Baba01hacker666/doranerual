@@ -102,6 +102,17 @@ The trainer supports shuffled windows, overlapping windows via `--stride`, held-
 
 The default trainer remains the fast head-only path. For real CPU NumPy backpropagation through every decoder layer, use `--full-backprop`; this updates embeddings, attention projections, RoPE-connected attention, RMSNorm scales, SwiGLU projections, and the output head. It is intentionally slower and is best suited to micro models, smoke tests, and small fine-tuning runs. Training metadata records which mode was used.
 
+```bash
+# Full transformer backpropagation (CPU/NumPy reference trainer)
+python zexo/train.py \
+  --tier micro \
+  --data zexo/data/zexo_quality_v1_train.txt \
+  --eval-data zexo/data/zexo_quality_v1_eval.txt \
+  --full-backprop \
+  --epochs 1 \
+  --seq-len 64
+```
+
 ---
 
 ## 🔁 Continuous Cloud Training with GitHub Actions
