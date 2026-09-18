@@ -9,6 +9,7 @@ A byte-level recurrent latent model with:
 """
 
 from dataclasses import dataclass, asdict
+import ctypes
 import json
 import math
 import os
@@ -179,10 +180,95 @@ class RTULanguageModel:
         self._m_beta: List[np.ndarray] = [np.zeros_like(w) for w in self.beta]
         self._v_beta: List[np.ndarray] = [np.zeros_like(w) for w in self.beta]
 
+        # Native C++ Acceleration Engine (if available)
+        self._cpp_lib = None
+        self._cpp_handle = None
+        try:
+            try:
+                from .rtu_backend import get_rtu_lib
+            except ImportError:
+                from rtu_backend import get_rtu_lib
+            lib = get_rtu_lib()
+            if lib is not None:
+                self._cpp_lib = lib
+                self._cpp_handle = lib.rtu_create(
+                    ctypes.c_int(p.dim),
+                    ctypes.c_int(p.n_layers),
+                    ctypes.c_int(p.vocab_size),
+                    ctypes.c_float(p.lr),
+                    ctypes.c_float(p.weight_decay),
+                    ctypes.c_float(p.variance_weight),
+                    ctypes.c_float(p.latent_weight),
+                    ctypes.c_float(p.stop_weight),
+                    ctypes.c_int(p.seed),
+                )
+                self._sync_weights_to_cpp()
+        except Exception:
+            self._cpp_lib = None
+            self._cpp_handle = None
+
+    def __del__(self):
+        if hasattr(self, "_cpp_handle") and self._cpp_handle and self._cpp_lib:
+            try:
+                self._cpp_lib.rtu_free(self._cpp_handle)
+                self._cpp_handle = None
+            except Exception:
+                pass
+
+    def _sync_weights_to_cpp(self) -> None:
+        if not self._cpp_handle or not self._cpp_lib:
+            return
+        c_float_p = ctypes.POINTER(ctypes.c_float)
+        n = self.config.n_layers
+        decay_ptrs = (c_float_p * n)(*[self.decay_w[i].ctypes.data_as(c_float_p) for i in range(n)])
+        weights_ptrs = (c_float_p * n)(*[self.weights[i].ctypes.data_as(c_float_p) for i in range(n)])
+        gamma_ptrs = (c_float_p * n)(*[self.gamma[i].ctypes.data_as(c_float_p) for i in range(n)])
+        beta_ptrs = (c_float_p * n)(*[self.beta[i].ctypes.data_as(c_float_p) for i in range(n)])
+        state_ptrs = (c_float_p * n)(*[self.layer_states[i].state.ctypes.data_as(c_float_p) for i in range(n)])
+
+        self._cpp_lib.rtu_set_weights(
+            self._cpp_handle,
+            self.embed.ctypes.data_as(c_float_p),
+            self.decoder.ctypes.data_as(c_float_p),
+            self.stop_w.ctypes.data_as(c_float_p),
+            self.stop_b.ctypes.data_as(c_float_p),
+            decay_ptrs,
+            weights_ptrs,
+            gamma_ptrs,
+            beta_ptrs,
+            state_ptrs,
+        )
+
+    def _sync_weights_from_cpp(self) -> None:
+        if not self._cpp_handle or not self._cpp_lib:
+            return
+        c_float_p = ctypes.POINTER(ctypes.c_float)
+        n = self.config.n_layers
+        decay_ptrs = (c_float_p * n)(*[self.decay_w[i].ctypes.data_as(c_float_p) for i in range(n)])
+        weights_ptrs = (c_float_p * n)(*[self.weights[i].ctypes.data_as(c_float_p) for i in range(n)])
+        gamma_ptrs = (c_float_p * n)(*[self.gamma[i].ctypes.data_as(c_float_p) for i in range(n)])
+        beta_ptrs = (c_float_p * n)(*[self.beta[i].ctypes.data_as(c_float_p) for i in range(n)])
+        state_ptrs = (c_float_p * n)(*[self.layer_states[i].state.ctypes.data_as(c_float_p) for i in range(n)])
+
+        self._cpp_lib.rtu_get_weights(
+            self._cpp_handle,
+            self.embed.ctypes.data_as(c_float_p),
+            self.decoder.ctypes.data_as(c_float_p),
+            self.stop_w.ctypes.data_as(c_float_p),
+            self.stop_b.ctypes.data_as(c_float_p),
+            decay_ptrs,
+            weights_ptrs,
+            gamma_ptrs,
+            beta_ptrs,
+            state_ptrs,
+        )
+
     def reset_state(self) -> None:
         """Clear all recurrent state vectors and eligibility traces."""
         for ls in self.layer_states:
             ls.reset()
+        if self._cpp_handle and self._cpp_lib:
+            self._cpp_lib.rtu_reset_state(self._cpp_handle)
 
     def forward_byte(
         self,
@@ -471,6 +557,33 @@ class RTULanguageModel:
         """
         if len(byte_data) < 2:
             return {"total_loss": 0.0, "bytes": 0}
+
+        if self._cpp_handle is not None and self._cpp_lib is not None:
+            cur_lr = lr if lr is not None else self.config.lr
+            c_bytes = (ctypes.c_uint8 * len(byte_data)).from_buffer_copy(byte_data)
+            tot_l = ctypes.c_float(0.0)
+            ce_l = ctypes.c_float(0.0)
+            lat_l = ctypes.c_float(0.0)
+            var_l = ctypes.c_float(0.0)
+            self._cpp_lib.rtu_train_sequence(
+                self._cpp_handle,
+                c_bytes,
+                ctypes.c_int(len(byte_data)),
+                ctypes.c_float(cur_lr),
+                ctypes.c_int(1 if reset_state else 0),
+                ctypes.byref(tot_l),
+                ctypes.byref(ce_l),
+                ctypes.byref(lat_l),
+                ctypes.byref(var_l),
+            )
+            self._sync_weights_from_cpp()
+            return {
+                "loss": float(tot_l.value),
+                "ce_loss": float(ce_l.value),
+                "latent_loss": float(lat_l.value),
+                "variance_loss": float(var_l.value),
+                "bytes": len(byte_data) - 1,
+            }
 
         if reset_state:
             self.reset_state()

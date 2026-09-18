@@ -80,6 +80,10 @@ jobs:
           pip install -r requirements.txt
           pip install wikiextractor || true
 
+      - name: Build C++ RTU Acceleration Engine
+        run: |
+          python3 -c "import sys; sys.path.insert(0, 'research/rtu_sandbox'); import rtu_backend; rtu_backend.compile_rtu_engine(force=True); print('C++ RTU Lib Ready:', rtu_backend.get_rtu_lib() is not None)"
+
       - name: Restore Wikipedia Dataset from Cache
         uses: actions/cache/restore@v4
         id: wiki-cache
