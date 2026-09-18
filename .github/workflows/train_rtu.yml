@@ -18,6 +18,11 @@ on:
         required: false
         default: "200"
         type: string
+      max_bytes:
+        description: "Max bytes to train per run (e.g. 300000 for quick ~25m continual steps, -1 for all)"
+        required: false
+        default: "300000"
+        type: string
       epochs:
         description: "Number of training epochs"
         required: false
@@ -136,6 +141,7 @@ jobs:
           EPOCHS="${{ github.event.inputs.epochs || '3' }}"
           LR="${{ github.event.inputs.learning_rate || '0.001' }}"
           CHUNK_SIZE="${{ github.event.inputs.chunk_size || '256' }}"
+          MAX_BYTES="${{ github.event.inputs.max_bytes || '300000' }}"
           PROMPT="${{ github.event.inputs.test_prompt || 'The Solar System is ' }}"
           FROM_SCRATCH="${{ github.event.inputs.from_scratch || 'false' }}"
 
@@ -151,6 +157,7 @@ jobs:
             --epochs "$EPOCHS" \
             --lr "$LR" \
             --chunk-size "$CHUNK_SIZE" \
+            --max-bytes "$MAX_BYTES" \
             --output-dir research/rtu_sandbox/checkpoints \
             --test-prompt "$PROMPT" \
             --tag "rtu_run_${{ github.run_number }}" \

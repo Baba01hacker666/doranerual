@@ -203,6 +203,13 @@ def prepare_simplewiki(
     if not extracted:
         extract_with_streaming_parser(archive_path, out_p, target_bytes)
 
+    if archive_path.exists():
+        try:
+            archive_path.unlink()
+            print(f"🧹 Cleaned up archive {archive_path}")
+        except Exception:
+            pass
+
     return out_p
 
 

@@ -72,12 +72,6 @@ def train_rtu_cli():
     file_size = data_path.stat().st_size
     print(f"✓ Found corpus: {data_path} ({file_size / (1024*1024):.2f} MB)")
 
-    # Read bytes up to max_bytes
-    read_limit = args.max_bytes if args.max_bytes > 0 else file_size
-    with open(data_path, "rb") as f:
-        raw_bytes = f.read(read_limit)
-    print(f"✓ Loaded {len(raw_bytes):,} raw UTF-8 bytes for training window.")
-
     # 2. Model Initialization / Continual Checkpoint Loading
     cfg = RTUConfig(
         dim=args.dim,
@@ -111,6 +105,21 @@ def train_rtu_cli():
         print("🌱 Initializing fresh RTU model weights from scratch.")
 
     print(f"Model Total Parameters: {cfg.parameter_count:,} params (Embedding: {cfg.vocab_size * cfg.dim * 2:,})")
+
+    # Read bytes up to max_bytes with streaming offset continuation
+    read_limit = args.max_bytes if args.max_bytes > 0 else file_size
+    start_offset = (meta_info.get("cumulative_bytes_trained", 0) % file_size) if not args.from_scratch else 0
+    with open(data_path, "rb") as f:
+        f.seek(start_offset)
+        raw_bytes = f.read(read_limit)
+        if len(raw_bytes) < read_limit and start_offset > 0:
+            f.seek(0)
+            raw_bytes += f.read(read_limit - len(raw_bytes))
+
+    print(
+        f"✓ Loaded {len(raw_bytes):,} raw UTF-8 bytes for training window "
+        f"(streaming offset: {start_offset:,}/{file_size:,} bytes)."
+    )
 
     # 3. Pre-Training Prompt Evaluation
     print(f"\n🔍 Pre-Training Generation (Prompt: '{args.test_prompt}'):")
