@@ -389,6 +389,8 @@ struct LlamaCppEngine {
     std::vector<float> grad_buffer;
     std::vector<float> m_buffer;
     std::vector<float> v_buffer;
+    std::vector<float> m_cls;
+    std::vector<float> v_cls;
     int adam_step;
 
     // PRNG
@@ -830,18 +832,48 @@ float llama_train_step(
     // Reset KV cache for fresh training sequence
     engine->reset_kv_cache();
 
-    // Zero gradient buffer
-    std::fill(engine->grad_buffer.begin(), engine->grad_buffer.end(), 0.0f);
+    // Ensure AdamW moment buffers are allocated
+    size_t emb_size = static_cast<size_t>(p.vocab_size) * p.dim;
+    if (engine->m_buffer.size() < emb_size) {
+        engine->m_buffer.assign(emb_size, 0.0f);
+        engine->v_buffer.assign(emb_size, 0.0f);
+    }
+    if (w.wcls && engine->m_cls.size() < emb_size) {
+        engine->m_cls.assign(emb_size, 0.0f);
+        engine->v_cls.assign(emb_size, 0.0f);
+    }
 
     float* step_logits = engine->train_step_logits.data();
     float* dlogits = engine->train_dlogits.data();
     float* probs = engine->train_probs.data();
+
+    // Count active supervised target tokens (skip masked tokens where target < 0)
+    int active_targets = 0;
+    for (int pos = 0; pos < seq_len; pos++) {
+        int t = target_tokens[pos];
+        if (t >= 0 && t < p.vocab_size) active_targets++;
+    }
+    if (active_targets == 0) return 0.0f;
+    float inv_targets = 1.0f / active_targets;
+
+    engine->adam_step++;
+    int t_step = engine->adam_step;
+    float beta1_corr = 1.0f - std::pow(beta1, static_cast<float>(t_step));
+    float beta2_corr = 1.0f - std::pow(beta2, static_cast<float>(t_step));
+    float inv_beta1_corr = 1.0f / std::max(1e-7f, beta1_corr);
+    float inv_beta2_corr = 1.0f / std::max(1e-7f, beta2_corr);
 
     for (int pos = 0; pos < seq_len; pos++) {
         int in_tok = input_tokens[pos];
         int target_tok = target_tokens[pos];
 
         llama_forward(engine, in_tok, pos, step_logits);
+
+        // If target is masked (e.g., prompt token in SFT), forward ran to update KV cache,
+        // but we skip cross-entropy loss and gradient backpropagation for this token
+        if (target_tok < 0 || target_tok >= p.vocab_size) {
+            continue;
+        }
 
         // Softmax & Cross-Entropy Loss
         std::memcpy(probs, step_logits, p.vocab_size * sizeof(float));
@@ -850,18 +882,18 @@ float llama_train_step(
         float target_prob = std::max(1e-12f, probs[target_tok]);
         total_loss += -std::log(target_prob);
 
-        // dL/dLogits = (probs - 1_{target}) / seq_len
-        float inv_seq = 1.0f / seq_len;
+        // dL/dLogits = (probs - 1_{target}) / active_targets
         for (int i = 0; i < p.vocab_size; i++) {
-            dlogits[i] = (probs[i] - (i == target_tok ? 1.0f : 0.0f)) * inv_seq;
+            dlogits[i] = (probs[i] - (i == target_tok ? 1.0f : 0.0f)) * inv_targets;
         }
 
         // Gradient backprop through classifier into embeddings
         const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table;
         float* d_emb_row = w.token_embedding_table + in_tok * p.dim;
+        float* m_emb_row = engine->m_buffer.data() + in_tok * p.dim;
+        float* v_emb_row = engine->v_buffer.data() + in_tok * p.dim;
 
         // Fast vector-matrix product: g = cls_w^T @ dlogits
-        // Outer loop over active v, inner loop over d (contiguous memory & SIMD vectorized)
         std::vector<float> g(p.dim, 0.0f);
         for (int v = 0; v < p.vocab_size; v++) {
             float dv = dlogits[v];
@@ -872,45 +904,58 @@ float llama_train_step(
             }
         }
         for (int d = 0; d < p.dim; d++) {
-            d_emb_row[d] -= lr * (g[d] + weight_decay * d_emb_row[d]);
+            float grad = g[d];
+            m_emb_row[d] = beta1 * m_emb_row[d] + (1.0f - beta1) * grad;
+            v_emb_row[d] = beta2 * v_emb_row[d] + (1.0f - beta2) * (grad * grad);
+            float m_hat = m_emb_row[d] * inv_beta1_corr;
+            float v_hat = v_emb_row[d] * inv_beta2_corr;
+            float step_val = m_hat / (std::sqrt(v_hat) + eps);
+            d_emb_row[d] -= lr * (step_val + weight_decay * d_emb_row[d]);
         }
 
-        // Gradient update for classifier weights:
-        // Logits = cls_w @ x, so dL / d(cls_w[v, d]) = dlogits[v] * x[d]
+        // Gradient update for classifier weights with AdamW:
         float* cls_base = (w.wcls ? w.wcls : w.token_embedding_table);
+        float* m_cls_base = (w.wcls ? engine->m_cls.data() : engine->m_buffer.data());
+        float* v_cls_base = (w.wcls ? engine->v_cls.data() : engine->v_buffer.data());
         const float* x_vec = engine->x.data();
 
-        // 1. Target token classifier row (increases target logit)
+        // 1. Target token classifier row
         float* cls_target = cls_base + target_tok * p.dim;
+        float* m_target = m_cls_base + target_tok * p.dim;
+        float* v_target = v_cls_base + target_tok * p.dim;
         float d_target = dlogits[target_tok];
         for (int d = 0; d < p.dim; d++) {
-            cls_target[d] -= lr * (d_target * x_vec[d] + weight_decay * cls_target[d]);
+            float grad = d_target * x_vec[d];
+            m_target[d] = beta1 * m_target[d] + (1.0f - beta1) * grad;
+            v_target[d] = beta2 * v_target[d] + (1.0f - beta2) * (grad * grad);
+            float m_hat = m_target[d] * inv_beta1_corr;
+            float v_hat = v_target[d] * inv_beta2_corr;
+            float step_val = m_hat / (std::sqrt(v_hat) + eps);
+            cls_target[d] -= lr * (step_val + weight_decay * cls_target[d]);
         }
 
-        // 2. Competing tokens classifier rows (decreases competing logits)
-        if (p.vocab_size <= 1024) {
-            for (int v = 0; v < p.vocab_size; v++) {
-                if (v == target_tok) continue;
-                float* cls_row = cls_base + v * p.dim;
-                float dv = dlogits[v];
-                for (int d = 0; d < p.dim; d++) {
-                    cls_row[d] -= lr * (dv * x_vec[d] + weight_decay * cls_row[d]);
-                }
-            }
-        } else {
-            for (int v = 0; v < p.vocab_size; v++) {
-                if (v == target_tok || probs[v] < 0.005f) continue;
-                float* cls_row = cls_base + v * p.dim;
-                float dv = dlogits[v];
-                for (int d = 0; d < p.dim; d++) {
-                    cls_row[d] -= lr * (dv * x_vec[d] + weight_decay * cls_row[d]);
-                }
+        // 2. Competing tokens classifier rows
+        float prob_threshold = (p.vocab_size <= 1024) ? 0.0f : 0.005f;
+        for (int v = 0; v < p.vocab_size; v++) {
+            if (v == target_tok) continue;
+            if (prob_threshold > 0.0f && probs[v] < prob_threshold) continue;
+            float* cls_row = cls_base + v * p.dim;
+            float* m_row = m_cls_base + v * p.dim;
+            float* v_row = v_cls_base + v * p.dim;
+            float dv = dlogits[v];
+            for (int d = 0; d < p.dim; d++) {
+                float grad = dv * x_vec[d];
+                m_row[d] = beta1 * m_row[d] + (1.0f - beta1) * grad;
+                v_row[d] = beta2 * v_row[d] + (1.0f - beta2) * (grad * grad);
+                float m_hat = m_row[d] * inv_beta1_corr;
+                float v_hat = v_row[d] * inv_beta2_corr;
+                float step_val = m_hat / (std::sqrt(v_hat) + eps);
+                cls_row[d] -= lr * (step_val + weight_decay * cls_row[d]);
             }
         }
     }
 
-    engine->adam_step++;
-    return total_loss / seq_len;
+    return total_loss / active_targets;
 }
 
 } // extern "C"

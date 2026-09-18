@@ -9,6 +9,7 @@ from dialogues_python import DIALOGUES_PYTHON
 from dialogues_deeplearning import DIALOGUES_DEEPLEARNING
 from dialogues_mathphysics import DIALOGUES_MATHPHYSICS
 from dialogues_practical import DIALOGUES_PRACTICAL
+from dialogues_reasoning import DIALOGUES_REASONING
 
 OUTPUT_FILE = Path("/root/doranerual/zexo/data/step1_conversational_expanded.txt")
 
@@ -18,6 +19,7 @@ ALL_CATEGORIES = [
     ("Deep Learning & LLMs", DIALOGUES_DEEPLEARNING),
     ("Math & Physics", DIALOGUES_MATHPHYSICS),
     ("Practical Assistance & Systems", DIALOGUES_PRACTICAL),
+    ("Logic, Algorithms & Reasoning", DIALOGUES_REASONING),
 ]
 
 FORBIDDEN_KEYWORDS = [

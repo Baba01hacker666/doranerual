@@ -199,6 +199,45 @@ def format_row_to_dialogue(row: Dict[str, any], fallback_col: Optional[str] = No
     return None
 
 
+def download_url_bytes(url: str, timeout: int = 60) -> bytes:
+    """Fetch content from URL using curl if available, falling back to urllib."""
+    import shutil
+    import subprocess
+    if shutil.which("curl"):
+        try:
+            cmd = ["curl", "-s", "-L", "--retry", "3", "--max-time", str(timeout), url]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if proc.returncode == 0 and proc.stdout:
+                return proc.stdout
+        except Exception:
+            pass
+
+    req = urllib.request.Request(url, headers={"User-Agent": "doraneural/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def download_file_to_disk(url: str, out_path: Union[str, Path], timeout: int = 60) -> Path:
+    """Download file from URL to disk using curl if available, falling back to urllib."""
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+    import subprocess
+    if shutil.which("curl"):
+        try:
+            cmd = ["curl", "-s", "-L", "--retry", "3", "--max-time", str(timeout), "-o", str(p), url]
+            proc = subprocess.run(cmd)
+            if proc.returncode == 0 and p.exists() and p.stat().st_size > 0:
+                return p
+        except Exception:
+            pass
+
+    req = urllib.request.Request(url, headers={"User-Agent": "doraneural/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp, open(p, "wb") as f:
+        f.write(resp.read())
+    return p
+
+
 def download_hf_dataset(
     dataset_name_or_url: str,
     split: str = "train",
@@ -247,10 +286,7 @@ def download_hf_dataset(
             return out_file
 
         print(f"📥 Downloading direct dataset from URL: {raw_input}")
-        req = urllib.request.Request(raw_input, headers={"User-Agent": "doraneural/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp, open(out_file, "wb") as f:
-            f.write(resp.read())
-        return out_file
+        return download_file_to_disk(raw_input, out_file, timeout=timeout)
 
     # 3. Hugging Face Hub dataset query
     clean_id = raw_input.replace("hf://", "").replace("datasets/", "").strip()
@@ -271,10 +307,9 @@ def download_hf_dataset(
     if clean_id in ("yahma/alpaca-cleaned", "tatsu-lab/alpaca"):
         json_url = f"https://huggingface.co/datasets/{clean_id}/resolve/main/alpaca_data_cleaned.json" if "yahma" in clean_id else f"https://huggingface.co/datasets/{clean_id}/resolve/main/alpaca_data.json"
         try:
-            print(f"⚡ Fast-path: downloading full dataset directly from {json_url}...")
-            req = urllib.request.Request(json_url, headers={"User-Agent": "doraneural/1.0"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                raw_data = json.loads(resp.read().decode("utf-8"))
+            print(f"⚡ Fast-path: downloading full dataset directly from {json_url} using curl/urllib...")
+            raw_bytes = download_url_bytes(json_url, timeout=60)
+            raw_data = json.loads(raw_bytes.decode("utf-8"))
             limit = len(raw_data) if max_samples <= 0 else min(max_samples, len(raw_data))
             collected = []
             for item in raw_data[:limit]:

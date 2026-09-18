@@ -13,7 +13,9 @@ Implements full autoregressive Transformer decoder inference in pure NumPy with:
 """
 
 import json
+import math
 import os
+import re
 import struct
 import sys
 import time
@@ -740,16 +742,42 @@ class LlamaLLM:
         target_tokens: List[int],
         lr: float = 1e-4,
         weight_decay: float = 0.01,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        eps: float = 1e-8,
     ) -> float:
-        """Pure NumPy fallback training step."""
+        """Pure NumPy fallback training step with SFT target masking and AdamW optimization."""
         seq_len = len(input_tokens)
         self.reset_cache()
         total_loss = 0.0
+
+        active_targets = sum(1 for t in target_tokens if 0 <= t < self.config.vocab_size)
+        if active_targets == 0:
+            return 0.0
+
+        inv_targets = 1.0 / active_targets
+
+        # Initialize NumPy AdamW moments if not already present
+        if not hasattr(self, "_adam_step"):
+            self._adam_step = 0
+            self._m_emb = np.zeros_like(self.tok_emb)
+            self._v_emb = np.zeros_like(self.tok_emb)
+            cls_target_w = self.wcls if not self.shared_weights else self.tok_emb
+            self._m_cls = np.zeros_like(cls_target_w)
+            self._v_cls = np.zeros_like(cls_target_w)
+
+        self._adam_step += 1
+        t_step = self._adam_step
+        beta1_corr = max(1e-7, 1.0 - beta1 ** t_step)
+        beta2_corr = max(1e-7, 1.0 - beta2 ** t_step)
 
         for pos in range(seq_len):
             in_tok = input_tokens[pos]
             target_tok = target_tokens[pos]
             logits = self.forward(in_tok, pos)
+
+            if target_tok < 0 or target_tok >= self.config.vocab_size:
+                continue
 
             e = np.exp(logits - np.max(logits))
             probs = e / np.sum(e)
@@ -759,22 +787,106 @@ class LlamaLLM:
 
             dlogits = probs.copy()
             dlogits[target_tok] -= 1.0
-            dlogits /= seq_len
+            dlogits *= inv_targets
 
             cls_w = self.wcls if not self.shared_weights else self.tok_emb
             g_emb = cls_w.T @ dlogits
-            self.tok_emb[in_tok] -= lr * (g_emb + weight_decay * self.tok_emb[in_tok])
+
+            # AdamW on token embeddings
+            self._m_emb[in_tok] = beta1 * self._m_emb[in_tok] + (1.0 - beta1) * g_emb
+            self._v_emb[in_tok] = beta2 * self._v_emb[in_tok] + (1.0 - beta2) * (g_emb * g_emb)
+            m_hat = self._m_emb[in_tok] / beta1_corr
+            v_hat = self._v_emb[in_tok] / beta2_corr
+            self.tok_emb[in_tok] -= lr * (m_hat / (np.sqrt(v_hat) + eps) + weight_decay * self.tok_emb[in_tok])
 
             # Gradient update for classifier weights
             last_x = getattr(self, "_last_x", None)
             if last_x is not None:
-                cls_w[target_tok] -= lr * (dlogits[target_tok] * last_x + weight_decay * cls_w[target_tok])
+                g_cls_target = dlogits[target_tok] * last_x
+                self._m_cls[target_tok] = beta1 * self._m_cls[target_tok] + (1.0 - beta1) * g_cls_target
+                self._v_cls[target_tok] = beta2 * self._v_cls[target_tok] + (1.0 - beta2) * (g_cls_target * g_cls_target)
+                m_hat_cls = self._m_cls[target_tok] / beta1_corr
+                v_hat_cls = self._v_cls[target_tok] / beta2_corr
+                cls_w[target_tok] -= lr * (m_hat_cls / (np.sqrt(v_hat_cls) + eps) + weight_decay * cls_w[target_tok])
+
                 if self.config.vocab_size <= 1024:
                     for v in range(self.config.vocab_size):
                         if v != target_tok:
-                            cls_w[v] -= lr * (dlogits[v] * last_x + weight_decay * cls_w[v])
+                            g_v = dlogits[v] * last_x
+                            self._m_cls[v] = beta1 * self._m_cls[v] + (1.0 - beta1) * g_v
+                            self._v_cls[v] = beta2 * self._v_cls[v] + (1.0 - beta2) * (g_v * g_v)
+                            m_h = self._m_cls[v] / beta1_corr
+                            v_h = self._v_cls[v] / beta2_corr
+                            cls_w[v] -= lr * (m_h / (np.sqrt(v_h) + eps) + weight_decay * cls_w[v])
 
-        return total_loss / seq_len
+        return total_loss / active_targets
+
+    def _prepare_training_batches(
+        self,
+        text: str,
+        seq_len: int,
+        mask_prompts: bool = True,
+        max_batches: Optional[int] = None,
+    ) -> List[Tuple[List[int], List[int]]]:
+        """Convert training text into paired (input_seq, target_seq) training chunks.
+
+        If conversational dialogue format is detected (User:/Zexo: or User:/Assistant:),
+        it applies SFT instruction masking so prompt tokens have target=-1 (ignored in loss),
+        and responses have their true token targets.
+        """
+        batches = []
+        is_dialogue = bool(re.search(r'(?:^|\n)User:\s*', text, re.IGNORECASE))
+
+        if is_dialogue and mask_prompts:
+            print(f"🔤 Parsing and tokenizing conversational dialogues ({len(text):,} chars)...", flush=True)
+            raw_dialogues = [d.strip() for d in re.split(r'\n\s*\n(?=User:)', text, flags=re.IGNORECASE) if d.strip()]
+            turn_pattern = re.compile(r'(User:\s*.*?\n(?:Zexo|Assistant):\s*)(.*?)(?=(?:\nUser:|$))', re.DOTALL | re.IGNORECASE)
+            total_d = len(raw_dialogues)
+            log_interval = max(500, total_d // 10)
+
+            for d_idx, d in enumerate(raw_dialogues):
+                if max_batches is not None and len(batches) >= max_batches:
+                    break
+                if total_d > 500 and (d_idx + 1) % log_interval == 0:
+                    pct = (d_idx + 1) / total_d * 100.0
+                    print(f"   Tokenized {d_idx + 1:,}/{total_d:,} dialogues ({pct:5.1f}%) -> {len(batches):,} batches packed", flush=True)
+
+                matches = list(turn_pattern.finditer(d))
+                if not matches:
+                    continue
+                d_inputs = []
+                d_targets = []
+                for m in matches:
+                    prompt_text = m.group(1)
+                    resp_text = m.group(2).strip() + "\n"
+                    p_toks = self.tokenizer.encode(prompt_text, bos=False)
+                    r_toks = self.tokenizer.encode(resp_text, bos=False)
+                    turn_tokens = p_toks + r_toks
+                    turn_targets = [-1] * len(p_toks) + r_toks
+                    d_inputs.extend(turn_tokens[:-1])
+                    d_targets.extend(turn_targets[1:])
+
+                # Window dialogue into chunks of length seq_len
+                for j in range(0, len(d_inputs), seq_len):
+                    chunk_in = d_inputs[j : j + seq_len]
+                    chunk_tgt = d_targets[j : j + seq_len]
+                    if len(chunk_in) >= 4 and any(t >= 0 for t in chunk_tgt):
+                        batches.append((chunk_in, chunk_tgt))
+                        if max_batches is not None and len(batches) >= max_batches:
+                            break
+            print(f"📦 Packed {len(batches):,} training batches ({len(batches) * seq_len:,} sequence tokens).", flush=True)
+        else:
+            print(f"🔤 Tokenizing pretraining corpus ({len(text):,} chars)...", flush=True)
+            tokens = self.tokenizer.encode(text, bos=False)
+            if len(tokens) < seq_len + 1:
+                tokens = tokens * ((seq_len + 2) // max(1, len(tokens)) + 1)
+            for j in range(0, len(tokens) - seq_len, seq_len):
+                batches.append((tokens[j : j + seq_len], tokens[j + 1 : j + seq_len + 1]))
+                if max_batches is not None and len(batches) >= max_batches:
+                    break
+            print(f"📦 Packed {len(batches):,} training batches ({len(batches) * seq_len:,} sequence tokens).", flush=True)
+
+        return batches
 
     def train(
         self,
@@ -784,48 +896,76 @@ class LlamaLLM:
         seq_len: int = 32,
         weight_decay: float = 0.01,
         verbose: int = 1,
+        mask_prompts: bool = True,
+        max_batches: Optional[int] = None,
     ) -> dict:
         """Fine-tune the model on custom text with cross-entropy loss and in-place updates.
 
         Args:
             text: Training text corpus.
             epochs: Number of complete passes over the text.
-            lr: Learning rate for parameter updates.
+            lr: Peak learning rate for parameter updates.
             seq_len: Chunk length for training sequences.
             weight_decay: L2 regularization factor.
             verbose: 1 to print epoch progress, 0 to silence.
+            mask_prompts: If True and dialogue tags are present, mask prompt tokens.
+            max_batches: Maximum batches/steps per epoch.
 
         Returns:
             Dictionary containing 'loss' history list.
         """
-        tokens = self.tokenizer.encode(text, bos=False)
-        if len(tokens) < seq_len + 1:
-            tokens = tokens * ((seq_len + 2) // max(1, len(tokens)) + 1)
+        batches = self._prepare_training_batches(text, seq_len=seq_len, mask_prompts=mask_prompts, max_batches=max_batches)
+        if not batches:
+            raise ValueError("No training batches generated from corpus.")
 
         history = {"loss": []}
-        total_steps = max(1, (len(tokens) - seq_len) // seq_len)
-        print_interval = max(1, total_steps // 20)  # log every 5% of epoch
+        total_steps_per_epoch = len(batches)
+        total_steps = total_steps_per_epoch * epochs
+        warmup_steps = max(1, int(0.05 * total_steps))
+        min_lr = lr * 0.1
+        log_step_cadence = min(25, max(1, total_steps_per_epoch // 20))
 
+        if verbose:
+            print(f"🚀 Starting training: {epochs} epochs, {total_steps_per_epoch:,} steps/epoch ({total_steps:,} total steps)...", flush=True)
+
+        global_step = 0
         for ep in range(1, epochs + 1):
             ep_loss = 0.0
             steps = 0
             t_ep_start = time.perf_counter()
-            for i in range(0, len(tokens) - seq_len, seq_len):
-                in_seq = tokens[i : i + seq_len]
-                target_seq = tokens[i + 1 : i + seq_len + 1]
-                loss = self.train_step(in_seq, target_seq, lr=lr, weight_decay=weight_decay)
+            last_print_time = t_ep_start
+
+            for in_seq, target_seq in batches:
+                # Cosine learning rate schedule with linear warmup
+                if global_step < warmup_steps:
+                    cur_lr = lr * ((global_step + 1) / warmup_steps)
+                else:
+                    progress = (global_step - warmup_steps) / max(1, total_steps - warmup_steps)
+                    cur_lr = min_lr + 0.5 * (lr - min_lr) * (1.0 + math.cos(math.pi * progress))
+
+                loss = self.train_step(in_seq, target_seq, lr=cur_lr, weight_decay=weight_decay)
                 ep_loss += loss
                 steps += 1
+                global_step += 1
 
-                if verbose and (steps % print_interval == 0 or steps == total_steps):
-                    elapsed = time.perf_counter() - t_ep_start
+                now = time.perf_counter()
+                should_log = (
+                    steps in (1, 2, 3, 5, 10, 20, 50)
+                    or (steps % log_step_cadence == 0)
+                    or (steps == total_steps_per_epoch)
+                    or (now - last_print_time >= 3.0)
+                )
+
+                if verbose and should_log:
+                    last_print_time = now
+                    elapsed = now - t_ep_start
                     tok_sec = (steps * seq_len) / max(1e-4, elapsed)
-                    rem_steps = total_steps - steps
+                    rem_steps = total_steps_per_epoch - steps
                     eta_sec = rem_steps / max(1e-4, steps / elapsed)
-                    pct = (steps / total_steps) * 100.0
+                    pct = (steps / total_steps_per_epoch) * 100.0
                     print(
-                        f"  [Epoch {ep}/{epochs}] Step {steps:,}/{total_steps:,} ({pct:5.1f}%) "
-                        f"| Loss: {loss:6.4f} | {tok_sec:,.0f} tok/s | ETA: {eta_sec:.0f}s",
+                        f"  [Epoch {ep}/{epochs}] Step {steps:,}/{total_steps_per_epoch:,} ({pct:5.1f}%) "
+                        f"| Loss: {loss:6.4f} | LR: {cur_lr:.2e} | {tok_sec:,.0f} tok/s | ETA: {eta_sec:.0f}s",
                         flush=True
                     )
 

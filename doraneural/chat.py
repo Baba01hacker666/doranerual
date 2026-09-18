@@ -62,6 +62,7 @@ class ChatSession:
         temperature: float = 0.7,
         top_p: float = 0.9,
         stop_sequences: Optional[List[str]] = None,
+        assistant_prefix: str = "Assistant",
     ) -> None:
         self.llm = llm
         self.system_prompt = system_prompt
@@ -70,6 +71,7 @@ class ChatSession:
         self.temperature = float(temperature)
         self.top_p = float(top_p)
         self.stop_sequences = stop_sequences or list(self.DEFAULT_STOP_SEQUENCES)
+        self.assistant_prefix = assistant_prefix
 
         self.messages: List[ChatMessage] = []
         self.total_tokens_generated: int = 0
@@ -88,12 +90,9 @@ class ChatSession:
         """Count tokens in a text string using the model's tokenizer."""
         return len(self.llm.tokenizer.encode(text, bos=False))
 
-    # Label used as the assistant prefix — must match what the model was trained on
-    ASSISTANT_PREFIX: str = "Zexo"
-
     def format_prompt(self, pending_user_input: Optional[str] = None) -> str:
         """Format the active message history into a dialogue prompt string."""
-        prefix = self.ASSISTANT_PREFIX
+        prefix = self.assistant_prefix
         lines: List[str] = []
         if self.system_prompt:
             lines.append(f"System: {self.system_prompt}")

@@ -36,6 +36,7 @@ class ZexoModel:
             llm=self.llm,
             system_prompt=self.system_prompt,
             stop_sequences=ZEXO_STOP_SEQUENCES,
+            assistant_prefix="Zexo",
         )
 
     def chat(
@@ -69,9 +70,19 @@ class ZexoModel:
         lr: float = 5e-4,
         seq_len: int = 16,
         verbose: int = 1,
+        mask_prompts: bool = True,
+        max_batches: Optional[int] = None,
     ) -> dict:
         """Fine-tune Zexo on custom text or conversational dialogue."""
-        return self.llm.train(text, epochs=epochs, lr=lr, seq_len=seq_len, verbose=verbose)
+        return self.llm.train(
+            text,
+            epochs=epochs,
+            lr=lr,
+            seq_len=seq_len,
+            verbose=verbose,
+            mask_prompts=mask_prompts,
+            max_batches=max_batches,
+        )
 
     def reset(self) -> None:
         """Clear active conversation context and model KV cache."""
@@ -126,10 +137,10 @@ def load_zexo(
             url = "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories260K/tok512.bin"
         else:
             tok_p = tok_dir / "tokenizer.json"
-            url = "https://huggingface.co/arnir0/Tiny-LLM/resolve/main/tokenizer.json"
         try:
             print(f"📥 Auto-downloading tokenizer: {tok_p.name}...")
-            urllib.request.urlretrieve(url, tok_p)
+            from doraneural.hf_dataset import download_file_to_disk
+            download_file_to_disk(url, tok_p)
         except Exception as err:
             print(f"⚠️ Tokenizer download failed: {err}")
 
