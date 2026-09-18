@@ -223,6 +223,18 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
         lib.llama_sample_token.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float]
         lib.llama_sample_token.restype = ctypes.c_int
 
+        if hasattr(lib, "llama_get_cpu_arch"):
+            lib.llama_get_cpu_arch.argtypes = []
+            lib.llama_get_cpu_arch.restype = ctypes.c_char_p
+
+        if hasattr(lib, "llama_get_cpu_backend"):
+            lib.llama_get_cpu_backend.argtypes = []
+            lib.llama_get_cpu_backend.restype = ctypes.c_char_p
+
+        if hasattr(lib, "llama_print_cpu_features"):
+            lib.llama_print_cpu_features.argtypes = []
+            lib.llama_print_cpu_features.restype = None
+
         _LIB_HANDLE = lib
         return _LIB_HANDLE
     except Exception as e:
@@ -233,6 +245,31 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
 def is_cpp_available() -> bool:
     """Return True if C++ engine is compiled and available."""
     return get_cpp_library() is not None
+
+
+def get_cpu_arch() -> str:
+    """Return detected CPU architecture ('ARM64', 'x86_64', etc.)."""
+    lib = get_cpp_library()
+    if lib and hasattr(lib, "llama_get_cpu_arch"):
+        res = lib.llama_get_cpu_arch()
+        return res.decode("utf-8") if res else "Unknown"
+    return "Unknown"
+
+
+def get_cpu_backend() -> str:
+    """Return active optimal kernel dispatch backend ('ARM_NEON', 'AVX512_VNNI', etc.)."""
+    lib = get_cpp_library()
+    if lib and hasattr(lib, "llama_get_cpu_backend"):
+        res = lib.llama_get_cpu_backend()
+        return res.decode("utf-8") if res else "SCALAR"
+    return "SCALAR"
+
+
+def print_cpu_features() -> None:
+    """Print detected CPU hardware SIMD features and active dispatch."""
+    lib = get_cpp_library()
+    if lib and hasattr(lib, "llama_print_cpu_features"):
+        lib.llama_print_cpu_features()
 
 
 class CppLlamaEngine:

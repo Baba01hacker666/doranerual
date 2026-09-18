@@ -143,6 +143,9 @@ from .cpp_backend import (
     CppLlamaEngine,
     is_cpp_available,
     build_cpp_library,
+    get_cpu_arch,
+    get_cpu_backend,
+    print_cpu_features,
 )
 from .plot import plot_ascii_curve, plot_history
 from .export import export_to_standalone_python
@@ -286,6 +289,9 @@ __all__ = [
     "CppLlamaEngine",
     "is_cpp_available",
     "build_cpp_library",
+    "get_cpu_arch",
+    "get_cpu_backend",
+    "print_cpu_features",
     # Interactive Chat & Context Manager
     "ChatSession",
     "ChatMessage",

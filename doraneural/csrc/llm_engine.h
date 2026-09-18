@@ -88,6 +88,11 @@ void llama_set_threads(int num_threads);
 // Sampling
 int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p);
 
+// Hardware Architecture Detection & Dispatch
+const char* llama_get_cpu_arch();
+const char* llama_get_cpu_backend();
+void llama_print_cpu_features();
+
 #ifdef __cplusplus
 }
 #endif

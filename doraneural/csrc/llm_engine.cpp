@@ -1,4 +1,6 @@
 #include "llm_engine.h"
+#include "cpu_features.h"
+#include "kernel_dispatch.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -729,6 +731,18 @@ void llama_set_threads(int num_threads){
 #ifdef _OPENMP
     if(num_threads>0) omp_set_num_threads(num_threads);
 #endif
+}
+
+const char* llama_get_cpu_arch() {
+    return detect_cpu_features().arch_name;
+}
+
+const char* llama_get_cpu_backend() {
+    return detect_cpu_features().optimal_backend;
+}
+
+void llama_print_cpu_features() {
+    print_cpu_features();
 }
 
 void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits){

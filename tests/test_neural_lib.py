@@ -108,6 +108,8 @@ from doraneural import (
     load_pretrained_llm,
     load_safetensors,
     is_cpp_available,
+    get_cpu_arch,
+    get_cpu_backend,
     CppLlamaEngine,
     ChatSession,
     ChatMessage,
@@ -1783,6 +1785,15 @@ class TestLlamaLLM(unittest.TestCase):
 
         self.assertEqual(int(np.argmax(np_logits)), int(np.argmax(cpp_logits)))
         np.testing.assert_allclose(np_logits, cpp_logits, atol=1e-4)
+
+    def test_cpu_architecture_and_feature_detection(self):
+        """Verify CPU architecture detector returns valid arch and optimal backend."""
+        if not is_cpp_available():
+            self.skipTest("C++ engine not available")
+        arch = get_cpu_arch()
+        backend = get_cpu_backend()
+        self.assertIn(arch, ["ARM64", "x86_64", "x86_32", "ARM32", "Generic"])
+        self.assertIn(backend, ["ARM_NEON_DOTPROD", "ARM_NEON", "AVX512_VNNI", "AVX2_FMA", "SCALAR"])
 
 
 class TestChatSession(unittest.TestCase):
