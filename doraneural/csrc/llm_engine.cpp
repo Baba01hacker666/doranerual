@@ -980,7 +980,8 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
             const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table;
             matmul_forward(engine->logits.data(), engine->x.data(), cls_w, p.dim, p.vocab_size);
         }
-        std::memcpy(out_logits, engine->logits.data(), (size_t)p.vocab_size*sizeof(float));
+        if (out_logits != engine->logits.data())
+            std::memcpy(out_logits, engine->logits.data(), (size_t)p.vocab_size*sizeof(float));
         if(prof) engine->profile.classifier_us += elapsed_us(t_cls, now());
     }
 

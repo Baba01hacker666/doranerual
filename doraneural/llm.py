@@ -487,9 +487,10 @@ class LlamaLLM:
         # Precompute RoPE frequency tables for NumPy engine
         half = p.head_size // 2
         dim_idx = np.arange(half, dtype=np.float32)
-        self._rope_inv_freq = 1.0 / (10000.0 ** (2.0 * dim_idx / p.head_size))
+        _theta = float(getattr(p, "rope_theta", 10000.0) or 10000.0)
+        self._rope_inv_freq = 1.0 / (_theta ** (2.0 * dim_idx / p.head_size))
         dim_idx_inter = np.arange(0, p.head_size, 2, dtype=np.float32)
-        self._rope_inv_freq_interleaved = 1.0 / (10000.0 ** (dim_idx_inter / p.head_size))
+        self._rope_inv_freq_interleaved = 1.0 / (_theta ** (dim_idx_inter / p.head_size))
 
         # C++ Backend Integration
         self.weights_dict = {
@@ -581,12 +582,22 @@ class LlamaLLM:
         vocab_size = cfg["vocab_size"]
         seq_len = cfg.get("max_position_embeddings", 1024)
         tie_embeddings = cfg.get("tie_word_embeddings", True)
+        rope_theta = float(cfg.get("rope_theta", 10000.0))
+        _eos_raw = cfg.get("eos_token_id", 2)
+        if isinstance(_eos_raw, (list, tuple)):
+            eos_token_id = int(_eos_raw[0]) if len(_eos_raw) > 0 else 2
+        elif _eos_raw is None:
+            eos_token_id = 2
+        else:
+            eos_token_id = int(_eos_raw)
 
         self.config = LlamaConfig(
             dim=dim, hidden_dim=hidden_dim, n_layers=n_layers,
             n_heads=n_heads, n_kv_heads=n_kv_heads,
             vocab_size=vocab_size, seq_len=seq_len,
             rope_type="hf",
+            rope_theta=rope_theta,
+            eos_token_id=eos_token_id,
         )
 
         tensors = load_safetensors(self.model_path)
@@ -753,13 +764,42 @@ class LlamaLLM:
         self._last_x = x
         return self.wcls @ x
 
-    def sample(self, logits: np.ndarray, temperature: float = 0.7, top_p: float = 0.9) -> int:
-        """Sample next token from logits using nucleus (top-p) and temperature."""
+    def sample(self, logits: np.ndarray, temperature: float = 0.7, top_p: float = 0.9, top_k: int = 0) -> int:
+        """Sample next token from logits using top-k, nucleus (top-p) and temperature."""
+        if top_k < 0:
+            raise ValueError(f"top_k must be non-negative, got {top_k}")
         if temperature <= 0.0:
             return int(np.argmax(logits))
 
         logits = logits / max(1e-4, temperature)
         probs = self._softmax(logits)
+        vocab_size = len(probs)
+
+        # Apply top-k cutoff first (matches C++ llama_sample_token_ex).
+        if top_k > 0 and top_k < vocab_size:
+            part_idx = np.argpartition(probs, -top_k)[-top_k:]
+            part_probs = probs[part_idx]
+            sort_order = np.argsort(part_probs)[::-1]
+            sorted_indices = part_idx[sort_order]
+            sorted_probs = part_probs[sort_order]
+            if top_p >= 1.0:
+                s = np.sum(sorted_probs)
+                if s > 0:
+                    sorted_probs = sorted_probs / s
+                selected_idx = np.random.choice(len(sorted_probs), p=sorted_probs)
+                return int(sorted_indices[selected_idx])
+            cumsum = np.cumsum(sorted_probs)
+            cutoff_mask = cumsum > top_p
+            cutoff_mask[0] = False  # Keep at least the top-1 choice
+            sorted_probs = sorted_probs.copy()
+            sorted_probs[cutoff_mask] = 0.0
+            s = np.sum(sorted_probs)
+            if s > 0:
+                sorted_probs /= s
+            else:
+                sorted_probs[0] = 1.0
+            selected_idx = np.random.choice(len(sorted_probs), p=sorted_probs)
+            return int(sorted_indices[selected_idx])
 
         if top_p < 1.0:
             vocab_size = len(probs)
@@ -881,7 +921,7 @@ class LlamaLLM:
                     if pos >= self.config.seq_len - 1:
                         break
 
-                    next_token = self.sample(logits, temperature=temperature, top_p=top_p)
+                    next_token = self.sample(logits, temperature=temperature, top_p=top_p, top_k=top_k)
                     if next_token == eos_id:
                         break
 
