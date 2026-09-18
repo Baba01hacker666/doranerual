@@ -12,19 +12,22 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
+#endif
 
 namespace {
 
-inline float fast_silu(float x) {
-    if (x < -6.0f) return 0.0f;
-    if (x > 6.0f) return x;
+inline float silu(float x) {
+    if (x > 88.0f) return x;
+    if (x < -88.0f) return 0.0f;
     return x / (1.0f + expf(-x));
 }
-inline float silu(float x) {
-    if (x > 20.0f) return x;
-    if (x < -20.0f) return 0.0f;
-    return x / (1.0f + expf(-x));
+inline float fast_silu(float x) {
+    return silu(x);
 }
 inline float silu_deriv(float x) {
     if (x > 88.0f) return 1.0f;
@@ -115,6 +118,25 @@ inline float dot_product_simd(const float* __restrict__ a, const float* __restri
     for (; j + 15 < n; j += 16) { __m256 va0 = _mm256_loadu_ps(a + j); __m256 vb0 = _mm256_loadu_ps(b + j); sum0 = _mm256_fmadd_ps(va0, vb0, sum0); __m256 va1 = _mm256_loadu_ps(a + j + 8); __m256 vb1 = _mm256_loadu_ps(b + j + 8); sum1 = _mm256_fmadd_ps(va1, vb1, sum1); }
     __m256 vsum = _mm256_add_ps(sum0, sum1); __m128 vlow = _mm256_castps256_ps128(vsum); __m128 vhigh = _mm256_extractf128_ps(vsum, 1); __m128 vs = _mm_add_ps(vlow, vhigh); vs = _mm_hadd_ps(vs, vs); vs = _mm_hadd_ps(vs, vs); float acc = _mm_cvtss_f32(vs);
     for (; j < n; j++) acc += a[j] * b[j]; return acc;
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    int j = 0;
+    float32x4_t sum0 = vdupq_n_f32(0.0f);
+    float32x4_t sum1 = vdupq_n_f32(0.0f);
+    for (; j + 7 < n; j += 8) {
+        float32x4_t a0 = vld1q_f32(a + j);
+        float32x4_t b0 = vld1q_f32(b + j);
+        sum0 = vfmaq_f32(sum0, a0, b0);
+        float32x4_t a1 = vld1q_f32(a + j + 4);
+        float32x4_t b1 = vld1q_f32(b + j + 4);
+        sum1 = vfmaq_f32(sum1, a1, b1);
+    }
+    for (; j + 3 < n; j += 4) {
+        float32x4_t a0 = vld1q_f32(a + j);
+        float32x4_t b0 = vld1q_f32(b + j);
+        sum0 = vfmaq_f32(sum0, a0, b0);
+    }
+    float acc = vaddvq_f32(vaddq_f32(sum0, sum1));
+    for (; j < n; j++) acc += a[j] * b[j]; return acc;
 #else
     float acc = 0.0f; for (int j = 0; j < n; j++) acc += a[j] * b[j]; return acc;
 #endif
@@ -133,6 +155,22 @@ void rmsnorm_forward(float* __restrict__ out, const float* __restrict__ x, const
     for (; i + 15 < size; i += 16) { __m256 v0 = _mm256_loadu_ps(x + i); __m256 v1 = _mm256_loadu_ps(x + i + 8); vsum0 = _mm256_fmadd_ps(v0, v0, vsum0); vsum1 = _mm256_fmadd_ps(v1, v1, vsum1); }
     __m256 vsum = _mm256_add_ps(vsum0, vsum1); __m128 low = _mm256_castps256_ps128(vsum); __m128 high = _mm256_extractf128_ps(vsum, 1); __m128 s = _mm_add_ps(low, high); s = _mm_hadd_ps(s, s); s = _mm_hadd_ps(s, s); sum_sq = _mm_cvtss_f32(s);
     for (; i < size; i++) sum_sq += x[i] * x[i];
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    int i = 0;
+    float32x4_t sum_vec0 = vdupq_n_f32(0.0f);
+    float32x4_t sum_vec1 = vdupq_n_f32(0.0f);
+    for (; i + 7 < size; i += 8) {
+        float32x4_t v0 = vld1q_f32(x + i);
+        float32x4_t v1 = vld1q_f32(x + i + 4);
+        sum_vec0 = vfmaq_f32(sum_vec0, v0, v0);
+        sum_vec1 = vfmaq_f32(sum_vec1, v1, v1);
+    }
+    for (; i + 3 < size; i += 4) {
+        float32x4_t v0 = vld1q_f32(x + i);
+        sum_vec0 = vfmaq_f32(sum_vec0, v0, v0);
+    }
+    sum_sq = vaddvq_f32(vaddq_f32(sum_vec0, sum_vec1));
+    for (; i < size; i++) sum_sq += x[i] * x[i];
 #else
     for (int i = 0; i < size; i++) sum_sq += x[i] * x[i];
 #endif
@@ -145,6 +183,23 @@ void rmsnorm_forward(float* __restrict__ out, const float* __restrict__ x, const
 #elif defined(__AVX2__)
     __m256 vinv = _mm256_set1_ps(inv_rms); int i2 = 0;
     for (; i2 + 7 < size; i2 += 8) { __m256 vx = _mm256_loadu_ps(x + i2); __m256 vw = _mm256_loadu_ps(weight + i2); __m256 vo = _mm256_mul_ps(_mm256_mul_ps(vx, vinv), vw); _mm256_storeu_ps(out + i2, vo); }
+    for (; i2 < size; i2++) out[i2] = x[i2] * inv_rms * weight[i2];
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    float32x4_t inv_rms_vec = vdupq_n_f32(inv_rms);
+    int i2 = 0;
+    for (; i2 + 7 < size; i2 += 8) {
+        float32x4_t v0 = vld1q_f32(x + i2);
+        float32x4_t w0 = vld1q_f32(weight + i2);
+        float32x4_t v1 = vld1q_f32(x + i2 + 4);
+        float32x4_t w1 = vld1q_f32(weight + i2 + 4);
+        vst1q_f32(out + i2, vmulq_f32(vmulq_f32(v0, inv_rms_vec), w0));
+        vst1q_f32(out + i2 + 4, vmulq_f32(vmulq_f32(v1, inv_rms_vec), w1));
+    }
+    for (; i2 + 3 < size; i2 += 4) {
+        float32x4_t v0 = vld1q_f32(x + i2);
+        float32x4_t w0 = vld1q_f32(weight + i2);
+        vst1q_f32(out + i2, vmulq_f32(vmulq_f32(v0, inv_rms_vec), w0));
+    }
     for (; i2 < size; i2++) out[i2] = x[i2] * inv_rms * weight[i2];
 #else
     for (int i = 0; i < size; i++) out[i] = x[i] * inv_rms * weight[i];
@@ -386,6 +441,38 @@ void matmul_forward(float* __restrict__ y, const float* __restrict__ x, const fl
         auto hsum256 = [](__m256 a, __m256 b){ __m256 s=_mm256_add_ps(a,b); __m128 low=_mm256_castps256_ps128(s); __m128 high=_mm256_extractf128_ps(s,1); __m128 ss=_mm_add_ps(low,high); ss=_mm_hadd_ps(ss,ss); ss=_mm_hadd_ps(ss,ss); return _mm_cvtss_f32(ss); };
         float acc0 = hsum256(vsum0_a, vsum0_b); float acc1 = rows > 1 ? hsum256(vsum1_a, vsum1_b) : 0.0f; float acc2 = rows > 2 ? hsum256(vsum2_a, vsum2_b) : 0.0f; float acc3 = rows > 3 ? hsum256(vsum3_a, vsum3_b) : 0.0f;
         for (; j < n; j++) { float xj = x[j]; acc0 += r0[j] * xj; if (rows > 1) acc1 += r1[j] * xj; if (rows > 2) acc2 += r2[j] * xj; if (rows > 3) acc3 += r3[j] * xj; }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+        float32x4_t s0_0 = vdupq_n_f32(0.0f), s0_1 = vdupq_n_f32(0.0f);
+        float32x4_t s1_0 = vdupq_n_f32(0.0f), s1_1 = vdupq_n_f32(0.0f);
+        float32x4_t s2_0 = vdupq_n_f32(0.0f), s2_1 = vdupq_n_f32(0.0f);
+        float32x4_t s3_0 = vdupq_n_f32(0.0f), s3_1 = vdupq_n_f32(0.0f);
+        int j = 0;
+        for (; j + 7 < n; j += 8) {
+            float32x4_t vx0 = vld1q_f32(x + j);
+            float32x4_t vx1 = vld1q_f32(x + j + 4);
+            if (rows > 0) { s0_0 = vfmaq_f32(s0_0, vld1q_f32(r0 + j), vx0); s0_1 = vfmaq_f32(s0_1, vld1q_f32(r0 + j + 4), vx1); }
+            if (rows > 1) { s1_0 = vfmaq_f32(s1_0, vld1q_f32(r1 + j), vx0); s1_1 = vfmaq_f32(s1_1, vld1q_f32(r1 + j + 4), vx1); }
+            if (rows > 2) { s2_0 = vfmaq_f32(s2_0, vld1q_f32(r2 + j), vx0); s2_1 = vfmaq_f32(s2_1, vld1q_f32(r2 + j + 4), vx1); }
+            if (rows > 3) { s3_0 = vfmaq_f32(s3_0, vld1q_f32(r3 + j), vx0); s3_1 = vfmaq_f32(s3_1, vld1q_f32(r3 + j + 4), vx1); }
+        }
+        for (; j + 3 < n; j += 4) {
+            float32x4_t vx = vld1q_f32(x + j);
+            if (rows > 0) s0_0 = vfmaq_f32(s0_0, vld1q_f32(r0 + j), vx);
+            if (rows > 1) s1_0 = vfmaq_f32(s1_0, vld1q_f32(r1 + j), vx);
+            if (rows > 2) s2_0 = vfmaq_f32(s2_0, vld1q_f32(r2 + j), vx);
+            if (rows > 3) s3_0 = vfmaq_f32(s3_0, vld1q_f32(r3 + j), vx);
+        }
+        float acc0 = vaddvq_f32(vaddq_f32(s0_0, s0_1));
+        float acc1 = rows > 1 ? vaddvq_f32(vaddq_f32(s1_0, s1_1)) : 0.0f;
+        float acc2 = rows > 2 ? vaddvq_f32(vaddq_f32(s2_0, s2_1)) : 0.0f;
+        float acc3 = rows > 3 ? vaddvq_f32(vaddq_f32(s3_0, s3_1)) : 0.0f;
+        for (; j < n; j++) {
+            float xj = x[j];
+            acc0 += r0[j] * xj;
+            if (rows > 1) acc1 += r1[j] * xj;
+            if (rows > 2) acc2 += r2[j] * xj;
+            if (rows > 3) acc3 += r3[j] * xj;
+        }
         y[i] = acc0; if (rows > 1) y[i+1] = acc1; if (rows > 2) y[i+2] = acc2; if (rows > 3) y[i+3] = acc3;
 #else
         float acc0=0,acc1=0,acc2=0,acc3=0;
@@ -493,7 +580,8 @@ struct LlamaCppEngine {
             convert_f32_to_f16(weights.wq,wq_fp16.data(),wq_elems); convert_f32_to_f16(weights.wk,wk_fp16.data(),wkv_elems); convert_f32_to_f16(weights.wv,wv_fp16.data(),wkv_elems);
             convert_f32_to_f16(weights.wo,wo_fp16.data(),wo_elems); convert_f32_to_f16(weights.w1,w1_fp16.data(),w1_elems); convert_f32_to_f16(weights.w2,w2_fp16.data(),w2_elems); convert_f32_to_f16(weights.w3,w3_fp16.data(),w3_elems);
             if(weights.wcls) convert_f32_to_f16(weights.wcls,wcls_fp16.data(),wcls_elems); else convert_f32_to_f16(weights.token_embedding_table,wcls_fp16.data(),wcls_elems);
-            use_fp16=true;
+            const char* env_fp16 = std::getenv("DORANEURAL_USE_FP16");
+            use_fp16 = (env_fp16 && (std::strcmp(env_fp16, "1") == 0 || std::strcmp(env_fp16, "true") == 0));
             wq_i8.resize(wq_elems); wk_i8.resize(wkv_elems); wv_i8.resize(wkv_elems); wo_i8.resize(wo_elems); w1_i8.resize(w1_elems); w2_i8.resize(w2_elems); w3_i8.resize(w3_elems); wcls_i8.resize(wcls_elems);
             wq_s.resize((size_t)config.n_layers*config.dim); wk_s.resize((size_t)config.n_layers*kv_dim); wv_s.resize((size_t)config.n_layers*kv_dim); wo_s.resize((size_t)config.n_layers*config.dim);
             w1_s.resize((size_t)config.n_layers*config.hidden_dim); w2_s.resize((size_t)config.n_layers*config.dim); w3_s.resize((size_t)config.n_layers*config.hidden_dim); wcls_s.resize(config.vocab_size);
@@ -510,11 +598,14 @@ struct LlamaCppEngine {
             }
             if(weights.wcls) convert_f32_to_i8(weights.wcls, wcls_i8.data(), wcls_s.data(), wcls_sum.data(), config.vocab_size, config.dim);
             else convert_f32_to_i8(weights.token_embedding_table, wcls_i8.data(), wcls_s.data(), wcls_sum.data(), config.vocab_size, config.dim);
-            use_i8=true;
+            const char* env_i8 = std::getenv("DORANEURAL_USE_INT8");
+            const char* env_fast = std::getenv("DORANEURAL_FAST");
+            use_i8 = ((env_i8 && (std::strcmp(env_i8, "1") == 0 || std::strcmp(env_i8, "true") == 0)) ||
+                      (env_fast && (std::strcmp(env_fast, "1") == 0 || std::strcmp(env_fast, "true") == 0)));
 #if defined(__AVX512VNNI__) && defined(__AVX512BW__)
-            use_vnni=true;
+            use_vnni = use_i8;
 #else
-            use_vnni=false;
+            use_vnni = false;
 #endif
         }catch(...){ use_fp16=false; use_i8=false; use_vnni=false; }
     }
