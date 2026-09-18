@@ -79,6 +79,11 @@ def main():
         help="Hugging Face dataset identifier (e.g. 'yahma/alpaca-cleaned' or 'roneneldan/TinyStories') to auto-download.",
     )
     parser.add_argument(
+        "--hf-config",
+        default=None,
+        help="Hugging Face dataset subset/configuration (e.g. '20231101.simple' or 'wikitext-2-raw-v1').",
+    )
+    parser.add_argument(
         "--hf-samples",
         type=int,
         default=50,
@@ -270,8 +275,8 @@ def main():
             print(f"🤗 Downloading and merging {len(ds_list)} Hugging Face datasets: {ds_list}...")
             corpus_path = dn.download_and_merge_hf_datasets(ds_list, max_samples_each=args.hf_samples)
         else:
-            print(f"🤗 Downloading training dataset from Hugging Face: '{target_hf}'...")
-            corpus_path = dn.download_hf_dataset(target_hf, max_samples=args.hf_samples)
+            print(f"🤗 Downloading training dataset from Hugging Face: '{target_hf}' (config={args.hf_config})...")
+            corpus_path = dn.download_hf_dataset(target_hf, config=args.hf_config, max_samples=args.hf_samples)
     else:
         corpus_path = Path(args.data)
         if not corpus_path.exists():
