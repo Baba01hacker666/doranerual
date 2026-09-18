@@ -881,7 +881,7 @@ class LlamaLLM:
                     if pos >= self.config.seq_len - 1:
                         break
 
-                    next_token = self._sample(logits, temperature=temperature, top_p=top_p)
+                    next_token = self.sample(logits, temperature=temperature, top_p=top_p)
                     if next_token == eos_id:
                         break
 
