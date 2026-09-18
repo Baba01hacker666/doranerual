@@ -1,0 +1,184 @@
+name: Train RTU Latent Engine & Continual Learning
+
+on:
+  workflow_dispatch:
+    inputs:
+      dim:
+        description: "RTU hidden representation dimension (e.g. 128, 256, 384)"
+        required: false
+        default: "256"
+        type: string
+      layers:
+        description: "Number of RTU recurrent layers"
+        required: false
+        default: "4"
+        type: string
+      wiki_max_mb:
+        description: "Max MB of Simple English Wikipedia dataset to download & extract"
+        required: false
+        default: "200"
+        type: string
+      epochs:
+        description: "Number of training epochs"
+        required: false
+        default: "3"
+        type: string
+      learning_rate:
+        description: "Learning rate for parameter updates"
+        required: false
+        default: "0.001"
+        type: string
+      chunk_size:
+        description: "Recurrent chunk sequence size"
+        required: false
+        default: "256"
+        type: string
+      from_scratch:
+        description: "Initialize fresh weights from scratch rather than resuming cached checkpoint"
+        required: false
+        default: false
+        type: boolean
+      test_prompt:
+        description: "Prompt evaluated before and after training"
+        required: false
+        default: "The Solar System is "
+        type: string
+      push_checkpoint_to_git:
+        description: "Commit updated checkpoint back to repository"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  train-rtu:
+    name: Continual RTU Wikipedia Training
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install wikiextractor || true
+
+      - name: Restore Wikipedia Dataset from Cache
+        uses: actions/cache/restore@v4
+        id: wiki-cache
+        with:
+          path: research/rtu_sandbox/data/
+          key: rtu-wikipedia-${{ github.event.inputs.wiki_max_mb || '200' }}mb
+          restore-keys: |
+            rtu-wikipedia-
+
+      - name: Prepare Simple Wikipedia Dataset
+        run: |
+          mkdir -p research/rtu_sandbox/data
+          DATA_FILE="research/rtu_sandbox/data/simplewiki_clean.txt"
+          WIKI_MB="${{ github.event.inputs.wiki_max_mb || '200' }}"
+          if [ -f "$DATA_FILE" ]; then
+            echo "✓ Found cached Wikipedia dataset ($(du -h "$DATA_FILE" | cut -f1)). Skipping download."
+          else
+            echo "📥 Downloading and extracting $WIKI_MB MB of Simple Wikipedia..."
+            python3 research/rtu_sandbox/prepare_wikipedia.py \
+              --output "$DATA_FILE" \
+              --max-mb "$WIKI_MB"
+          fi
+          ls -lh research/rtu_sandbox/data/ || true
+
+      - name: Save Wikipedia Dataset to Cache
+        uses: actions/cache/save@v4
+        if: steps.wiki-cache.outputs.cache-hit != 'true'
+        with:
+          path: research/rtu_sandbox/data/
+          key: rtu-wikipedia-${{ github.event.inputs.wiki_max_mb || '200' }}mb
+
+      - name: Restore Previous RTU Checkpoint from Cache
+        if: ${{ github.event.inputs.from_scratch != 'true' }}
+        uses: actions/cache/restore@v4
+        id: checkpoint-cache
+        with:
+          path: research/rtu_sandbox/checkpoints/
+          key: rtu-checkpoint-${{ github.ref_name }}
+          restore-keys: |
+            rtu-checkpoint-
+
+      - name: Display Checkpoint Status
+        run: |
+          echo "=== RTU Checkpoints Directory Status ==="
+          mkdir -p research/rtu_sandbox/checkpoints
+          ls -lh research/rtu_sandbox/checkpoints/ || true
+          if [ -f "research/rtu_sandbox/checkpoints/latest.npz" ]; then
+            echo "Found previous checkpoint latest.npz ($(du -h research/rtu_sandbox/checkpoints/latest.npz | cut -f1)). Resuming continual learning!"
+          else
+            echo "No prior checkpoint found in cache. Starting fresh from scratch."
+          fi
+
+      - name: Run RTU Continual Training
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          DIM="${{ github.event.inputs.dim || '256' }}"
+          LAYERS="${{ github.event.inputs.layers || '4' }}"
+          EPOCHS="${{ github.event.inputs.epochs || '3' }}"
+          LR="${{ github.event.inputs.learning_rate || '0.001' }}"
+          CHUNK_SIZE="${{ github.event.inputs.chunk_size || '256' }}"
+          PROMPT="${{ github.event.inputs.test_prompt || 'The Solar System is ' }}"
+          FROM_SCRATCH="${{ github.event.inputs.from_scratch || 'false' }}"
+
+          SCRATCH_FLAG=""
+          if [ "$FROM_SCRATCH" = "true" ] || [ ! -f "research/rtu_sandbox/checkpoints/latest.npz" ]; then
+            SCRATCH_FLAG="--from-scratch"
+          fi
+
+          python3 research/rtu_sandbox/train_rtu.py \
+            --data research/rtu_sandbox/data/simplewiki_clean.txt \
+            --dim "$DIM" \
+            --layers "$LAYERS" \
+            --epochs "$EPOCHS" \
+            --lr "$LR" \
+            --chunk-size "$CHUNK_SIZE" \
+            --output-dir research/rtu_sandbox/checkpoints \
+            --test-prompt "$PROMPT" \
+            --tag "rtu_run_${{ github.run_number }}" \
+            $SCRATCH_FLAG
+
+      - name: Save Updated RTU Checkpoint to Cache
+        uses: actions/cache/save@v4
+        if: ${{ success() }}
+        with:
+          path: research/rtu_sandbox/checkpoints/
+          key: rtu-checkpoint-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload Trained RTU Weights Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtu-checkpoint-run-${{ github.run_number }}
+          path: |
+            research/rtu_sandbox/checkpoints/latest.npz
+            research/rtu_sandbox/checkpoints/latest.json
+            research/rtu_sandbox/checkpoints/rtu_run_*.npz
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Commit Updated Checkpoint to Repository (Optional)
+        if: ${{ github.event.inputs.push_checkpoint_to_git == 'true' }}
+        run: |
+          git config --global user.name "baba01hacker666"
+          git config --global user.email "baba01hacker666@users.noreply.github.com"
+          git add research/rtu_sandbox/checkpoints/latest.npz research/rtu_sandbox/checkpoints/latest.json
+          git commit -m "chore(rtu): update continual checkpoint [skip ci]" || echo "No changes to commit"
+          git push origin HEAD || true
