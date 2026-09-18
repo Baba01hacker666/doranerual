@@ -103,8 +103,10 @@ class MSE(Metric):
     """Mean Squared Error metric for regression."""
 
     def __call__(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        yt = np.asarray(y_true, dtype=np.float32)
-        yp = np.asarray(y_pred, dtype=np.float32)
+        yp_raw = np.asarray(y_pred)
+        dtype = yp_raw.dtype if np.issubdtype(yp_raw.dtype, np.floating) else np.dtype(np.float32)
+        yt = np.asarray(y_true, dtype=dtype)
+        yp = np.asarray(y_pred, dtype=dtype)
         return float(np.mean((yt - yp) ** 2))
 
     @property
@@ -116,8 +118,10 @@ class MAE(Metric):
     """Mean Absolute Error metric for regression."""
 
     def __call__(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        yt = np.asarray(y_true, dtype=np.float32)
-        yp = np.asarray(y_pred, dtype=np.float32)
+        yp_raw = np.asarray(y_pred)
+        dtype = yp_raw.dtype if np.issubdtype(yp_raw.dtype, np.floating) else np.dtype(np.float32)
+        yt = np.asarray(y_true, dtype=dtype)
+        yp = np.asarray(y_pred, dtype=dtype)
         return float(np.mean(np.abs(yt - yp)))
 
     @property

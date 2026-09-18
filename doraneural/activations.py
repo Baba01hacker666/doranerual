@@ -10,6 +10,19 @@ import numpy as np
 from .base import Layer
 
 
+# Keep activations on the incoming floating-point dtype.  The previous
+# implementation coerced every tensor to float32, which silently defeated
+# ``model.to_precision("float64")`` and added a cast at every layer.
+def _as_float_array(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x)
+    return arr if np.issubdtype(arr.dtype, np.floating) else arr.astype(np.float32)
+
+
+def _exp_limit(dtype: np.dtype) -> float:
+    """Largest safe magnitude for a stable ``exp(-x)`` calculation."""
+    return float(np.log(np.finfo(dtype).max) - 1.0)
+
+
 class ReLU(Layer):
     """Rectified Linear Unit activation function.
 
@@ -34,7 +47,7 @@ class ReLU(Layer):
         Returns:
             np.ndarray: Output tensor with values clamped at minimum 0.
         """
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = _as_float_array(x)
         self._input_cache = x_arr
         return np.maximum(0.0, x_arr)
 
@@ -51,7 +64,7 @@ class ReLU(Layer):
         if self._input_cache is None:
             raise RuntimeError("ReLU.backward called before forward pass.")
 
-        grad_out = np.asarray(grad_output, dtype=np.float32)
+        grad_out = np.asarray(grad_output, dtype=self._input_cache.dtype if self._input_cache is not None else np.float32)
         if grad_out.shape != self._input_cache.shape:
             raise ValueError(
                 f"Gradient shape {grad_out.shape} does not match cached input shape {self._input_cache.shape}."
@@ -95,9 +108,9 @@ class Sigmoid(Layer):
         Returns:
             np.ndarray: Transformed probabilities in range (0, 1).
         """
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = _as_float_array(x)
         # Clip to prevent float32 overflow in exp(-x)
-        x_clipped = np.clip(x_arr, -88.0, 88.0)
+        x_clipped = np.clip(x_arr, -_exp_limit(x_arr.dtype), _exp_limit(x_arr.dtype))
         out = 1.0 / (1.0 + np.exp(-x_clipped))
         self._output_cache = out
         return out
@@ -114,7 +127,7 @@ class Sigmoid(Layer):
         if self._output_cache is None:
             raise RuntimeError("Sigmoid.backward called before forward pass.")
 
-        grad_out = np.asarray(grad_output, dtype=np.float32)
+        grad_out = np.asarray(grad_output, dtype=self._output_cache.dtype if self._output_cache is not None else np.float32)
         if grad_out.shape != self._output_cache.shape:
             raise ValueError(
                 f"Gradient shape {grad_out.shape} does not match cached output shape {self._output_cache.shape}."
@@ -158,7 +171,7 @@ class Softmax(Layer):
         Returns:
             np.ndarray: Probability distribution across classes summing to 1.
         """
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = _as_float_array(x)
         # Shift x by subtracting max along axis for numerical stability
         shifted_x = x_arr - np.max(x_arr, axis=self.axis, keepdims=True)
         exp_x = np.exp(shifted_x)
@@ -181,7 +194,7 @@ class Softmax(Layer):
         if self._output_cache is None:
             raise RuntimeError("Softmax.backward called before forward pass.")
 
-        grad_out = np.asarray(grad_output, dtype=np.float32)
+        grad_out = np.asarray(grad_output, dtype=self._output_cache.dtype if self._output_cache is not None else np.float32)
         if grad_out.shape != self._output_cache.shape:
             raise ValueError(
                 f"Gradient shape {grad_out.shape} does not match cached output shape {self._output_cache.shape}."
@@ -219,7 +232,7 @@ class Tanh(Layer):
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """Apply Tanh activation forward pass."""
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = _as_float_array(x)
         out = np.tanh(x_arr)
         self._output_cache = out
         return out
@@ -229,7 +242,7 @@ class Tanh(Layer):
         if self._output_cache is None:
             raise RuntimeError("Tanh.backward called before forward pass.")
 
-        grad_out = np.asarray(grad_output, dtype=np.float32)
+        grad_out = np.asarray(grad_output, dtype=self._output_cache.dtype if self._output_cache is not None else np.float32)
         if grad_out.shape != self._output_cache.shape:
             raise ValueError(
                 f"Gradient shape {grad_out.shape} does not match cached output shape {self._output_cache.shape}."
@@ -266,8 +279,8 @@ class SiLU(Layer):
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """Apply SiLU activation forward pass."""
-        x_arr = np.asarray(x, dtype=np.float32)
-        x_clipped = np.clip(x_arr, -88.0, 88.0)
+        x_arr = _as_float_array(x)
+        x_clipped = np.clip(x_arr, -_exp_limit(x_arr.dtype), _exp_limit(x_arr.dtype))
         sig = 1.0 / (1.0 + np.exp(-x_clipped))
         self._input_cache = x_arr
         self._sig_cache = sig
@@ -278,7 +291,7 @@ class SiLU(Layer):
         if self._input_cache is None or self._sig_cache is None:
             raise RuntimeError("SiLU.backward called before forward pass.")
 
-        grad_out = np.asarray(grad_output, dtype=np.float32)
+        grad_out = np.asarray(grad_output, dtype=self._input_cache.dtype if self._input_cache is not None else np.float32)
         if grad_out.shape != self._input_cache.shape:
             raise ValueError(
                 f"Gradient shape {grad_out.shape} does not match cached input shape {self._input_cache.shape}."
@@ -313,16 +326,18 @@ class Inverter(Layer):
         super().__init__()
         self.trainable = False
         self._input_shape = None
+        self._input_dtype = np.dtype(np.float32)
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """Invert signal polarity forward pass."""
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = _as_float_array(x)
         self._input_shape = x_arr.shape
+        self._input_dtype = x_arr.dtype
         return -x_arr
 
     def backward(self, grad_output: np.ndarray) -> np.ndarray:
         """Invert signal polarity backward pass."""
-        grad_out = np.asarray(grad_output, dtype=np.float32)
+        grad_out = np.asarray(grad_output, dtype=self._input_dtype)
         return -grad_out
 
     def to_dict(self) -> Dict[str, Any]:

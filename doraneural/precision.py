@@ -106,27 +106,21 @@ def to_precision(model_or_layer: Any, dtype: Union[str, np.dtype, type]) -> Any:
         for layer in model_or_layer.layers:
             to_precision(layer, target_dt)
 
-        # Cast optimizer state if model is compiled
+        # Cast optimizer state if model is compiled.  Optimizers keep these
+        # dictionaries private (``_m``, ``_v``, ``_velocities`` and ``_buf``),
+        # so only checking public names leaves stale float32 state after a
+        # float64 conversion.
         opt = getattr(model_or_layer, "optimizer", None)
         if opt is not None:
-            # Adam state (m, v)
-            if hasattr(opt, "m"):
-                for k, v in list(opt.m.items()):
-                    if v is not None:
-                        opt.m[k] = v.astype(target_dt)
-            if hasattr(opt, "v"):
-                for k, v in list(opt.v.items()):
-                    if v is not None:
-                        opt.v[k] = v.astype(target_dt)
-            # SGD / RMSprop velocity
-            if hasattr(opt, "velocity"):
-                for k, v in list(opt.velocity.items()):
-                    if v is not None:
-                        opt.velocity[k] = v.astype(target_dt)
-            if hasattr(opt, "v_mean"):
-                for k, v in list(opt.v_mean.items()):
-                    if v is not None:
-                        opt.v_mean[k] = v.astype(target_dt)
+            for state_name in (
+                "m", "v", "velocity", "v_mean",
+                "_m", "_v", "_velocities", "_buf",
+            ):
+                state = getattr(opt, state_name, None)
+                if isinstance(state, dict):
+                    for key, value in list(state.items()):
+                        if value is not None:
+                            state[key] = value.astype(target_dt, copy=False)
 
         return model_or_layer
 
