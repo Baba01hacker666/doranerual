@@ -82,6 +82,15 @@ def initialize_zexo_checkpoint(
         np.ones(p.dim, dtype=np.float32).tofile(f)
         # 12. Legacy frequency table padding
         np.zeros(p.seq_len * p.head_size, dtype=np.float32).tofile(f)
+        # 13. Novel neuron weights if enabled
+        if config.novel_neurons:
+            # Dendritic gating weights (n_layers, hidden_dim, dim)
+            rng.normal(0.0, proj_std * 0.1, (p.n_layers, p.hidden_dim, p.dim)).astype(np.float32).tofile(f)
+            # Chebyshev KAN polynomial coefficients (n_layers, 3, hidden_dim)
+            kan_std = 0.05 / (np.sqrt(p.hidden_dim) * 4.0)
+            rng.normal(0.0, kan_std, (p.n_layers, 3, p.hidden_dim)).astype(np.float32).tofile(f)
+            # Cortical reflection projection (n_layers, dim, dim)
+            rng.normal(0.0, proj_std * 0.1, (p.n_layers, p.dim, p.dim)).astype(np.float32).tofile(f)
 
     # Save JSON configuration alongside binary
     cfg_path = output_path.with_suffix(".json")
@@ -95,7 +104,7 @@ def main():
     parser = argparse.ArgumentParser(description="Initialize base weights for Zexo AI models.")
     parser.add_argument(
         "--tier", "-t",
-        choices=["micro", "mini", "chat", "base", "large"],
+        choices=["micro", "mini", "chat", "base", "large", "dora"],
         default="micro",
         help="Zexo tier to initialize (default: micro).",
     )

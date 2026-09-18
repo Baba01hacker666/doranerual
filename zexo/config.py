@@ -31,6 +31,7 @@ class ZexoConfig:
     vocab_size: int = 32000
     seq_len: int = 1024
     rope_type: str = "interleaved"
+    novel_neurons: bool = False
     system_prompt: str = (
         "You are Zexo, an intelligent, thoughtful, and creative conversational AI assistant. "
         "You communicate with clarity, warmth, and precision. You love helping users explore ideas, "
@@ -53,13 +54,16 @@ class ZexoConfig:
         layer_attn = self.dim + (self.dim * self.dim) + 2 * (self.kv_dim * self.dim) + (self.dim * self.dim)
         layer_ffn = self.dim + 3 * (self.hidden_dim * self.dim)
         per_layer = layer_attn + layer_ffn
+        if self.novel_neurons:
+            novel_per_layer = (self.dim * self.hidden_dim) + (3 * self.hidden_dim) + (self.dim * self.dim)
+            per_layer += novel_per_layer
         final_norm = self.dim
         return emb + (per_layer * self.n_layers) + final_norm
 
     @property
     def llama_config(self) -> LlamaConfig:
         """Convert to doraneural's native LlamaConfig for engine execution."""
-        return LlamaConfig(
+        cfg = LlamaConfig(
             dim=self.dim,
             hidden_dim=self.hidden_dim,
             n_layers=self.n_layers,
@@ -69,12 +73,14 @@ class ZexoConfig:
             seq_len=self.seq_len,
             rope_type=self.rope_type,
         )
+        cfg.novel_neurons = self.novel_neurons
+        return cfg
 
     # ---------------- Predefined Architectural Tiers ----------------
 
     @classmethod
     def micro(cls) -> "ZexoConfig":
-        """Zexo-Micro (280K parameters): Fast CPU testing, prototyping, and CI runners."""
+        """Zexo-Micro (260K parameters): Ultra-lightweight CPU prototyping model."""
         return cls(
             tier="micro",
             dim=64,
@@ -115,6 +121,21 @@ class ZexoConfig:
         )
 
     @classmethod
+    def dora(cls) -> "ZexoConfig":
+        """Zexo-Dora (54M parameters): 12-layer Bio-Reflective KAN Novel-Neuron Transformer."""
+        return cls(
+            tier="dora",
+            dim=512,
+            hidden_dim=1536,
+            n_layers=12,
+            n_heads=8,
+            n_kv_heads=4,
+            vocab_size=32000,
+            seq_len=1024,
+            novel_neurons=True,
+        )
+
+    @classmethod
     def base(cls) -> "ZexoConfig":
         """Zexo-Base (109.5M parameters): Standard conversational base capable of deep reasoning."""
         return cls(
@@ -152,12 +173,14 @@ class ZexoConfig:
             return cls.mini()
         elif t in ("chat", "small"):
             return cls.chat()
+        elif t in ("dora", "neuro", "dora_12"):
+            return cls.dora()
         elif t in ("base", "medium"):
             return cls.base()
         elif t == "large":
             return cls.large()
         else:
-            raise ValueError(f"Unknown Zexo tier '{tier}'. Available: micro, mini, chat, base, large.")
+            raise ValueError(f"Unknown Zexo tier '{tier}'. Available: micro, mini, chat, dora, base, large.")
 
     def to_dict(self) -> Dict[str, any]:
         d = asdict(self)

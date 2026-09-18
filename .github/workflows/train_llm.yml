@@ -12,6 +12,7 @@ on:
           - micro
           - mini
           - chat
+          - dora
           - base
           - large
       dataset:

@@ -101,9 +101,14 @@ def main():
     )
     parser.add_argument(
         "--tier", "-t",
-        choices=["micro", "mini", "chat", "base", "large"],
+        choices=["micro", "mini", "chat", "base", "large", "dora"],
         default="mini",
         help="Zexo tier architecture (default: mini).",
+    )
+    parser.add_argument(
+        "--novel-neurons",
+        action="store_true",
+        help="Enable novel Bio-Reflective KAN neurons (dendritic gating, Chebyshev KAN, reflection).",
     )
     parser.add_argument(
         "--epochs", "-e",
@@ -254,7 +259,9 @@ def main():
     print(" 🤖 Zexo AI Conversational Training Engine")
     print("═" * 72)
     print(f"Run ID:         {run_id}")
+    is_novel = args.novel_neurons or args.tier.lower() == "dora"
     print(f"Target Tier:    {args.tier.upper()}")
+    print(f"Novel Neurons:  {is_novel} (Bio-Reflective KAN)")
     print(f"From Scratch:   {args.from_scratch}")
     mode = "FULL TRANSFORMER BACKPROP" if args.full_backprop else (
         f"LORA ADAPTER (rank {args.lora_rank})" if args.lora_rank is not None else "HEAD-ONLY FAST PATH"
@@ -321,6 +328,9 @@ def main():
     # 2. Load or Initialize Zexo
     print("\n[1/4] Loading Zexo Model...")
     zexo = load_zexo(checkpoint_path=args.checkpoint, tier=args.tier, from_scratch=args.from_scratch)
+    if is_novel:
+        zexo.config.novel_neurons = True
+        zexo.llm.config.novel_neurons = True
     if args.threads is not None:
         # Apply explicitly after engine construction too; this covers a
         # previously loaded shared library and makes the effective setting visible.

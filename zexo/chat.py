@@ -86,7 +86,7 @@ def main():
     )
     parser.add_argument(
         "--tier", "-t",
-        choices=["micro", "mini", "chat", "base", "large"],
+        choices=["micro", "mini", "chat", "base", "large", "dora"],
         default="mini",
         help="Zexo architectural tier (default: mini).",
     )

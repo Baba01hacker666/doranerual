@@ -320,3 +320,61 @@ def test_full_model_uses_existing_llama_tensor_layout_and_syncs_weights(tmp_path
     model.copy_to_llama()
     assert not np.allclose(before, llm.wq)
     np.testing.assert_allclose(llm.wq[0], model.layers[0].wq.data.T)
+
+
+def test_novel_neurons_dora_backprop():
+    """Verify that novel neurons (dendritic gating, Chebyshev KAN, reflection) compute exact gradients and update cleanly."""
+    np.random.seed(42)
+    model = TransformerDecoderLM(
+        dim=16,
+        hidden_dim=32,
+        n_layers=2,
+        n_heads=4,
+        n_kv_heads=2,
+        vocab_size=20,
+        seq_len=16,
+        novel_neurons=True,
+    )
+
+    assert model.layers[0].novel_neurons is True
+    assert model.layers[0].w_dend is not None
+    assert model.layers[0].c_poly is not None
+    assert model.layers[0].w_ref is not None
+
+    optimizer = TensorAdamW(model.parameters(), lr=1e-3)
+    loss = model.loss([1, 2, 3, 4], [2, 3, 4, 5])
+    loss.backward()
+
+    for layer in model.layers:
+        assert layer.w_dend.grad is not None
+        assert np.linalg.norm(layer.w_dend.grad) > 0.0
+        assert layer.c_poly.grad is not None
+        assert np.linalg.norm(layer.c_poly.grad) > 0.0
+        assert layer.w_ref.grad is not None
+        assert np.linalg.norm(layer.w_ref.grad) > 0.0
+
+    dend_before = model.layers[0].w_dend.data.copy()
+    poly_before = model.layers[0].c_poly.data.copy()
+    ref_before = model.layers[0].w_ref.data.copy()
+
+    optimizer.step()
+
+    assert not np.array_equal(dend_before, model.layers[0].w_dend.data)
+    assert not np.array_equal(poly_before, model.layers[0].c_poly.data)
+    assert not np.array_equal(ref_before, model.layers[0].w_ref.data)
+
+
+def test_zexo_config_dora():
+    """Verify ZexoConfig dora tier configuration."""
+    from zexo.config import ZexoConfig
+    cfg = ZexoConfig.dora()
+    assert cfg.tier == "dora"
+    assert cfg.n_layers == 12
+    assert cfg.dim == 512
+    assert cfg.hidden_dim == 1536
+    assert cfg.novel_neurons is True
+    assert cfg.parameter_count > 60_000_000
+
+    cfg_from_tier = ZexoConfig.from_tier("dora")
+    assert cfg_from_tier.tier == "dora"
+    assert cfg_from_tier.novel_neurons is True

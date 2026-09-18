@@ -59,6 +59,7 @@ class LlamaConfig:
     rope_type: str = "interleaved"  # "interleaved" (llama2.c) or "hf" (HuggingFace split-half)
     rope_theta: float = 10000.0
     eos_token_id: int = 2
+    novel_neurons: bool = False
 
     @property
     def head_size(self) -> int:
@@ -502,6 +503,7 @@ class LlamaLLM:
         for _wname in (
             "tok_emb", "rms_att", "wq", "wk", "wv", "wo",
             "rms_ffn", "w1", "w2", "w3", "rms_final", "wcls",
+            "w_dend", "c_poly", "w_ref",
         ):
             _arr = getattr(self, _wname, None)
             if isinstance(_arr, np.ndarray) and (_arr.dtype != np.float32 or not _arr.flags["C_CONTIGUOUS"]):
@@ -579,6 +581,20 @@ class LlamaLLM:
         else:
             self.wcls = take((p.vocab_size, p.dim))
         self.shared_weights = bool(shared_weights)
+
+        # Novel neuron weights if appended to binary checkpoint
+        self.w_dend = None
+        self.c_poly = None
+        self.w_ref = None
+        if offset < len(raw):
+            dend_sz = p.n_layers * p.hidden_dim * p.dim
+            poly_sz = p.n_layers * 3 * p.hidden_dim
+            ref_sz = p.n_layers * p.dim * p.dim
+            if offset + dend_sz + poly_sz + ref_sz <= len(raw):
+                self.w_dend = take((p.n_layers, p.hidden_dim, p.dim))
+                self.c_poly = take((p.n_layers, 3, p.hidden_dim))
+                self.w_ref = take((p.n_layers, p.dim, p.dim))
+                self.config.novel_neurons = True
 
     def _load_safetensors(self, config_path: Optional[Union[str, Path]] = None) -> None:
         """Load weights from HuggingFace SafeTensors format (.safetensors).
@@ -772,7 +788,28 @@ class LlamaLLM:
             xb = self._rmsnorm(x, self.rms_ffn[l])
             gate = self._silu(self.w1[l] @ xb)
             up = self.w3[l] @ xb
-            x += self.w2[l] @ (gate * up)
+
+            if hasattr(self, "w_dend") and self.w_dend is not None:
+                dend_gate = 1.0 / (1.0 + np.exp(-np.clip(self.w_dend[l] @ xb, -88.0, 88.0))) * 2.0
+                up = up * dend_gate
+
+            hidden = gate * up
+
+            if hasattr(self, "c_poly") and self.c_poly is not None:
+                u = np.tanh(hidden)
+                t1 = u
+                t2 = 2.0 * u * u - 1.0
+                t3 = 4.0 * u * u * u - 3.0 * u
+                poly = self.c_poly[l, 0] * t1 + self.c_poly[l, 1] * t2 + self.c_poly[l, 2] * t3
+                hidden = hidden + poly
+
+            down = self.w2[l] @ hidden
+
+            if hasattr(self, "w_ref") and self.w_ref is not None:
+                down_ref = np.tanh(self.w_ref[l] @ down)
+                down = down * 0.75 + down_ref * 0.25
+
+            x += down
 
         # Final RMSNorm and Classifier projection
         x = self._rmsnorm(x, self.rms_final)
@@ -1373,7 +1410,7 @@ class LlamaLLM:
             raise ValueError("validation_split must be in [0, 1)")
         if eval_text is not None and validation_split:
             raise ValueError("Pass either eval_text or validation_split, not both")
-        if native and self.cpp_engine is not None:
+        if native and self.cpp_engine is not None and not getattr(self.config, "novel_neurons", False):
             return self._train_full_native(
                 text, epochs, lr, seq_len, weight_decay, verbose,
                 eval_text, validation_split, stride, shuffle, seed, max_eval_steps,
@@ -1805,6 +1842,11 @@ class LlamaLLM:
 
             if not self.shared_weights and self.wcls is not self.tok_emb:
                 self.wcls.astype(np.float32).tofile(f)
+
+            if getattr(self.config, "novel_neurons", False) and hasattr(self, "w_dend") and self.w_dend is not None:
+                self.w_dend.astype(np.float32).tofile(f)
+                self.c_poly.astype(np.float32).tofile(f)
+                self.w_ref.astype(np.float32).tofile(f)
 
         return out_path
 

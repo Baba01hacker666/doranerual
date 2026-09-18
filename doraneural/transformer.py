@@ -115,6 +115,8 @@ class TransformerDecoderBlock(Module):
         n_kv_heads: int,
         weights: Optional[dict] = None,
         dtype: Any = np.float32,
+        novel_neurons: bool = False,
+        kan_degree: int = 3,
     ) -> None:
         super().__init__()
         if dim % n_heads != 0 or n_heads % n_kv_heads != 0:
@@ -124,6 +126,8 @@ class TransformerDecoderBlock(Module):
         self.n_heads = int(n_heads)
         self.n_kv_heads = int(n_kv_heads)
         self.head_size = self.dim // self.n_heads
+        self.novel_neurons = bool(novel_neurons)
+        self.kan_degree = int(kan_degree)
         w = weights or {}
         self.rms_att = Parameter(w.get("rms_att", np.ones((dim,), dtype=dtype)), dtype=dtype)
         self.wq = Parameter(w.get("wq", _normal(dim, dim, dtype)), dtype=dtype)
@@ -134,6 +138,21 @@ class TransformerDecoderBlock(Module):
         self.w1 = Parameter(w.get("w1", _normal(dim, hidden_dim, dtype)), dtype=dtype)
         self.w2 = Parameter(w.get("w2", _normal(hidden_dim, dim, dtype)), dtype=dtype)
         self.w3 = Parameter(w.get("w3", _normal(dim, hidden_dim, dtype)), dtype=dtype)
+
+        if self.novel_neurons:
+            # 1. Pyramidal Dendritic Gating branch
+            self.w_dend = Parameter(w.get("w_dend", _normal(dim, hidden_dim, dtype) * 0.1), dtype=dtype)
+            # 2. Chebyshev KAN Polynomial Coefficients on hidden dimension: (degree, hidden_dim)
+            kan_std = 0.05 / (np.sqrt(hidden_dim) * (self.kan_degree + 1))
+            self.c_poly = Parameter(w.get("c_poly", (np.random.randn(self.kan_degree, hidden_dim) * kan_std).astype(dtype)), dtype=dtype)
+            # 3. Cortical Reflection projection matrix: (dim, dim)
+            ref_std = 0.02 / np.sqrt(dim)
+            self.w_ref = Parameter(w.get("w_ref", (np.random.randn(dim, dim) * ref_std).astype(dtype)), dtype=dtype)
+        else:
+            self.w_dend = None
+            self.c_poly = None
+            self.w_ref = None
+
         self.lora_q: Optional[LoRAAdapter] = None
         self.lora_k: Optional[LoRAAdapter] = None
         self.lora_v: Optional[LoRAAdapter] = None
@@ -195,8 +214,34 @@ class TransformerDecoderBlock(Module):
         norm_ffn = self._rmsnorm(x, self.rms_ffn)
         gate = self._linear(norm_ffn, self.w1, self.lora_w1)
         up = self._linear(norm_ffn, self.w3, self.lora_w3)
+
+        if self.novel_neurons and self.w_dend is not None:
+            # Pyramidal dendritic multi-branch modulation
+            dend_gate = (norm_ffn @ self.w_dend).sigmoid() * 2.0
+            up = up * dend_gate
+
         silu = gate.sigmoid() * gate
-        x = x + self._linear(silu * up, self.w2, self.lora_w2)
+        hidden = silu * up
+
+        if self.novel_neurons and self.c_poly is not None:
+            # Chebyshev KAN polynomial non-linear expansion
+            u = hidden.tanh()
+            t1 = u
+            t2 = (u * u) * 2.0 - 1.0
+            t3 = (u * u * u) * 4.0 - u * 3.0
+            p_out = t1 * self.c_poly[0] + t2 * self.c_poly[1]
+            if self.kan_degree >= 3:
+                p_out = p_out + t3 * self.c_poly[2]
+            hidden = hidden + p_out
+
+        down = self._linear(hidden, self.w2, self.lora_w2)
+
+        if self.novel_neurons and self.w_ref is not None:
+            # Cortical Reflection top-down refinement loop
+            down_ref = (down @ self.w_ref).tanh()
+            down = down * 0.75 + down_ref * 0.25
+
+        x = x + down
         return x
 
 
@@ -236,6 +281,7 @@ class TransformerDecoderLM(Module):
         self.seq_len = int(seq_len)
         self.rope_type = rope_type
         self.rope_theta = float(kwargs.pop("rope_theta", 10000.0))
+        self.novel_neurons = bool(kwargs.pop("novel_neurons", False))
         w = weights or {}
         self.token_embedding = Parameter(w.get("token_embedding", _normal(vocab_size, dim, dtype)), dtype=dtype)
         layer_weights = w.get("layers") or [{} for _ in range(n_layers)]
@@ -243,6 +289,7 @@ class TransformerDecoderLM(Module):
             TransformerDecoderBlock(
                 dim, hidden_dim, n_heads, n_kv_heads,
                 weights=layer_weights[idx], dtype=dtype,
+                novel_neurons=self.novel_neurons,
             )
             for idx in range(n_layers)
         ]
@@ -256,17 +303,26 @@ class TransformerDecoderLM(Module):
     def from_llama(cls, llm: Any) -> "TransformerDecoderLM":
         """Create a trainable view over an existing ``LlamaLLM`` checkpoint."""
         p = llm.config
+        novel_neurons = getattr(p, "novel_neurons", False)
         layers = []
         for idx in range(p.n_layers):
             # LlamaLLM follows llama2.c/HuggingFace's (out, in) matrix
             # convention. The autograd module uses row-major (in, out)
             # matrices, so transpose projections at the boundary.
-            layers.append({
+            ldict = {
                 "rms_att": llm.rms_att[idx], "wq": llm.wq[idx].T,
                 "wk": llm.wk[idx].T, "wv": llm.wv[idx].T, "wo": llm.wo[idx].T,
                 "rms_ffn": llm.rms_ffn[idx], "w1": llm.w1[idx].T,
                 "w2": llm.w2[idx].T, "w3": llm.w3[idx].T,
-            })
+            }
+            if novel_neurons:
+                if hasattr(llm, "w_dend") and llm.w_dend is not None:
+                    ldict["w_dend"] = llm.w_dend[idx].T
+                if hasattr(llm, "c_poly") and llm.c_poly is not None:
+                    ldict["c_poly"] = llm.c_poly[idx]
+                if hasattr(llm, "w_ref") and llm.w_ref is not None:
+                    ldict["w_ref"] = llm.w_ref[idx].T
+            layers.append(ldict)
         weights = {
             "token_embedding": llm.tok_emb,
             "layers": layers,
@@ -280,6 +336,7 @@ class TransformerDecoderLM(Module):
             n_heads=p.n_heads, n_kv_heads=p.n_kv_heads, vocab_size=p.vocab_size,
             seq_len=p.seq_len, rope_type=p.rope_type, weights=weights,
             dtype=llm.tok_emb.dtype, rope_theta=rope_theta,
+            novel_neurons=novel_neurons,
         )
         if not llm.shared_weights:
             # The classifier is stored as (vocab, dim), already matching the
@@ -605,6 +662,13 @@ class TransformerDecoderLM(Module):
             target.w1[idx][...] = layer.w1.data.T
             target.w2[idx][...] = layer.w2.data.T
             target.w3[idx][...] = layer.w3.data.T
+            if getattr(self, "novel_neurons", False) and layer.novel_neurons:
+                if hasattr(target, "w_dend") and target.w_dend is not None and layer.w_dend is not None:
+                    target.w_dend[idx][...] = layer.w_dend.data.T
+                if hasattr(target, "c_poly") and target.c_poly is not None and layer.c_poly is not None:
+                    target.c_poly[idx][...] = layer.c_poly.data
+                if hasattr(target, "w_ref") and target.w_ref is not None and layer.w_ref is not None:
+                    target.w_ref[idx][...] = layer.w_ref.data.T
         target.rms_final[...] = self.rms_final.data
         if not target.shared_weights:
             target.wcls[...] = self.lm_head.data
