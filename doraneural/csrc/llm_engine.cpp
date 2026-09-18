@@ -293,6 +293,7 @@ inline void matmul_int8_core_4rows(float* y, const float* x, const int8_t* r0, c
     auto hsum = [](__m256 v){ __m128 low=_mm256_castps256_ps128(v); __m128 high=_mm256_extractf128_ps(v,1); __m128 s=_mm_add_ps(low,high); s=_mm_hadd_ps(s,s); s=_mm_hadd_ps(s,s); return _mm_cvtss_f32(s); };
     float acc0 = hsum(vsum0) * s0; float acc1 = rows>1? hsum(vsum1)*s1:0.0f; float acc2 = rows>2? hsum(vsum2)*s2:0.0f; float acc3 = rows>3? hsum(vsum3)*s3:0.0f;
     for (; j < n; j++) { float xj=x[j]; acc0+= (float)r0[j]*xj*s0; if(rows>1) acc1+= (float)r1[j]*xj*s1; if(rows>2) acc2+= (float)r2[j]*xj*s2; if(rows>3) acc3+= (float)r3[j]*xj*s3; }
+    y[0]=acc0; if(rows>1) y[1]=acc1; if(rows>2) y[2]=acc2; if(rows>3) y[3]=acc3;
 #elif defined(__ARM_NEON) || defined(__aarch64__)
     float32x4_t s0_0 = vdupq_n_f32(0.0f), s0_1 = vdupq_n_f32(0.0f);
     float32x4_t s1_0 = vdupq_n_f32(0.0f), s1_1 = vdupq_n_f32(0.0f);
@@ -496,6 +497,7 @@ void matmul_forward(float* __restrict__ y, const float* __restrict__ x, const fl
         auto hsum256 = [](__m256 a, __m256 b){ __m256 s=_mm256_add_ps(a,b); __m128 low=_mm256_castps256_ps128(s); __m128 high=_mm256_extractf128_ps(s,1); __m128 ss=_mm_add_ps(low,high); ss=_mm_hadd_ps(ss,ss); ss=_mm_hadd_ps(ss,ss); return _mm_cvtss_f32(ss); };
         float acc0 = hsum256(vsum0_a, vsum0_b); float acc1 = rows > 1 ? hsum256(vsum1_a, vsum1_b) : 0.0f; float acc2 = rows > 2 ? hsum256(vsum2_a, vsum2_b) : 0.0f; float acc3 = rows > 3 ? hsum256(vsum3_a, vsum3_b) : 0.0f;
         for (; j < n; j++) { float xj = x[j]; acc0 += r0[j] * xj; if (rows > 1) acc1 += r1[j] * xj; if (rows > 2) acc2 += r2[j] * xj; if (rows > 3) acc3 += r3[j] * xj; }
+        y[i] = acc0; if (rows > 1) y[i+1] = acc1; if (rows > 2) y[i+2] = acc2; if (rows > 3) y[i+3] = acc3;
 #elif defined(__ARM_NEON) || defined(__aarch64__)
         float32x4_t s0_0 = vdupq_n_f32(0.0f), s0_1 = vdupq_n_f32(0.0f);
         float32x4_t s1_0 = vdupq_n_f32(0.0f), s1_1 = vdupq_n_f32(0.0f);
