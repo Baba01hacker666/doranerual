@@ -303,29 +303,27 @@ def download_hf_dataset(
     else:
         base_dir = Path(cache_dir or (Path.home() / ".cache" / "doraneural" / "datasets"))
         base_dir.mkdir(parents=True, exist_ok=True)
-        out_file = base_dir / f"{sanitized_name}_{split}_{max_samples}.txt"
+        config_suffix = f"_{config}" if config else ""
+        samples_suffix = "all" if max_samples <= 0 else str(max_samples)
+        out_file = base_dir / f"{sanitized_name}{config_suffix}_{split}_{samples_suffix}.txt"
 
     if out_file.exists() and out_file.stat().st_size > 0 and not force_download:
         print(f"📦 Using cached Hugging Face dataset: {out_file} ({out_file.stat().st_size:,} bytes)")
         return out_file
 
-    # Fast-path for datasets with direct hosted JSON on Hugging Face Hub
-    if clean_id in ("yahma/alpaca-cleaned", "tatsu-lab/alpaca"):
-        json_url = f"https://huggingface.co/datasets/{clean_id}/resolve/main/alpaca_data_cleaned.json" if "yahma" in clean_id else f"https://huggingface.co/datasets/{clean_id}/resolve/main/alpaca_data.json"
+    # Fast-path for datasets with direct hosted JSON/JSONL on Hugging Face Hub
+    if clean_id in _HF_FAST_PATHS:
         try:
-            print(f"⚡ Fast-path: downloading full dataset directly from {json_url} using curl/urllib...")
-            raw_bytes = download_url_bytes(json_url, timeout=60)
-            raw_data = json.loads(raw_bytes.decode("utf-8"))
-            limit = len(raw_data) if max_samples <= 0 else min(max_samples, len(raw_data))
-            collected = []
-            for item in raw_data[:limit]:
-                d = format_row_to_dialogue(item)
-                if d:
-                    collected.append(d)
-            out_file.parent.mkdir(parents=True, exist_ok=True)
-            out_file.write_text("\n\n".join(collected), encoding="utf-8")
-            print(f"✅ Extracted {len(collected):,} instruction dialogues to {out_file}!")
-            return out_file
+            fast_url = _HF_FAST_PATHS[clean_id]
+            print(f"⚡ Fast-path: downloading dataset directly from {fast_url} using urllib...")
+            collected = _download_fast_path(fast_url, max_samples=max_samples, timeout=timeout)
+            if collected:
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                full_corpus = "\n\n".join(collected)
+                out_file.write_text(full_corpus, encoding="utf-8")
+                print(f"✅ Extracted {len(collected):,} instruction dialogues to {out_file}!")
+                print(f"   Corpus saved to: {out_file} ({len(full_corpus):,} chars, {len(full_corpus.split()):,} words)")
+                return out_file
         except Exception as e:
             print(f"⚠️ Fast-path failed ({e}), falling back to datasets-server API...")
 
@@ -350,12 +348,13 @@ def download_hf_dataset(
     batch_size = 100
     collected_texts: List[str] = []
     detected_col = text_column
+    target_samples = 10000 if max_samples <= 0 else max_samples
 
     encoded_id = urllib.parse.quote(clean_id, safe="/")
     offset = 0
 
-    while len(collected_texts) < max_samples:
-        current_limit = min(batch_size, max_samples - len(collected_texts))
+    while len(collected_texts) < target_samples:
+        current_limit = min(batch_size, target_samples - len(collected_texts))
         url = (
             f"https://datasets-server.huggingface.co/rows"
             f"?dataset={encoded_id}&config={resolved_config}&split={split}"
@@ -385,7 +384,7 @@ def download_hf_dataset(
             print(f"  -> Auto-detected text column: '{detected_col}'")
 
         for r_entry in rows_data:
-            if len(collected_texts) >= max_samples:
+            if len(collected_texts) >= target_samples:
                 break
             r = r_entry.get("row", {})
             dialogue = format_row_to_dialogue(r, fallback_col=detected_col)
@@ -393,7 +392,8 @@ def download_hf_dataset(
                 collected_texts.append(dialogue.strip())
 
         offset += len(rows_data)
-        print(f"\r  Fetched {len(collected_texts)}/{max_samples} examples...", end="", flush=True)
+        progress_total = f"/{max_samples}" if max_samples > 0 else f"/{target_samples} (all)"
+        print(f"\r  Fetched {len(collected_texts)}{progress_total} examples...", end="", flush=True)
 
         # If fewer rows returned than requested, we reached the end of the split
         if len(rows_data) < current_limit:
