@@ -805,7 +805,16 @@ class LlamaLLM:
         self.reset_cache()
         return total_nll / max(1, total_tokens)
 
-    def train(
+    def full_backprop_model(self):
+        """Return the CPU NumPy model that differentiates the whole transformer."""
+        from .transformer import TransformerDecoderLM
+        model = getattr(self, "_full_backprop_model", None)
+        if model is None:
+            model = TransformerDecoderLM.from_llama(self)
+            self._full_backprop_model = model
+        return model
+
+    def train_full(
         self,
         text: str,
         epochs: int = 3,
@@ -820,6 +829,77 @@ class LlamaLLM:
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
     ) -> dict:
+        """Fine-tune every transformer parameter using NumPy autograd.
+
+        This is deliberately separate from the historical head-only trainer:
+        it is slower and intended for small CPU runs, validation, and research.
+        """
+        if epochs <= 0:
+            raise ValueError(f"epochs must be positive, got {epochs}")
+        if lr <= 0.0:
+            raise ValueError(f"lr must be positive, got {lr}")
+        if not 1 <= seq_len < self.config.seq_len:
+            raise ValueError(f"seq_len must be in [1, {self.config.seq_len - 1}], got {seq_len}")
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must be in [0, 1)")
+        if eval_text is not None and validation_split:
+            raise ValueError("Pass either eval_text or validation_split, not both")
+
+        def encode_nonempty(value: str, label: str) -> List[int]:
+            encoded = self.tokenizer.encode(value, bos=False)
+            if not encoded:
+                raise ValueError(f"{label} produced no tokens")
+            return encoded
+
+        train_tokens = encode_nonempty(text, "training text")
+        if eval_text is not None:
+            eval_tokens = encode_nonempty(eval_text, "evaluation text")
+        elif validation_split > 0.0:
+            split_at = int(len(train_tokens) * (1.0 - validation_split))
+            split_at = min(max(split_at, seq_len + 1), len(train_tokens) - 1)
+            eval_tokens = train_tokens[split_at:]
+            train_tokens = train_tokens[:split_at]
+        else:
+            eval_tokens = None
+        if len(train_tokens) < seq_len + 1:
+            repeats = ((seq_len + 1) // len(train_tokens)) + 1
+            train_tokens = train_tokens * repeats
+        step = stride or seq_len
+        if not 1 <= step <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {step}")
+
+        history = self.full_backprop_model().fit_tokens(
+            train_tokens,
+            epochs=epochs,
+            seq_len=seq_len,
+            lr=lr,
+            weight_decay=weight_decay,
+            stride=step,
+            shuffle=shuffle,
+            seed=seed,
+            eval_tokens=eval_tokens,
+            max_eval_steps=max_eval_steps,
+            verbose=verbose,
+        )
+        self.reset_cache()
+        return history
+
+    def train(
+        self,
+        text: str,
+        epochs: int = 3,
+        lr: float = 1e-4,
+        seq_len: int = 32,
+        weight_decay: float = 0.01,
+        verbose: int = 1,
+        eval_text: Optional[str] = None,
+        validation_split: float = 0.0,
+        stride: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        max_eval_steps: Optional[int] = None,
+        full_backprop: bool = False,
+    ) -> dict:
         """Fine-tune the model on custom text with reproducible validation.
 
         ``eval_text`` should be a held-out corpus that was never used to tune
@@ -829,8 +909,24 @@ class LlamaLLM:
 
         Returns ``loss`` and, when validation is enabled, ``val_loss`` histories.
         The lightweight trainer updates embeddings/classifier weights; it does
-        not pretend that a lower loss is a complete quality evaluation.
+        not pretend that a lower loss is a complete quality evaluation. Set
+        ``full_backprop=True`` to train all decoder layers with NumPy autograd.
         """
+        if full_backprop:
+            return self.train_full(
+                text,
+                epochs=epochs,
+                lr=lr,
+                seq_len=seq_len,
+                weight_decay=weight_decay,
+                verbose=verbose,
+                eval_text=eval_text,
+                validation_split=validation_split,
+                stride=stride,
+                shuffle=shuffle,
+                seed=seed,
+                max_eval_steps=max_eval_steps,
+            )
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
         if lr <= 0.0:

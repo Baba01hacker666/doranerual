@@ -100,7 +100,7 @@ When adding data, prefer short, correct examples that demonstrate the desired be
 
 The trainer supports shuffled windows, overlapping windows via `--stride`, held-out loss, deterministic seeds, and JSONL input. Training loss is a signal—not a substitute for held-out behavioral tests.
 
-> The current lightweight fine-tuner updates the embedding/classifier path. It is useful for fast local adaptation and pipeline experiments, but a larger general-purpose Zexo requires full transformer backpropagation or starting from a pretrained checkpoint. This limitation is reported explicitly rather than hidden behind a loss number.
+The default trainer remains the fast head-only path. For real CPU NumPy backpropagation through every decoder layer, use `--full-backprop`; this updates embeddings, attention projections, RoPE-connected attention, RMSNorm scales, SwiGLU projections, and the output head. It is intentionally slower and is best suited to micro models, smoke tests, and small fine-tuning runs. Training metadata records which mode was used.
 
 ---
 

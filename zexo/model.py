@@ -75,8 +75,9 @@ class ZexoModel:
         shuffle: bool = True,
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
+        full_backprop: bool = False,
     ) -> dict:
-        """Fine-tune Zexo on custom text or dialogue with optional validation."""
+        """Fine-tune Zexo, optionally differentiating the complete transformer."""
         return self.llm.train(
             text,
             epochs=epochs,
@@ -89,7 +90,12 @@ class ZexoModel:
             shuffle=shuffle,
             seed=seed,
             max_eval_steps=max_eval_steps,
+            full_backprop=full_backprop,
         )
+
+    def full_backprop_model(self):
+        """Expose the CPU autograd model for advanced full-layer training."""
+        return self.llm.full_backprop_model()
 
     def reset(self) -> None:
         """Clear active conversation context and model KV cache."""

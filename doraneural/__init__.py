@@ -113,6 +113,7 @@ from .autograd import (
     mse_loss,
     binary_cross_entropy,
 )
+from .transformer import TransformerDecoderLM, TransformerDecoderBlock, TensorAdamW
 from .compiler import (
     compile_model,
     CompiledModel,
@@ -263,6 +264,10 @@ __all__ = [
     "is_grad_enabled",
     "mse_loss",
     "binary_cross_entropy",
+    # Full-transformer NumPy backpropagation
+    "TransformerDecoderLM",
+    "TransformerDecoderBlock",
+    "TensorAdamW",
     # Static Graph Compiler & AOT
     "compile_model",
     "CompiledModel",

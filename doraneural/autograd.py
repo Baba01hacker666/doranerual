@@ -483,6 +483,41 @@ class Tensor:
 
         return out
 
+    @staticmethod
+    def concatenate(tensors: Tuple["Tensor", ...], axis: int = 0) -> "Tensor":
+        """Concatenate tensors while routing gradients to each input slice."""
+        if not tensors:
+            raise ValueError("concatenate requires at least one tensor")
+        if any(not isinstance(item, Tensor) for item in tensors):
+            raise TypeError("concatenate expects Tensor inputs")
+
+        out_data = np.concatenate([item.data for item in tensors], axis=axis)
+        requires_grad = _GRAD_ENABLED and any(item.requires_grad for item in tensors)
+        out = Tensor(out_data, requires_grad=requires_grad, dtype=tensors[0].dtype,
+                     _children=tuple(tensors), _op="concatenate")
+
+        if requires_grad:
+            sizes = [item.shape[axis] for item in tensors]
+            boundaries = np.cumsum([0] + sizes)
+
+            def _backward():
+                for idx, item in enumerate(tensors):
+                    if not item.requires_grad:
+                        continue
+                    slices = [slice(None)] * out.ndim
+                    slices[axis] = slice(boundaries[idx], boundaries[idx + 1])
+                    grad = out.grad[tuple(slices)]
+                    item.grad = grad if item.grad is None else item.grad + grad
+
+            out._backward = _backward
+
+        return out
+
+    @classmethod
+    def cat(cls, tensors: Tuple["Tensor", ...], axis: int = 0) -> "Tensor":
+        """Alias for :meth:`concatenate`, convenient in model code."""
+        return cls.concatenate(tensors, axis=axis)
+
     def __repr__(self) -> str:
         grad_str = f", grad_fn=<{self._op}>" if self._op else ""
         req_str = f", requires_grad=True" if self.requires_grad else ""
@@ -521,19 +556,24 @@ class Module:
         return self.train(False)
 
     def parameters(self) -> List[Parameter]:
-        """Collect all Parameter instances from attributes and submodules."""
+        """Collect unique Parameter instances from attributes and submodules."""
         params: List[Parameter] = []
-        for name, value in self.__dict__.items():
+        seen = set()
+
+        def collect(value: Any) -> None:
             if isinstance(value, Parameter):
-                params.append(value)
+                if id(value) not in seen:
+                    seen.add(id(value))
+                    params.append(value)
             elif isinstance(value, Module):
-                params.extend(value.parameters())
+                for child_value in value.__dict__.values():
+                    collect(child_value)
             elif isinstance(value, (list, tuple)):
                 for item in value:
-                    if isinstance(item, Parameter):
-                        params.append(item)
-                    elif isinstance(item, Module):
-                        params.extend(item.parameters())
+                    collect(item)
+
+        for value in self.__dict__.values():
+            collect(value)
         return params
 
     def submodules(self) -> List["Module"]:

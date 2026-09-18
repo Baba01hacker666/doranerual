@@ -125,6 +125,11 @@ def main():
         help="Directory to save updated checkpoints (default: zexo/checkpoints).",
     )
     parser.add_argument(
+        "--full-backprop",
+        action="store_true",
+        help="Train all transformer weights with the CPU-friendly NumPy autograd path (slower; head-only remains default).",
+    )
+    parser.add_argument(
         "--fast",
         action="store_true",
         help="Enable fast mode: uses all available CPU threads, optimized sequence length, and high-throughput execution.",
@@ -156,6 +161,7 @@ def main():
     print(f"Run ID:         {run_id}")
     print(f"Target Tier:    {args.tier.upper()}")
     print(f"From Scratch:   {args.from_scratch}")
+    print(f"Training Mode:  {'FULL TRANSFORMER BACKPROP' if args.full_backprop else 'HEAD-ONLY FAST PATH'}")
     print(f"Fast Mode:      {args.fast} ({os.environ.get('OMP_NUM_THREADS', 'auto')} OpenMP threads)")
     print(f"Output Dir:     {out_dir}")
     print("─" * 72)
@@ -219,6 +225,7 @@ def main():
         stride=args.stride,
         seed=args.seed,
         max_eval_steps=args.max_eval_steps,
+        full_backprop=args.full_backprop,
     )
     duration = time.perf_counter() - t0
     final_report = f"Final loss: {hist['loss'][-1]:.4f}"
@@ -260,6 +267,7 @@ def main():
         "seq_len": args.seq_len,
         "stride": args.stride or args.seq_len,
         "seed": args.seed,
+        "training_mode": "full_backprop" if args.full_backprop else "head_only",
         "loss_history": hist["loss"],
         "val_loss_history": hist.get("val_loss"),
         "test_prompt": args.test_prompt,
