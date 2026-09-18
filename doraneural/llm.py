@@ -57,6 +57,8 @@ class LlamaConfig:
     vocab_size: int
     seq_len: int
     rope_type: str = "interleaved"  # "interleaved" (llama2.c) or "hf" (HuggingFace split-half)
+    rope_theta: float = 10000.0
+    eos_token_id: int = 2
 
     @property
     def head_size(self) -> int:
@@ -800,6 +802,8 @@ class LlamaLLM:
         max_tokens: int = 100,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: int = 0,
+        eos_token_id: Optional[int] = None,
         stream: bool = False,
     ) -> Union[str, Generator[str, None, None]]:
         """Autoregressively generate text from a prompt.
@@ -809,6 +813,8 @@ class LlamaLLM:
             max_tokens: Maximum number of tokens to generate.
             temperature: Sampling temperature (>0.0 for creativity, 0.0 for deterministic greedy).
             top_p: Nucleus sampling probability cutoff (0.0 to 1.0).
+            top_k: Top-K sampling cutoff (0 to disable).
+            eos_token_id: End of sequence token ID (defaults to config.eos_token_id or 2).
             stream: If True, returns a generator yielding pieces as they are produced.
 
         Returns:
@@ -818,8 +824,11 @@ class LlamaLLM:
             raise ValueError(f"max_tokens must be non-negative, got {max_tokens}")
         if not 0.0 <= top_p <= 1.0:
             raise ValueError(f"top_p must be in [0, 1], got {top_p}")
+        if top_k < 0:
+            raise ValueError(f"top_k must be non-negative, got {top_k}")
         self.reset_cache()
         prompt_tokens = self.tokenizer.encode(prompt, bos=True)
+        eos_id = eos_token_id if eos_token_id is not None else getattr(self.config, "eos_token_id", 2)
 
         if not prompt_tokens:
             prompt_tokens = [1]
@@ -835,6 +844,8 @@ class LlamaLLM:
                 max_new_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                top_k=top_k,
+                eos_token_id=eos_id,
             )
             return prompt + self.tokenizer.decode(gen_ids)
 
@@ -850,8 +861,8 @@ class LlamaLLM:
                     if pos >= self.config.seq_len - 1:
                         break
 
-                    next_token = self.cpp_engine.sample(temperature=temperature, top_p=top_p)
-                    if next_token == 2:  # EOS
+                    next_token = self.cpp_engine.sample(temperature=temperature, top_p=top_p, top_k=top_k)
+                    if next_token == eos_id:
                         break
 
                     piece = self.tokenizer.decode_token(next_token)
@@ -870,8 +881,8 @@ class LlamaLLM:
                     if pos >= self.config.seq_len - 1:
                         break
 
-                    next_token = self.sample(logits, temperature=temperature, top_p=top_p)
-                    if next_token == 2:  # EOS
+                    next_token = self._sample(logits, temperature=temperature, top_p=top_p)
+                    if next_token == eos_id:
                         break
 
                     piece = self.tokenizer.decode_token(next_token)

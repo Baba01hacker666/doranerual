@@ -14,6 +14,8 @@ typedef struct {
     int vocab_size;
     int seq_len;
     int rope_type; // 0 = llama2c interleaved, 1 = HuggingFace split-half
+    int eos_token_id; // EOS token ID (default 2)
+    float rope_theta; // Base frequency theta (default 10000.0)
 } LlamaCppConfig;
 
 typedef struct {
@@ -41,6 +43,9 @@ void llama_free(LlamaCppEngine* engine);
 // Forward single token with KV-cache
 void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits);
 
+// Forward single token with fused classifier argmax (zero logit memory bandwidth, for greedy search)
+int llama_forward_argmax(LlamaCppEngine* engine, int token, int pos);
+
 // Clear KV cache
 void llama_reset_cache(LlamaCppEngine* engine);
 
@@ -52,6 +57,19 @@ int llama_generate(
     int max_new_tokens,
     float temperature,
     float top_p,
+    int* out_tokens
+);
+
+// Extended generation supporting top-k, custom eos, and fused greedy mode
+int llama_generate_ex(
+    LlamaCppEngine* engine,
+    const int* prompt_tokens,
+    int prompt_len,
+    int max_new_tokens,
+    float temperature,
+    float top_p,
+    int top_k,
+    int eos_token_id,
     int* out_tokens
 );
 
@@ -87,6 +105,12 @@ void llama_set_threads(int num_threads);
 
 // Sampling
 int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p);
+int llama_sample_token_ex(LlamaCppEngine* engine, float temperature, float top_p, int top_k);
+
+// Performance profiling hooks
+void llama_set_profile(LlamaCppEngine* engine, int enable);
+void llama_reset_profile(LlamaCppEngine* engine);
+void llama_get_profile(LlamaCppEngine* engine, double* out_stats);
 
 // Hardware Architecture Detection & Dispatch
 const char* llama_get_cpu_arch();

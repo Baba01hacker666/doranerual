@@ -72,7 +72,6 @@ def main():
         type=int,
         default=None,
         help="Optional cap on validation windows per epoch.",
->>>>>>> arena/01a0b24a-doranerual
     )
     parser.add_argument(
         "--hf-dataset",

@@ -10,6 +10,7 @@
 #include <random>
 #include <cstdint>
 #include <limits>
+#include <chrono>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -457,9 +458,8 @@ void matmul_forward_int8_vnni(float* __restrict__ y, const float* __restrict__ x
 
 void matmul_forward(float* __restrict__ y, const float* __restrict__ x, const float* __restrict__ W, int n, int d) {
     if (d <= 0 || n <= 0) return;
-    if ((size_t)d * n < 16384) { for (int i = 0; i < d; i++) y[i] = dot_product_simd(W + (size_t)i * n, x, n); return; }
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if((size_t)d * n >= 16384)
 #endif
     for (int i = 0; i < d; i += 4) {
         int rows = std::min(4, d - i);
@@ -611,6 +611,17 @@ struct LlamaCppEngine {
     std::vector<float> wq_s,wk_s,wv_s,wo_s,w1_s,w2_s,w3_s,wcls_s;
     std::vector<int32_t> wq_sum,wk_sum,wv_sum,wo_sum,w1_sum,w2_sum,w3_sum,wcls_sum;
     bool use_fp16; bool use_i8; bool use_vnni;
+    struct ProfileStats {
+        double rmsnorm_us = 0.0;
+        double qkv_us = 0.0;
+        double rope_us = 0.0;
+        double attn_us = 0.0;
+        double ffn_us = 0.0;
+        double classifier_us = 0.0;
+        double total_us = 0.0;
+        int64_t count = 0;
+        bool enabled = false;
+    } profile;
     int adam_step; std::mt19937 rng;
     LlamaCppEngine(const LlamaCppConfig* cfg, LlamaCppWeights* w) : config(*cfg), weights(*w), use_fp16(false), use_i8(false), use_vnni(false), adam_step(0), rng(42) {
         int head_size=config.dim/config.n_heads; int half=head_size/2; int kv_dim=(config.dim*config.n_kv_heads)/config.n_heads;
@@ -621,7 +632,8 @@ struct LlamaCppEngine {
         logits.resize(config.vocab_size,0.0f); sample_probs.resize(config.vocab_size,0.0f); sample_candidates.resize(config.vocab_size);
         train_step_logits.resize(config.vocab_size,0.0f); train_dlogits.resize(config.vocab_size,0.0f); train_probs.resize(config.vocab_size,0.0f); train_grad_embedding.resize(config.dim,0.0f);
         cos_cache.resize((size_t)config.seq_len*half,0.0f); sin_cache.resize((size_t)config.seq_len*half,0.0f);
-        for(int p_idx=0;p_idx<config.seq_len;p_idx++) for(int i=0;i<half;i++){ float freq=1.0f/std::pow(10000.0f,(2.0f*i)/(float)head_size); float val=p_idx*freq; cos_cache[(size_t)p_idx*half+i]=std::cos(val); sin_cache[(size_t)p_idx*half+i]=std::sin(val); }
+        float theta = (config.rope_theta > 0.0f) ? config.rope_theta : 10000.0f;
+        for(int p_idx=0;p_idx<config.seq_len;p_idx++) for(int i=0;i<half;i++){ float freq=1.0f/std::pow(theta,(2.0f*i)/(float)head_size); float val=p_idx*freq; cos_cache[(size_t)p_idx*half+i]=std::cos(val); sin_cache[(size_t)p_idx*half+i]=std::sin(val); }
         size_t total_weights=calculate_total_parameters(); grad_buffer.resize(total_weights,0.0f); m_buffer.resize(total_weights,0.0f); v_buffer.resize(total_weights,0.0f);
         try{
             size_t wq_elems=(size_t)config.n_layers*config.dim*config.dim;
@@ -770,9 +782,19 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
     const float* sin_ptr=engine->sin_cache.data() + (size_t)pos*half;
     float inv_sqrt_head=1.0f/std::sqrt((float)head_size);
 
-    for(int l=0;l<p.n_layers;l++){
-        rmsnorm_forward(engine->xb.data(), engine->x.data(), w.rms_att_weight + (size_t)l * p.dim, p.dim);
+    bool prof = engine->profile.enabled;
+    auto now = []() { return std::chrono::high_resolution_clock::now(); };
+    auto elapsed_us = [](std::chrono::high_resolution_clock::time_point t0, std::chrono::high_resolution_clock::time_point t1) {
+        return (double)std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count() / 1000.0;
+    };
+    auto t_start = prof ? now() : std::chrono::high_resolution_clock::time_point{};
 
+    for(int l=0;l<p.n_layers;l++){
+        auto t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+        rmsnorm_forward(engine->xb.data(), engine->x.data(), w.rms_att_weight + (size_t)l * p.dim, p.dim);
+        if(prof) engine->profile.rmsnorm_us += elapsed_us(t0, now());
+
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
         if(engine->use_i8){
             if(engine->use_vnni){
                 matmul_forward_int8_vnni(engine->q.data(), engine->xb.data(), engine->wq_i8.data() + (size_t)l * p.dim * p.dim, engine->wq_s.data() + (size_t)l * p.dim, engine->wq_sum.data() + (size_t)l * p.dim, p.dim, p.dim);
@@ -792,14 +814,18 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
             matmul_forward(engine->k.data(), engine->xb.data(), w.wk + (size_t)l * kv_dim * p.dim, p.dim, kv_dim);
             matmul_forward(engine->v.data(), engine->xb.data(), w.wv + (size_t)l * kv_dim * p.dim, p.dim, kv_dim);
         }
+        if(prof) engine->profile.qkv_us += elapsed_us(t0, now());
 
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
         if(p.rope_type==1){
             for(int h=0;h<p.n_heads;h++){ float* qh=engine->q.data()+(size_t)h*head_size; for(int i=0;i<half;i++){ float fcr=cos_ptr[i]; float fci=sin_ptr[i]; float q0=qh[i]; float q1=qh[i+half]; qh[i]=q0*fcr - q1*fci; qh[i+half]=q1*fcr + q0*fci; } }
             for(int h=0;h<p.n_kv_heads;h++){ float* kh=engine->k.data()+(size_t)h*head_size; for(int i=0;i<half;i++){ float fcr=cos_ptr[i]; float fci=sin_ptr[i]; float k0=kh[i]; float k1=kh[i+half]; kh[i]=k0*fcr - k1*fci; kh[i+half]=k1*fcr + k0*fci; } }
         }else{
             for(int i=0;i<p.dim;i+=2){ int h_dim=(i%head_size)/2; float fcr=cos_ptr[h_dim]; float fci=sin_ptr[h_dim]; float q0=engine->q[i]; float q1=engine->q[i+1]; engine->q[i]=q0*fcr - q1*fci; engine->q[i+1]=q0*fci + q1*fcr; if(i<kv_dim){ float k0=engine->k[i]; float k1=engine->k[i+1]; engine->k[i]=k0*fcr - k1*fci; engine->k[i+1]=k0*fci + k1*fcr; } }
         }
+        if(prof) engine->profile.rope_us += elapsed_us(t0, now());
 
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
         int loff=l * p.seq_len * kv_dim;
         std::memcpy(engine->key_cache.data() + (size_t)loff + (size_t)pos * kv_dim, engine->k.data(), (size_t)kv_dim * sizeof(float));
         std::memcpy(engine->val_cache.data() + (size_t)loff + (size_t)pos * kv_dim, engine->v.data(), (size_t)kv_dim * sizeof(float));
@@ -807,7 +833,7 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
 
         int n_heads=p.n_heads; bool use_parallel_heads=false;
 #ifdef _OPENMP
-        if(n_heads>=4 && pos>=16) use_parallel_heads=true;
+        if(n_heads>=4 && (size_t)n_heads * (pos + 1) * head_size >= 16384) use_parallel_heads=true;
 #endif
         if(use_parallel_heads){
 #ifdef _OPENMP
@@ -819,7 +845,16 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
                 softmax(att_head,pos+1);
                 float* out_head=engine->attn_out.data()+(size_t)h*head_size;
                 for(int t=0;t<=pos;t++){ const float* v_past=engine->val_cache.data()+(size_t)loff+(size_t)t*kv_dim+(size_t)kv_h*head_size; float a=att_head[t];
-#if defined(__AVX512F__)
+#if defined(__ARM_NEON) || defined(__aarch64__)
+                    float32x4_t va = vdupq_n_f32(a); int d = 0;
+                    for(; d + 3 < head_size; d += 4){
+                        float32x4_t vout = vld1q_f32(out_head + d);
+                        float32x4_t vv = vld1q_f32(v_past + d);
+                        vout = vfmaq_f32(vout, vv, va);
+                        vst1q_f32(out_head + d, vout);
+                    }
+                    for(; d < head_size; d++) out_head[d] += a * v_past[d];
+#elif defined(__AVX512F__)
                     __m512 va=_mm512_set1_ps(a); int d=0; for(; d+15<head_size; d+=16){ __m512 vout=_mm512_loadu_ps(out_head+d); __m512 vv=_mm512_loadu_ps(v_past+d); vout=_mm512_fmadd_ps(vv,va,vout); _mm512_storeu_ps(out_head+d,vout); } if(d+7<head_size){ __m256 va256=_mm256_set1_ps(a); __m256 vout=_mm256_loadu_ps(out_head+d); __m256 vv=_mm256_loadu_ps(v_past+d); vout=_mm256_fmadd_ps(vv,va256,vout); _mm256_storeu_ps(out_head+d,vout); d+=8; } for(;d<head_size;d++) out_head[d]+=a*v_past[d];
 #elif defined(__AVX2__)
                     __m256 va=_mm256_set1_ps(a); int d=0; for(; d+7<head_size; d+=8){ __m256 vout=_mm256_loadu_ps(out_head+d); __m256 vv=_mm256_loadu_ps(v_past+d); vout=_mm256_fmadd_ps(vv,va,vout); _mm256_storeu_ps(out_head+d,vout); } for(;d<head_size;d++) out_head[d]+=a*v_past[d];
@@ -835,7 +870,16 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
                 softmax(att_head,pos+1);
                 float* out_head=engine->attn_out.data()+(size_t)h*head_size;
                 for(int t=0;t<=pos;t++){ const float* v_past=engine->val_cache.data()+(size_t)loff+(size_t)t*kv_dim+(size_t)kv_h*head_size; float a=att_head[t];
-#if defined(__AVX512F__)
+#if defined(__ARM_NEON) || defined(__aarch64__)
+                    float32x4_t va = vdupq_n_f32(a); int d = 0;
+                    for(; d + 3 < head_size; d += 4){
+                        float32x4_t vout = vld1q_f32(out_head + d);
+                        float32x4_t vv = vld1q_f32(v_past + d);
+                        vout = vfmaq_f32(vout, vv, va);
+                        vst1q_f32(out_head + d, vout);
+                    }
+                    for(; d < head_size; d++) out_head[d] += a * v_past[d];
+#elif defined(__AVX512F__)
                     __m512 va=_mm512_set1_ps(a); int d=0; for(; d+15<head_size; d+=16){ __m512 vout=_mm512_loadu_ps(out_head+d); __m512 vv=_mm512_loadu_ps(v_past+d); vout=_mm512_fmadd_ps(vv,va,vout); _mm512_storeu_ps(out_head+d,vout); } if(d+7<head_size){ __m256 va256=_mm256_set1_ps(a); __m256 vout=_mm256_loadu_ps(out_head+d); __m256 vv=_mm256_loadu_ps(v_past+d); vout=_mm256_fmadd_ps(vv,va256,vout); _mm256_storeu_ps(out_head+d,vout); d+=8; } for(;d<head_size;d++) out_head[d]+=a*v_past[d];
 #elif defined(__AVX2__)
                     __m256 va=_mm256_set1_ps(a); int d=0; for(; d+7<head_size; d+=8){ __m256 vout=_mm256_loadu_ps(out_head+d); __m256 vv=_mm256_loadu_ps(v_past+d); vout=_mm256_fmadd_ps(vv,va,vout); _mm256_storeu_ps(out_head+d,vout); } for(;d<head_size;d++) out_head[d]+=a*v_past[d];
@@ -857,8 +901,11 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
         }else{
             matmul_forward(engine->xb.data(), engine->attn_out.data(), w.wo + (size_t)l * p.dim * p.dim, p.dim, p.dim);
         }
+        if(prof) engine->profile.attn_us += elapsed_us(t0, now());
 
-#if defined(__AVX512F__)
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        { int i=0; for(; i+3 < p.dim; i+=4){ float32x4_t vx=vld1q_f32(engine->x.data()+i); float32x4_t vxb=vld1q_f32(engine->xb.data()+i); vst1q_f32(engine->x.data()+i, vaddq_f32(vx,vxb)); } for(; i<p.dim; i++) engine->x[i]+=engine->xb[i]; }
+#elif defined(__AVX512F__)
         { int i=0; for(; i+15 < p.dim; i+=16){ __m512 vx=_mm512_loadu_ps(engine->x.data()+i); __m512 vxb=_mm512_loadu_ps(engine->xb.data()+i); _mm512_storeu_ps(engine->x.data()+i,_mm512_add_ps(vx,vxb)); } if(i+7 < p.dim){ __m256 vx=_mm256_loadu_ps(engine->x.data()+i); __m256 vxb=_mm256_loadu_ps(engine->xb.data()+i); _mm256_storeu_ps(engine->x.data()+i,_mm256_add_ps(vx,vxb)); i+=8; } for(; i<p.dim; i++) engine->x[i]+=engine->xb[i]; }
 #elif defined(__AVX2__)
         { int i=0; for(; i+7 < p.dim; i+=8){ __m256 vx=_mm256_loadu_ps(engine->x.data()+i); __m256 vxb=_mm256_loadu_ps(engine->xb.data()+i); _mm256_storeu_ps(engine->x.data()+i,_mm256_add_ps(vx,vxb)); } for(; i<p.dim; i++) engine->x[i]+=engine->xb[i]; }
@@ -866,8 +913,11 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
         for(int i=0;i<p.dim;i++) engine->x[i]+=engine->xb[i];
 #endif
 
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
         rmsnorm_forward(engine->xb.data(), engine->x.data(), w.rms_ffn_weight + (size_t)l * p.dim, p.dim);
+        if(prof) engine->profile.rmsnorm_us += elapsed_us(t0, now());
 
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
         if(engine->use_i8){
             if(engine->use_vnni){
                 matmul_forward_int8_vnni(engine->hb1.data(), engine->xb.data(), engine->w1_i8.data() + (size_t)l * p.hidden_dim * p.dim, engine->w1_s.data() + (size_t)l * p.hidden_dim, engine->w1_sum.data() + (size_t)l * p.hidden_dim, p.dim, p.hidden_dim);
@@ -898,18 +948,24 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
             matmul_forward(engine->xb.data(), engine->hb.data(), w.w2 + (size_t)l * p.dim * p.hidden_dim, p.hidden_dim, p.dim);
         }
 
-#if defined(__AVX512F__)
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        { int i=0; for(; i+3 < p.dim; i+=4){ float32x4_t vx=vld1q_f32(engine->x.data()+i); float32x4_t vxb=vld1q_f32(engine->xb.data()+i); vst1q_f32(engine->x.data()+i, vaddq_f32(vx,vxb)); } for(; i<p.dim; i++) engine->x[i]+=engine->xb[i]; }
+#elif defined(__AVX512F__)
         { int i=0; for(; i+15 < p.dim; i+=16){ __m512 vx=_mm512_loadu_ps(engine->x.data()+i); __m512 vxb=_mm512_loadu_ps(engine->xb.data()+i); _mm512_storeu_ps(engine->x.data()+i,_mm512_add_ps(vx,vxb)); } if(i+7 < p.dim){ __m256 vx=_mm256_loadu_ps(engine->x.data()+i); __m256 vxb=_mm256_loadu_ps(engine->xb.data()+i); _mm256_storeu_ps(engine->x.data()+i,_mm256_add_ps(vx,vxb)); i+=8; } for(; i<p.dim; i++) engine->x[i]+=engine->xb[i]; }
 #elif defined(__AVX2__)
         { int i=0; for(; i+7 < p.dim; i+=8){ __m256 vx=_mm256_loadu_ps(engine->x.data()+i); __m256 vxb=_mm256_loadu_ps(engine->xb.data()+i); _mm256_storeu_ps(engine->x.data()+i,_mm256_add_ps(vx,vxb)); } for(; i<p.dim; i++) engine->x[i]+=engine->xb[i]; }
 #else
         for(int i=0;i<p.dim;i++) engine->x[i]+=engine->xb[i];
 #endif
+        if(prof) engine->profile.ffn_us += elapsed_us(t0, now());
     }
 
+    auto t_fnorm = prof ? now() : std::chrono::high_resolution_clock::time_point{};
     rmsnorm_forward(engine->x.data(), engine->x.data(), w.rms_final_weight, p.dim);
+    if(prof) engine->profile.rmsnorm_us += elapsed_us(t_fnorm, now());
 
     if(out_logits){
+        auto t_cls = prof ? now() : std::chrono::high_resolution_clock::time_point{};
         if(engine->use_i8){
             if(engine->use_vnni){
                 matmul_forward_int8_vnni(engine->logits.data(), engine->x.data(), engine->wcls_i8.data(), engine->wcls_s.data(), engine->wcls_sum.data(), p.dim, p.vocab_size);
@@ -923,10 +979,92 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
             matmul_forward(engine->logits.data(), engine->x.data(), cls_w, p.dim, p.vocab_size);
         }
         std::memcpy(out_logits, engine->logits.data(), (size_t)p.vocab_size*sizeof(float));
+        if(prof) engine->profile.classifier_us += elapsed_us(t_cls, now());
+    }
+
+    if(prof){
+        engine->profile.total_us += elapsed_us(t_start, now());
+        engine->profile.count++;
     }
 }
 
-int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p){
+int llama_forward_argmax(LlamaCppEngine* engine, int token, int pos) {
+    if(!engine || pos < 0 || pos >= engine->config.seq_len || token < 0 || token >= engine->config.vocab_size || !engine->weights.token_embedding_table) return 0;
+    llama_forward(engine, token, pos, nullptr);
+
+    bool prof = engine->profile.enabled;
+    auto now = []() { return std::chrono::high_resolution_clock::now(); };
+    auto elapsed_us = [](std::chrono::high_resolution_clock::time_point t0, std::chrono::high_resolution_clock::time_point t1) {
+        return (double)std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count() / 1000.0;
+    };
+    auto t_cls = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+
+    const LlamaCppConfig& p = engine->config;
+    const LlamaCppWeights& w = engine->weights;
+    int best_token = 0;
+    float max_logit = -std::numeric_limits<float>::infinity();
+
+    if(engine->use_i8){
+#ifdef _OPENMP
+        #pragma omp parallel
+        {
+            float local_max = -std::numeric_limits<float>::infinity();
+            int local_best = 0;
+            #pragma omp for schedule(static)
+            for(int i = 0; i < p.vocab_size; i++){
+                const int8_t* row = engine->wcls_i8.data() + (size_t)i * p.dim;
+                float acc = 0.0f;
+                for(int j = 0; j < p.dim; j++) acc += (float)row[j] * engine->x[j];
+                float logit = acc * engine->wcls_s[i];
+                if(logit > local_max){ local_max = logit; local_best = i; }
+            }
+            #pragma omp critical
+            {
+                if(local_max > max_logit){ max_logit = local_max; best_token = local_best; }
+            }
+        }
+#else
+        for(int i = 0; i < p.vocab_size; i++){
+            const int8_t* row = engine->wcls_i8.data() + (size_t)i * p.dim;
+            float acc = 0.0f;
+            for(int j = 0; j < p.dim; j++) acc += (float)row[j] * engine->x[j];
+            float logit = acc * engine->wcls_s[i];
+            if(logit > max_logit){ max_logit = logit; best_token = i; }
+        }
+#endif
+    } else {
+        const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table;
+#ifdef _OPENMP
+        #pragma omp parallel
+        {
+            float local_max = -std::numeric_limits<float>::infinity();
+            int local_best = 0;
+            #pragma omp for schedule(static)
+            for(int i = 0; i < p.vocab_size; i++){
+                float logit = dot_product_simd(cls_w + (size_t)i * p.dim, engine->x.data(), p.dim);
+                if(logit > local_max){ local_max = logit; local_best = i; }
+            }
+            #pragma omp critical
+            {
+                if(local_max > max_logit){ max_logit = local_max; best_token = local_best; }
+            }
+        }
+#else
+        for(int i = 0; i < p.vocab_size; i++){
+            float logit = dot_product_simd(cls_w + (size_t)i * p.dim, engine->x.data(), p.dim);
+            if(logit > max_logit){ max_logit = logit; best_token = i; }
+        }
+#endif
+    }
+    if(prof){
+        double cls_elapsed = elapsed_us(t_cls, now());
+        engine->profile.classifier_us += cls_elapsed;
+        engine->profile.total_us += cls_elapsed;
+    }
+    return best_token;
+}
+
+int llama_sample_token_ex(LlamaCppEngine* engine, float temperature, float top_p, int top_k){
     if(!engine){
         std::fprintf(stderr, "[llama_sample_token] null engine\n");
         return 0;
@@ -936,75 +1074,127 @@ int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p){
         std::fprintf(stderr, "[llama_sample_token] invalid vocab_size %d\n", vocab_size);
         return 0;
     }
-    if(temperature<=0.0f){ int best_i=0; float best_v=engine->logits[0]; for(int i=1;i<vocab_size;i++) if(engine->logits[i]>best_v){ best_v=engine->logits[i]; best_i=i; } return best_i; }
-    std::memcpy(engine->sample_probs.data(), engine->logits.data(), (size_t)vocab_size*sizeof(float));
-    float inv_temp=1.0f/temperature; for(int i=0;i<vocab_size;i++) engine->sample_probs[i]*=inv_temp;
-    softmax(engine->sample_probs.data(), vocab_size);
-    if(top_p < 1.0f){
-        for(int i=0;i<vocab_size;i++) engine->sample_candidates[i]={engine->sample_probs[i], i};
-        int K=std::min(vocab_size,64);
-        std::partial_sort(engine->sample_candidates.begin(), engine->sample_candidates.begin()+K, engine->sample_candidates.end(), [](const auto& a, const auto& b){return a.first > b.first;});
-        float cumsum=0.0f; int cutoff_idx=K;
-        for(int i=0;i<K;i++){ cumsum+=engine->sample_candidates[i].first; if(cumsum>top_p && i>0){ cutoff_idx=i+1; break; } }
-        if(cumsum < top_p && K < vocab_size){
-            std::sort(engine->sample_candidates.begin()+K, engine->sample_candidates.end(), [](const auto& a, const auto& b){return a.first > b.first;});
-            for(int i=K;i<vocab_size;i++){ cumsum+=engine->sample_candidates[i].first; if(cumsum>top_p && i>0){ cutoff_idx=i+1; break; } }
-        }
-        float renorm_sum=0.0f; for(int i=0;i<cutoff_idx;i++) renorm_sum+=engine->sample_candidates[i].first;
-        std::uniform_real_distribution<float> dist(0.0f, renorm_sum); float r=dist(engine->rng); float acc=0.0f;
-        for(int i=0;i<cutoff_idx;i++){ acc+=engine->sample_candidates[i].first; if(r<=acc) return engine->sample_candidates[i].second; }
-        return engine->sample_candidates[0].second;
+    if(temperature<=0.0f){
+        int best_i=0; float best_v=engine->logits[0];
+        for(int i=1;i<vocab_size;i++) if(engine->logits[i]>best_v){ best_v=engine->logits[i]; best_i=i; }
+        return best_i;
     }
-    std::uniform_real_distribution<float> dist(0.0f,1.0f); float r=dist(engine->rng); float acc=0.0f;
-    for(int i=0;i<vocab_size;i++){ acc+=engine->sample_probs[i]; if(r<=acc) return i; }
-    return vocab_size-1;
+    std::memcpy(engine->sample_probs.data(), engine->logits.data(), (size_t)vocab_size*sizeof(float));
+    float inv_temp=1.0f/temperature;
+    for(int i=0;i<vocab_size;i++) engine->sample_probs[i]*=inv_temp;
+    softmax(engine->sample_probs.data(), vocab_size);
+
+    for(int i=0;i<vocab_size;i++) engine->sample_candidates[i]={engine->sample_probs[i], i};
+
+    int K = vocab_size;
+    if(top_k > 0 && top_k < vocab_size){
+        K = top_k;
+        std::partial_sort(engine->sample_candidates.begin(), engine->sample_candidates.begin()+K, engine->sample_candidates.end(),
+                          [](const auto& a, const auto& b){ return a.first > b.first; });
+    }
+
+    if(top_p < 1.0f){
+        if(K == vocab_size){
+            int P_sort = std::min(vocab_size, 64);
+            std::partial_sort(engine->sample_candidates.begin(), engine->sample_candidates.begin()+P_sort, engine->sample_candidates.end(),
+                              [](const auto& a, const auto& b){ return a.first > b.first; });
+            float cumsum=0.0f; int cutoff_idx=P_sort;
+            for(int i=0;i<P_sort;i++){ cumsum+=engine->sample_candidates[i].first; if(cumsum>top_p && i>0){ cutoff_idx=i+1; break; } }
+            if(cumsum < top_p && P_sort < vocab_size){
+                std::sort(engine->sample_candidates.begin()+P_sort, engine->sample_candidates.end(),
+                          [](const auto& a, const auto& b){ return a.first > b.first; });
+                for(int i=P_sort;i<vocab_size;i++){ cumsum+=engine->sample_candidates[i].first; if(cumsum>top_p && i>0){ cutoff_idx=i+1; break; } }
+            }
+            K = cutoff_idx;
+        } else {
+            float cumsum=0.0f; int cutoff_idx=K;
+            for(int i=0;i<K;i++){ cumsum+=engine->sample_candidates[i].first; if(cumsum>top_p && i>0){ cutoff_idx=i+1; break; } }
+            K = cutoff_idx;
+        }
+    }
+
+    float renorm_sum=0.0f;
+    for(int i=0;i<K;i++) renorm_sum+=engine->sample_candidates[i].first;
+    std::uniform_real_distribution<float> dist(0.0f, renorm_sum > 0.0f ? renorm_sum : 1.0f);
+    float r=dist(engine->rng); float acc=0.0f;
+    for(int i=0;i<K;i++){ acc+=engine->sample_candidates[i].first; if(r<=acc) return engine->sample_candidates[i].second; }
+    return engine->sample_candidates[0].second;
 }
 
-int llama_generate(LlamaCppEngine* engine, const int* prompt_tokens, int prompt_len, int max_new_tokens, float temperature, float top_p, int* out_tokens){
-    if(!engine){
-        std::fprintf(stderr, "[llama_generate] null engine\n");
-        return 0;
+int llama_sample_token(LlamaCppEngine* engine, float temperature, float top_p){
+    return llama_sample_token_ex(engine, temperature, top_p, 0);
+}
+
+int llama_generate_ex(LlamaCppEngine* engine, const int* prompt_tokens, int prompt_len, int max_new_tokens, float temperature, float top_p, int top_k, int eos_token_id, int* out_tokens){
+    if(!engine || !prompt_tokens || !out_tokens || prompt_len<=0 || prompt_len>=engine->config.seq_len || max_new_tokens<0) return 0;
+    if(temperature<0) temperature=0.0f;
+    if(top_p<0.0f || top_p>1.0f) top_p = std::max(0.0f, std::min(1.0f, top_p));
+
+    int eos = (eos_token_id >= 0) ? eos_token_id : (engine->config.eos_token_id >= 0 ? engine->config.eos_token_id : 2);
+    engine->reset_kv_cache();
+    int pos=0;
+    for(int i=0;i<prompt_len;i++){
+        if(i==prompt_len-1) llama_forward(engine, prompt_tokens[i], pos, engine->logits.data());
+        else llama_forward(engine, prompt_tokens[i], pos, nullptr);
+        pos++;
     }
-    if(!prompt_tokens){
-        std::fprintf(stderr, "[llama_generate] null prompt_tokens\n");
-        return 0;
-    }
-    if(!out_tokens){
-        std::fprintf(stderr, "[llama_generate] null out_tokens\n");
-        return 0;
-    }
-    if(prompt_len<=0){
-        std::fprintf(stderr, "[llama_generate] prompt_len %d <=0\n", prompt_len);
-        return 0;
-    }
-    if(prompt_len>=engine->config.seq_len){
-        std::fprintf(stderr, "[llama_generate] prompt_len %d >= seq_len %d\n", prompt_len, engine->config.seq_len);
-        return 0;
-    }
-    if(max_new_tokens<0){
-        std::fprintf(stderr, "[llama_generate] max_new_tokens %d <0\n", max_new_tokens);
-        return 0;
-    }
-    if(temperature<0){
-        std::fprintf(stderr, "[llama_generate] temperature %f <0, clamping to 0\n", temperature);
-        temperature=0;
-    }
-    if(top_p<0.0f || top_p>1.0f){
-        std::fprintf(stderr, "[llama_generate] top_p %f out of [0,1], clamping\n", top_p);
-        top_p = std::max(0.0f, std::min(1.0f, top_p));
-    }
-    engine->reset_kv_cache(); int pos=0;
-    for(int i=0;i<prompt_len;i++){ if(i==prompt_len-1) llama_forward(engine,prompt_tokens[i],pos,engine->logits.data()); else llama_forward(engine,prompt_tokens[i],pos,nullptr); pos++; }
+
     int generated_count=0;
+    bool is_greedy = (temperature <= 0.0f);
+
     for(int step=0; step<max_new_tokens; step++){
         if(pos>=engine->config.seq_len-1) break;
-        int next_token=llama_sample_token(engine,temperature,top_p);
+        int next_token = 0;
+        if(step == 0){
+            next_token = is_greedy ? llama_sample_token(engine, 0.0f, 1.0f) : llama_sample_token_ex(engine, temperature, top_p, top_k);
+        } else if(is_greedy){
+            next_token = llama_forward_argmax(engine, out_tokens[generated_count - 1], pos - 1);
+        } else {
+            next_token = llama_sample_token_ex(engine, temperature, top_p, top_k);
+        }
+
         out_tokens[generated_count++]=next_token;
-        if(next_token==2) break;
-        if(step+1 < max_new_tokens) llama_forward(engine,next_token,pos,engine->logits.data()); else llama_forward(engine,next_token,pos,nullptr);
+        if(next_token==eos) break;
+
+        if(step+1 < max_new_tokens && !is_greedy){
+            llama_forward(engine, next_token, pos, engine->logits.data());
+        }
         pos++;
     }
     return generated_count;
+}
+
+int llama_generate(LlamaCppEngine* engine, const int* prompt_tokens, int prompt_len, int max_new_tokens, float temperature, float top_p, int* out_tokens){
+    return llama_generate_ex(engine, prompt_tokens, prompt_len, max_new_tokens, temperature, top_p, 0, -1, out_tokens);
+}
+
+void llama_set_profile(LlamaCppEngine* engine, int enable){
+    if(engine) engine->profile.enabled = (enable != 0);
+}
+
+void llama_reset_profile(LlamaCppEngine* engine){
+    if(engine){
+        engine->profile.rmsnorm_us = 0;
+        engine->profile.qkv_us = 0;
+        engine->profile.rope_us = 0;
+        engine->profile.attn_us = 0;
+        engine->profile.ffn_us = 0;
+        engine->profile.classifier_us = 0;
+        engine->profile.total_us = 0;
+        engine->profile.count = 0;
+    }
+}
+
+void llama_get_profile(LlamaCppEngine* engine, double* out_stats){
+    if(!engine || !out_stats) return;
+    out_stats[0] = engine->profile.rmsnorm_us / 1000.0;
+    out_stats[1] = engine->profile.qkv_us / 1000.0;
+    out_stats[2] = engine->profile.rope_us / 1000.0;
+    out_stats[3] = engine->profile.attn_us / 1000.0;
+    out_stats[4] = engine->profile.ffn_us / 1000.0;
+    out_stats[5] = engine->profile.classifier_us / 1000.0;
+    out_stats[6] = engine->profile.total_us / 1000.0;
+    out_stats[7] = (double)engine->profile.count;
 }
 
 float llama_full_train_step(LlamaCppEngine* engine, const int* input_tokens, const int* target_tokens, int seq_len, float lr, float weight_decay, float beta1, float beta2, float eps){

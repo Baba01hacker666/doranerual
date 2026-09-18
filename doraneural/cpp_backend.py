@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -25,6 +25,8 @@ class LlamaCppConfigStruct(ctypes.Structure):
         ("vocab_size", ctypes.c_int),
         ("seq_len", ctypes.c_int),
         ("rope_type", ctypes.c_int),
+        ("eos_token_id", ctypes.c_int),
+        ("rope_theta", ctypes.c_float),
     ]
 
 
@@ -223,6 +225,40 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
         lib.llama_sample_token.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float]
         lib.llama_sample_token.restype = ctypes.c_int
 
+        if hasattr(lib, "llama_sample_token_ex"):
+            lib.llama_sample_token_ex.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float, ctypes.c_int]
+            lib.llama_sample_token_ex.restype = ctypes.c_int
+
+        if hasattr(lib, "llama_generate_ex"):
+            lib.llama_generate_ex.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_float,
+                ctypes.c_float,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int),
+            ]
+            lib.llama_generate_ex.restype = ctypes.c_int
+
+        if hasattr(lib, "llama_forward_argmax"):
+            lib.llama_forward_argmax.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+            lib.llama_forward_argmax.restype = ctypes.c_int
+
+        if hasattr(lib, "llama_set_profile"):
+            lib.llama_set_profile.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.llama_set_profile.restype = None
+
+        if hasattr(lib, "llama_reset_profile"):
+            lib.llama_reset_profile.argtypes = [ctypes.c_void_p]
+            lib.llama_reset_profile.restype = None
+
+        if hasattr(lib, "llama_get_profile"):
+            lib.llama_get_profile.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
+            lib.llama_get_profile.restype = None
+
         if hasattr(lib, "llama_get_cpu_arch"):
             lib.llama_get_cpu_arch.argtypes = []
             lib.llama_get_cpu_arch.restype = ctypes.c_char_p
@@ -314,6 +350,8 @@ class CppLlamaEngine:
             vocab_size=config.vocab_size,
             seq_len=config.seq_len,
             rope_type=getattr(config, "rope_type_int", 0),
+            eos_token_id=int(getattr(config, "eos_token_id", 2)),
+            rope_theta=float(getattr(config, "rope_theta", 10000.0)),
         )
 
         self._contiguous_refs: List[np.ndarray] = []
@@ -433,7 +471,23 @@ class CppLlamaEngine:
         except Exception as e:
             raise RuntimeError(f"Forward failed at pos {pos}: {e}") from e
 
-    def sample(self, temperature: float = 0.7, top_p: float = 0.9) -> int:
+    def forward_argmax(self, token: int, pos: int) -> int:
+        """Forward single token with fused classifier argmax (zero logit memory write)."""
+        if not self.handle:
+            raise RuntimeError("Engine handle is null")
+        if not isinstance(token, int) or token < 0 or token >= self.vocab_size:
+            raise ValueError(f"token {token} out of vocab range [0,{self.vocab_size})")
+        if not isinstance(pos, int) or pos < 0 or pos >= self.config_struct.seq_len:
+            raise ValueError(f"pos {pos} out of range [0,{self.config_struct.seq_len})")
+        try:
+            if hasattr(self.lib, "llama_forward_argmax"):
+                return int(self.lib.llama_forward_argmax(self.handle, int(token), int(pos)))
+            logits = self.forward(token, pos, copy_logits=False)
+            return int(np.argmax(logits))
+        except Exception as e:
+            raise RuntimeError(f"Forward argmax failed at pos {pos}: {e}") from e
+
+    def sample(self, temperature: float = 0.7, top_p: float = 0.9, top_k: int = 0) -> int:
         """Sample next token directly in C++ using fast partial-sort sampling."""
         if not self.handle:
             raise RuntimeError("Engine handle is null")
@@ -441,7 +495,11 @@ class CppLlamaEngine:
             raise ValueError(f"temperature must be >=0, got {temperature}")
         if not 0.0 <= top_p <= 1.0:
             raise ValueError(f"top_p must be in [0,1], got {top_p}")
+        if top_k < 0:
+            raise ValueError(f"top_k must be >=0, got {top_k}")
         try:
+            if top_k > 0 and hasattr(self.lib, "llama_sample_token_ex"):
+                return int(self.lib.llama_sample_token_ex(self.handle, float(temperature), float(top_p), int(top_k)))
             return int(self.lib.llama_sample_token(self.handle, float(temperature), float(top_p)))
         except Exception as e:
             raise RuntimeError(f"Sampling failed: {e}") from e
@@ -452,6 +510,8 @@ class CppLlamaEngine:
         max_new_tokens: int = 64,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: int = 0,
+        eos_token_id: Optional[int] = None,
     ) -> List[int]:
         """Generate tokens autoregressively in pure C++ without GIL or Python overhead."""
         if not self.handle:
@@ -472,22 +532,38 @@ class CppLlamaEngine:
             raise ValueError(f"top_p must be in [0, 1], got {top_p}")
         if temperature < 0:
             raise ValueError(f"temperature must be >=0, got {temperature}")
+        if top_k < 0:
+            raise ValueError(f"top_k must be >=0, got {top_k}")
         if max_new_tokens > self.config_struct.seq_len:
             print(f"[cpp_backend] Warning: max_new_tokens {max_new_tokens} > seq_len {self.config_struct.seq_len}, will be truncated", file=sys.stderr)
 
         try:
             p_arr = (ctypes.c_int * len(prompt_tokens))(*prompt_tokens)
             out_buf = (ctypes.c_int * max_new_tokens)()
+            eos_id = eos_token_id if eos_token_id is not None else -1
 
-            n_gen = self.lib.llama_generate(
-                self.handle,
-                p_arr,
-                len(prompt_tokens),
-                max_new_tokens,
-                float(temperature),
-                float(top_p),
-                out_buf,
-            )
+            if hasattr(self.lib, "llama_generate_ex"):
+                n_gen = self.lib.llama_generate_ex(
+                    self.handle,
+                    p_arr,
+                    len(prompt_tokens),
+                    max_new_tokens,
+                    float(temperature),
+                    float(top_p),
+                    int(top_k),
+                    int(eos_id),
+                    out_buf,
+                )
+            else:
+                n_gen = self.lib.llama_generate(
+                    self.handle,
+                    p_arr,
+                    len(prompt_tokens),
+                    max_new_tokens,
+                    float(temperature),
+                    float(top_p),
+                    out_buf,
+                )
             if n_gen < 0:
                 raise RuntimeError(f"llama_generate returned error code {n_gen}")
             if n_gen > max_new_tokens:
@@ -502,6 +578,39 @@ class CppLlamaEngine:
             if isinstance(e, (ValueError, TypeError, RuntimeError)):
                 raise
             raise RuntimeError(f"Generation failed: {e}") from e
+
+    def set_profile(self, enable: bool = True) -> None:
+        """Enable or disable native performance profiling timers."""
+        if not self.handle:
+            raise RuntimeError("Engine handle is null")
+        if hasattr(self.lib, "llama_set_profile"):
+            self.lib.llama_set_profile(self.handle, 1 if enable else 0)
+
+    def reset_profile(self) -> None:
+        """Reset native performance profiling counters."""
+        if not self.handle:
+            raise RuntimeError("Engine handle is null")
+        if hasattr(self.lib, "llama_reset_profile"):
+            self.lib.llama_reset_profile(self.handle)
+
+    def get_profile(self) -> Dict[str, Union[float, int]]:
+        """Retrieve breakdown of native time spent in forward pass components."""
+        if not self.handle:
+            raise RuntimeError("Engine handle is null")
+        if hasattr(self.lib, "llama_get_profile"):
+            stats = (ctypes.c_double * 8)()
+            self.lib.llama_get_profile(self.handle, stats)
+            return {
+                "rmsnorm_ms": float(stats[0]),
+                "qkv_ms": float(stats[1]),
+                "rope_ms": float(stats[2]),
+                "attn_ms": float(stats[3]),
+                "ffn_ms": float(stats[4]),
+                "classifier_ms": float(stats[5]),
+                "total_ms": float(stats[6]),
+                "count": int(stats[7]),
+            }
+        return {}
 
     def train_step(
         self,
