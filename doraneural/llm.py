@@ -180,7 +180,10 @@ class LlamaTokenizer:
             if token_id is not None:
                 tokens.append(token_id)
             else:
-                tokens.extend(b + 3 for b in ch.encode("utf-8"))
+                unknown_id = self.str_to_id.get("<unk>", 0)
+                for byte in ch.encode("utf-8"):
+                    fallback_id = byte + 3
+                    tokens.append(fallback_id if fallback_id < len(self.vocab) else unknown_id)
 
         result = self._merge_tokens(tokens)
         if len(self._encode_cache) >= self._encode_cache_limit:
