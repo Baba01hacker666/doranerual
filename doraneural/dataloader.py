@@ -120,8 +120,13 @@ class DataLoader:
                 if self.drop_last and len(batch_indices) < self.batch_size:
                     break
 
-                # Slice batch
-                batch_data = self.dataset[batch_indices]
+                # Sequential ArrayDataset batches can use a view rather than
+                # NumPy advanced indexing (which allocates a fresh copy).
+                # Shuffled/custom datasets still use their index array.
+                if not self.shuffle and isinstance(self.dataset, ArrayDataset):
+                    batch_data = self.dataset[slice(start_idx, start_idx + len(batch_indices))]
+                else:
+                    batch_data = self.dataset[batch_indices]
 
                 # Optional user transform / augmentation
                 if self.transform is not None:
@@ -143,10 +148,24 @@ class DataLoader:
                         continue
 
         except Exception as exc:
-            q.put(exc)
+            # Do not strand the consumer if the queue is full while a
+            # transform/dataset raises.  The same cancellation-aware put is
+            # used for the completion sentinel below.
+            while not stop_event.is_set():
+                try:
+                    q.put(exc, timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
         finally:
-            # Signal iteration completion
-            q.put(_Sentinel())
+            # Signal iteration completion without deadlocking early-break
+            # callers that are concurrently draining the queue.
+            while not stop_event.is_set():
+                try:
+                    q.put(_Sentinel(), timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
 
     def __iter__(self) -> Iterator[Any]:
         # Clean up any leftover thread from previous partial loop

@@ -252,16 +252,17 @@ class Adam(Optimizer):
                 v *= self.beta2
                 v += (1.0 - self.beta2) * (grad * grad)
 
-                # Compute bias-corrected estimates
-                m_hat = m / beta1_corr
-                v_hat = v / beta2_corr
+                # Combine bias correction into the scalar step size.  This
+                # avoids materializing m_hat and v_hat for every parameter on
+                # memory-constrained CPU devices.
+                step_size = self.lr * np.sqrt(beta2_corr) / beta1_corr
 
                 # Decoupled weight decay (AdamW)
                 if self.weight_decay > 0.0:
                     param -= self.lr * self.weight_decay * param
 
                 # Parameter update
-                param -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+                param -= step_size * m / (np.sqrt(v) + self.eps)
 
 
 class RMSprop(Optimizer):

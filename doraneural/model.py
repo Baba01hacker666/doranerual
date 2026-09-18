@@ -83,6 +83,10 @@ class Sequential:
             for layer in layers:
                 self.add(layer)
 
+        # Layers have their own defaults for backwards compatibility.  Align them
+        # with the model dtype once, rather than paying repeated casts in forward.
+        self.to_precision(self.dtype)
+
         self.loss: Optional[Loss] = None
         self.optimizer: Optional[Optimizer] = None
         self.metrics: List[Metric] = []
@@ -233,12 +237,8 @@ class Sequential:
         # Setup active dataloader with prefetching
         if dataloader is not None:
             active_loader = dataloader
-            X_eval = getattr(active_loader.dataset, "X", None)
-            y_eval = getattr(active_loader.dataset, "y", None)
         elif isinstance(X, DataLoader):
             active_loader = X
-            X_eval = getattr(active_loader.dataset, "X", None)
-            y_eval = getattr(active_loader.dataset, "y", None)
         else:
             X_arr = np.asarray(X, dtype=self.dtype)
             y_arr = np.asarray(y)
@@ -246,8 +246,6 @@ class Sequential:
                 raise ValueError(
                     f"Sample count mismatch: X has {len(X_arr)} samples, y has {len(y_arr)} samples."
                 )
-            X_eval = X_arr
-            y_eval = y_arr
             active_loader = DataLoader(
                 (X_arr, y_arr),
                 batch_size=batch_size,
@@ -260,6 +258,14 @@ class Sequential:
         for epoch in range(1, epochs + 1):
             self.train(True)
 
+            # Accumulate batch statistics while the forward result is already in
+            # memory.  The old implementation ran a second full forward pass over
+            # the training set at the end of every epoch, which could nearly double
+            # training time for small CPU models.
+            loss_total = 0.0
+            metric_totals = {metric.name: 0.0 for metric in self.metrics}
+            sample_total = 0
+
             # Mini-batch gradient descent loop via prefetching DataLoader
             for X_batch, y_batch in active_loader:
                 X_batch_arr = np.asarray(X_batch, dtype=self.dtype)
@@ -269,7 +275,12 @@ class Sequential:
                 preds = self.forward(X_batch_arr)
 
                 # 2. Loss computation
-                self.loss.forward(preds, y_batch_arr)
+                batch_loss = self.loss.forward(preds, y_batch_arr)
+                batch_samples = len(X_batch_arr)
+                loss_total += batch_loss * batch_samples
+                sample_total += batch_samples
+                for metric in self.metrics:
+                    metric_totals[metric.name] += metric(y_batch_arr, preds) * batch_samples
 
                 # 3. Backward pass
                 loss_grad = self.loss.backward(preds, y_batch_arr)
@@ -287,24 +298,15 @@ class Sequential:
             if scheduler is not None:
                 scheduler.step()
 
-            # End of epoch evaluation on full dataset (eval mode)
             self.eval()
-            if X_eval is not None and y_eval is not None:
-                train_preds = self.forward(np.asarray(X_eval, dtype=self.dtype))
-                train_loss = self.loss.forward(train_preds, y_eval)
-            else:
-                train_loss = 0.0
-                train_preds = None
-
-            epoch_logs = {"loss": train_loss}
-            if train_preds is not None:
-                for metric in self.metrics:
-                    score = metric(y_eval, train_preds)
-                    epoch_logs[metric.name] = score
+            denominator = max(1, sample_total)
+            epoch_logs = {"loss": loss_total / denominator}
+            for metric in self.metrics:
+                epoch_logs[metric.name] = metric_totals[metric.name] / denominator
 
             if validation_data is not None:
                 X_val, y_val = validation_data
-                val_preds = self.forward(np.asarray(X_val, dtype=np.float32))
+                val_preds = self.forward(np.asarray(X_val, dtype=self.dtype))
                 val_loss = self.loss.forward(val_preds, y_val)
                 epoch_logs["val_loss"] = val_loss
                 for metric in self.metrics:
@@ -348,7 +350,7 @@ class Sequential:
             raise ModelNotCompiledError()
 
         self.eval()
-        X_arr = np.asarray(X, dtype=np.float32)
+        X_arr = np.asarray(X, dtype=self.dtype)
         y_arr = np.asarray(y)
 
         y_pred = self.forward(X_arr)
@@ -369,7 +371,7 @@ class Sequential:
             np.ndarray: Predicted probability distributions.
         """
         self.eval()
-        X_arr = np.asarray(X, dtype=np.float32)
+        X_arr = np.asarray(X, dtype=self.dtype)
         return self.forward(X_arr)
 
     def predict(self, X: np.ndarray) -> np.ndarray:

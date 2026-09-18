@@ -183,16 +183,22 @@ class Dropout(Layer):
         self._mask: Optional[np.ndarray] = None
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = np.asarray(x)
+        if not np.issubdtype(x_arr.dtype, np.floating):
+            x_arr = x_arr.astype(np.float32)
         if self.training and self.drop_rate > 0.0:
             keep_prob = 1.0 - self.drop_rate
-            self._mask = (np.random.rand(*x_arr.shape) < keep_prob) / keep_prob
+            # np.random.rand produces float64 by default; keeping the mask in
+            # the activation dtype avoids an otherwise hidden upcast.
+            self._mask = (np.random.random_sample(x_arr.shape) < keep_prob).astype(x_arr.dtype)
+            self._mask /= np.asarray(keep_prob, dtype=x_arr.dtype)
             return x_arr * self._mask
         self._mask = None
         return x_arr
 
     def backward(self, grad_output: np.ndarray) -> np.ndarray:
-        grad_out = np.asarray(grad_output, dtype=np.float32)
+        dtype = self._mask.dtype if self._mask is not None else np.asarray(grad_output).dtype
+        grad_out = np.asarray(grad_output, dtype=dtype)
         if self.training and self._mask is not None:
             return grad_out * self._mask
         return grad_out
@@ -216,11 +222,12 @@ class LayerNorm(Layer):
         super().__init__()
         self.normalized_shape: int = int(normalized_shape)
         self.eps: float = float(eps)
+        self.dtype = np.dtype(np.float32)
         self.trainable: bool = True
 
         # Learnable scale (gamma) and shift (beta)
-        self.gamma: np.ndarray = np.ones((1, self.normalized_shape), dtype=np.float32)
-        self.beta: np.ndarray = np.zeros((1, self.normalized_shape), dtype=np.float32)
+        self.gamma: np.ndarray = np.ones((1, self.normalized_shape), dtype=self.dtype)
+        self.beta: np.ndarray = np.zeros((1, self.normalized_shape), dtype=self.dtype)
 
         self.dgamma: np.ndarray = np.zeros_like(self.gamma)
         self.dbeta: np.ndarray = np.zeros_like(self.beta)
@@ -234,7 +241,7 @@ class LayerNorm(Layer):
         self._cache_std: Optional[np.ndarray] = None
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = np.asarray(x, dtype=self.dtype)
         if x_arr.shape[-1] != self.normalized_shape:
             raise ValueError(
                 f"LayerNorm expected last dimension {self.normalized_shape}, got shape {x_arr.shape}"
@@ -251,7 +258,7 @@ class LayerNorm(Layer):
         return x_norm * self.gamma + self.beta
 
     def backward(self, grad_output: np.ndarray) -> np.ndarray:
-        grad_out = np.asarray(grad_output, dtype=np.float32)
+        grad_out = np.asarray(grad_output, dtype=self.dtype)
         x_norm = self._cache_x_norm
         std = self._cache_std
 
@@ -297,7 +304,7 @@ class Flatten(Layer):
         self._orig_shape: Optional[Tuple[int, ...]] = None
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = np.asarray(x)
         self._orig_shape = x_arr.shape
         batch_size = x_arr.shape[0]
         return x_arr.reshape(batch_size, -1)
@@ -305,7 +312,7 @@ class Flatten(Layer):
     def backward(self, grad_output: np.ndarray) -> np.ndarray:
         if self._orig_shape is None:
             raise RuntimeError("Flatten.backward called before forward pass.")
-        return np.asarray(grad_output, dtype=np.float32).reshape(self._orig_shape)
+        return np.asarray(grad_output).reshape(self._orig_shape)
 
     def to_dict(self) -> Dict[str, Any]:
         return {"type": "Flatten"}
@@ -556,7 +563,9 @@ class MaxPool2D(Layer):
         self._x_cache: Optional[np.ndarray] = None
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = np.asarray(x)
+        if not np.issubdtype(x_arr.dtype, np.floating):
+            x_arr = x_arr.astype(np.float32)
         if x_arr.ndim != 4:
             raise ValueError(f"MaxPool2D expects 4D input (N, C, H, W), got shape {x_arr.shape}")
 
@@ -565,7 +574,7 @@ class MaxPool2D(Layer):
         out_h = (H - self.pool_size) // self.stride + 1
         out_w = (W - self.pool_size) // self.stride + 1
 
-        out = np.zeros((N, C, out_h, out_w), dtype=np.float32)
+        out = np.zeros((N, C, out_h, out_w), dtype=x_arr.dtype)
         for i in range(out_h):
             h_start = i * self.stride
             h_end = h_start + self.pool_size
@@ -580,8 +589,8 @@ class MaxPool2D(Layer):
         if self._x_cache is None:
             raise RuntimeError("MaxPool2D.backward called before forward pass.")
 
-        grad_out = np.asarray(grad_output, dtype=np.float32)
         x = self._x_cache
+        grad_out = np.asarray(grad_output, dtype=x.dtype)
         N, C, H, W = x.shape
         out_h, out_w = grad_out.shape[2], grad_out.shape[3]
 

@@ -4,8 +4,22 @@ Includes Binary Cross-Entropy, Categorical Cross-Entropy, and Mean Squared Error
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Tuple
 import numpy as np
+
+
+def _as_float_array(value: np.ndarray, dtype: Optional[np.dtype] = None) -> np.ndarray:
+    """Convert values to floating point without discarding float64 precision."""
+    arr = np.asarray(value, dtype=dtype)
+    if not np.issubdtype(arr.dtype, np.floating):
+        arr = arr.astype(np.float32)
+    return arr
+
+
+def _loss_pair(y_pred: np.ndarray, y_true: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    yp = _as_float_array(y_pred)
+    yt = _as_float_array(y_true, dtype=yp.dtype)
+    return yp, yt
 
 
 class Loss(ABC):
@@ -79,8 +93,7 @@ class BinaryCrossEntropy(Loss):
         Returns:
             float: Scalar mean binary cross-entropy loss.
         """
-        yp = np.asarray(y_pred, dtype=np.float32)
-        yt = np.asarray(y_true, dtype=np.float32)
+        yp, yt = _loss_pair(y_pred, y_true)
 
         if yp.ndim == 1:
             yp = yp.reshape(-1, 1)
@@ -109,12 +122,12 @@ class BinaryCrossEntropy(Loss):
             np.ndarray: Upstream gradient dL/dy_pred with shape (batch_size, 1).
         """
         yp = (
-            np.asarray(y_pred, dtype=np.float32)
+            _as_float_array(y_pred)
             if y_pred is not None
             else self._y_pred_cache
         )
         yt = (
-            np.asarray(y_true, dtype=np.float32)
+            _as_float_array(y_true, dtype=yp.dtype)
             if y_true is not None
             else self._y_true_cache
         )
@@ -170,7 +183,7 @@ class CategoricalCrossEntropy(Loss):
                     f"Class indices in y_true must be between 0 and {num_classes - 1}, "
                     f"found min={indices.min()}, max={indices.max()}."
                 )
-            one_hot = np.zeros((len(indices), num_classes), dtype=np.float32)
+            one_hot = np.zeros((len(indices), num_classes), dtype=y_pred.dtype)
             one_hot[np.arange(len(indices)), indices] = 1.0
             return one_hot
 
@@ -179,7 +192,7 @@ class CategoricalCrossEntropy(Loss):
                 f"Shape mismatch in CategoricalCrossEntropy: y_pred is {y_pred.shape}, "
                 f"y_true is {yt.shape}."
             )
-        return yt.astype(np.float32)
+        return yt.astype(y_pred.dtype, copy=False)
 
     def forward(self, y_pred: np.ndarray, y_true: np.ndarray) -> float:
         """Calculate categorical cross-entropy loss.
@@ -192,7 +205,7 @@ class CategoricalCrossEntropy(Loss):
         Returns:
             float: Scalar mean categorical cross-entropy loss.
         """
-        yp = np.asarray(y_pred, dtype=np.float32)
+        yp = _as_float_array(y_pred)
         if yp.ndim != 2:
             raise ValueError(f"CategoricalCrossEntropy expects 2D y_pred, got shape {yp.shape}.")
 
@@ -215,12 +228,12 @@ class CategoricalCrossEntropy(Loss):
             np.ndarray: Gradient tensor matching shape (batch_size, num_classes).
         """
         yp = (
-            np.asarray(y_pred, dtype=np.float32)
+            _as_float_array(y_pred)
             if y_pred is not None
             else self._y_pred_cache
         )
         yt = (
-            np.asarray(y_true, dtype=np.float32)
+            _as_float_array(y_true, dtype=yp.dtype)
             if y_true is not None
             else self._y_true_cache
         )
@@ -250,8 +263,7 @@ class MeanSquaredError(Loss):
     """
 
     def forward(self, y_pred: np.ndarray, y_true: np.ndarray) -> float:
-        yp = np.asarray(y_pred, dtype=np.float32)
-        yt = np.asarray(y_true, dtype=np.float32)
+        yp, yt = _loss_pair(y_pred, y_true)
 
         if yp.ndim == 1:
             yp = yp.reshape(-1, 1)
@@ -269,8 +281,8 @@ class MeanSquaredError(Loss):
     def backward(
         self, y_pred: Optional[np.ndarray] = None, y_true: Optional[np.ndarray] = None
     ) -> np.ndarray:
-        yp = np.asarray(y_pred, dtype=np.float32) if y_pred is not None else self._y_pred_cache
-        yt = np.asarray(y_true, dtype=np.float32) if y_true is not None else self._y_true_cache
+        yp = _as_float_array(y_pred) if y_pred is not None else self._y_pred_cache
+        yt = _as_float_array(y_true, dtype=yp.dtype) if y_true is not None else self._y_true_cache
 
         if yp is None or yt is None:
             raise RuntimeError("MeanSquaredError.backward called before forward pass.")
