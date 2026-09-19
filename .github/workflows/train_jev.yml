@@ -3,25 +3,41 @@ name: Train Jev System-1 & Calibrated Decisions
 on:
   workflow_dispatch:
     inputs:
+      engine:
+        description: "Execution engine ('cpp' for native C++ OpenMP, 'python' for autograd)"
+        required: false
+        default: "cpp"
+        type: choice
+        options:
+          - cpp
+          - python
+      arch:
+        description: "Model preset ('xtra' for deep 6-layer dim=512, 'pulse' for standard)"
+        required: false
+        default: "xtra"
+        type: choice
+        options:
+          - xtra
+          - pulse
       epochs:
         description: "Number of RLCD training epochs"
         required: false
-        default: "3"
+        default: "5"
         type: string
       batch_size:
-        description: "Batch size for gradient accumulation"
-        required: false
-        default: "64"
-        type: string
-      dim:
-        description: "Hidden representation dimension"
+        description: "Batch size for mini-batch training"
         required: false
         default: "128"
         type: string
-      layers:
-        description: "Number of encoder layers"
+      dim:
+        description: "Hidden representation dimension (overridden if arch=xtra)"
         required: false
-        default: "2"
+        default: "512"
+        type: string
+      layers:
+        description: "Number of encoder layers (overridden if arch=xtra)"
+        required: false
+        default: "6"
         type: string
       learning_rate:
         description: "Learning rate for AdamW"
@@ -86,19 +102,26 @@ jobs:
             jev-checkpoint-${{ github.ref_name }}-
             jev-checkpoint-
 
-      - name: Train Jev with RLCD
+      - name: Build Native C++ Engine
+        run: |
+          python3 -c "import doraneural as dn; dn.build_cpp_library(force=True)"
+
+      - name: Train Jev / Zexo-Pulse with RLCD
         run: |
           mkdir -p checkpoints/jev
           python3 research/train_jev.py \
             --data zexo/data/jev_100k_train.jsonl \
             --eval-data zexo/data/jev_100k_eval.jsonl \
             --output-dir checkpoints/jev \
-            --epochs "${{ github.event.inputs.epochs || '3' }}" \
-            --batch-size "${{ github.event.inputs.batch_size || '64' }}" \
-            --dim "${{ github.event.inputs.dim || '128' }}" \
-            --layers "${{ github.event.inputs.layers || '2' }}" \
+            --engine "${{ github.event.inputs.engine || 'cpp' }}" \
+            --arch "${{ github.event.inputs.arch || 'xtra' }}" \
+            --epochs "${{ github.event.inputs.epochs || '5' }}" \
+            --batch-size "${{ github.event.inputs.batch_size || '128' }}" \
+            --dim "${{ github.event.inputs.dim || '512' }}" \
+            --layers "${{ github.event.inputs.layers || '6' }}" \
             --lr "${{ github.event.inputs.learning_rate || '0.005' }}" \
-            --tag "jev_run_${{ github.run_number }}" \
+            --threads 4 \
+            --tag "zexo_run_${{ github.run_number }}" \
             --test-query "${{ github.event.inputs.test_query || 'How do I optimize a CUDA kernel for matrix transpose?' }}"
 
       - name: Save Jev Checkpoint to Actions Cache

@@ -8,16 +8,18 @@ Trains Jev on multi-head decision tasks using RLCD (Reinforcement Learning for C
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from doraneural.jev import JevDecisionModel, rlcd_loss
+from doraneural.pulse import ZexoPulse, ZexoXtra
 from doraneural.transformer import TensorAdamW
 
 
@@ -69,7 +71,7 @@ def load_decision_dataset(jsonl_path: Path) -> List[Dict[str, any]]:
 
 
 def evaluate_held_out_split(
-    jev: JevDecisionModel,
+    jev: Union[JevDecisionModel, ZexoPulse],
     eval_records: List[Dict[str, any]],
     categories: List[str],
     cat_to_idx: Dict[str, int],
@@ -197,20 +199,30 @@ def train_jev_engine(
     dataset_path: Path,
     output_dir: Path,
     eval_path: Optional[Path] = None,
+    engine: str = "cpp",
+    arch: str = "pulse",
     dim: int = 128,
     hidden_dim: int = 256,
     n_layers: int = 2,
     epochs: int = 25,
     batch_size: int = 16,
     lr: float = 0.005,
+    threads: int = 4,
     tag: str = "jev_latest",
     test_query: str = "How do I optimize a CUDA kernel for matrix transpose?",
 ) -> Dict[str, any]:
+    if arch == "xtra":
+        dim = 512
+        hidden_dim = 1024
+        n_layers = 6
+
     print("=" * 80)
-    print(" ⚡ JEV SYSTEM-1 NON-AUTOREGRESSIVE DECISION TRAINING")
+    engine_name = "NATIVE C++ ENGINE (OpenMP Multi-Core)" if engine == "cpp" else "NUMPY AUTOGRAD ENGINE"
+    print(f" ⚡ ZEXO-PULSE SYSTEM-1 TRAINING [{engine_name}]")
     print("=" * 80)
     print(f"Run Tag:            {tag}")
-    print(f"Architecture:       Parallel Single-Pass Encoder (dim={dim}, hidden={hidden_dim}, layers={n_layers})")
+    print(f"Preset / Model:     {arch.upper()} (dim={dim}, hidden={hidden_dim}, layers={n_layers})")
+    print(f"Engine & Threads:   {engine.upper()} ({threads} worker threads)")
     print(f"Hyperparameters:    epochs={epochs}, batch_size={batch_size}, lr={lr}")
     print(f"Output Directory:   {output_dir}")
     print("-" * 80)
@@ -223,11 +235,23 @@ def train_jev_engine(
     print(f"  Categories: {', '.join(categories)}")
     print("-" * 80)
 
-    # 2. Build Jev Model with Decision Primitives
-    jev = JevDecisionModel(vocab_size=256, dim=dim, hidden_dim=hidden_dim, n_layers=n_layers)
-    jev.add_choice_head("category_router", options=categories)
-    jev.add_boolean_head("safety_flag")
-    jev.add_score_head("complexity_score", min_val=0.0, max_val=10.0)
+    # 2. Build Decision Model
+    if engine == "cpp":
+        if arch == "xtra":
+            jev = ZexoXtra(categories=categories)
+        else:
+            jev = ZexoPulse(
+                vocab_size=256,
+                dim=dim,
+                hidden_dim=hidden_dim,
+                n_layers=n_layers,
+                categories=categories,
+            )
+    else:
+        jev = JevDecisionModel(vocab_size=256, dim=dim, hidden_dim=hidden_dim, n_layers=n_layers)
+        jev.add_choice_head("category_router", options=categories)
+        jev.add_boolean_head("safety_flag")
+        jev.add_score_head("complexity_score", min_val=0.0, max_val=10.0)
 
     # 3. Pre-Training Evaluation
     print(f"🔍 Pre-Training Decision Probe (Query: '{test_query}'):")
@@ -241,63 +265,85 @@ def train_jev_engine(
     print("-" * 80)
 
     # 4. Training Loop with RLCD
-    print("🚀 Commencing RLCD (Reinforcement Learning for Calibrated Decisions) Training...")
-    optimizer = TensorAdamW(jev.parameters(), lr=lr, weight_decay=0.001)
-
+    print(f"🚀 Commencing RLCD Training with {engine.upper()} Engine...")
     t_start = time.perf_counter()
     loss_history = []
     brier_history = []
 
-    for ep in range(1, epochs + 1):
-        total_loss = 0.0
-        total_brier = 0.0
-        np.random.shuffle(records)
+    if engine == "cpp":
+        for ep in range(1, epochs + 1):
+            total_loss = 0.0
+            np.random.shuffle(records)
 
-        for i, rec in enumerate(records):
-            if i % batch_size == 0:
-                optimizer.zero_grad()
+            for i in range(0, len(records), batch_size):
+                batch = records[i : i + batch_size]
+                loss_val = jev.train_batch(
+                    batch,
+                    lr=lr,
+                    lambda_cal=0.5,
+                    weight_decay=0.001,
+                    num_threads=threads,
+                )
+                total_loss += loss_val * len(batch)
 
-            tokens = list(rec["text"].encode("utf-8"))
-            h = jev.encode(tokens)
+            avg_loss = total_loss / len(records)
+            loss_history.append(avg_loss)
+            brier_history.append(0.0)
 
-            # (a) Choice Head RLCD Loss
-            _, probs = jev.choice_heads["category_router"].forward(h)
-            target_cat = cat_to_idx[rec["category"]]
-            l_cat = rlcd_loss(probs, target_cat, lambda_cal=0.5, lambda_entropy=0.02)
+            if ep == 1 or ep % max(1, epochs // 5) == 0 or ep == epochs:
+                print(f"   Epoch {ep:02d}/{epochs:02d} -> Mini-batch Loss: {avg_loss:.4f}")
+    else:
+        optimizer = TensorAdamW(jev.parameters(), lr=lr, weight_decay=0.001)
+        for ep in range(1, epochs + 1):
+            total_loss = 0.0
+            total_brier = 0.0
+            np.random.shuffle(records)
 
-            # (b) Boolean Head Loss (Binary Cross-Entropy)
-            _, prob_bool = jev.bool_heads["safety_flag"].forward(h)
-            target_bool = 1.0 if rec["is_safety"] else 0.0
-            l_bool = - (target_bool * (prob_bool + 1e-12).log() + (1.0 - target_bool) * (1.0 - prob_bool + 1e-12).log())
+            for i, rec in enumerate(records):
+                if i % batch_size == 0:
+                    optimizer.zero_grad()
 
-            # (c) Score Head Loss (MSE)
-            pred_score = jev.score_heads["complexity_score"].forward(h)
-            target_score = rec["complexity"]
-            l_score = ((pred_score - target_score) ** 2) * 0.1
+                tokens = list(rec["text"].encode("utf-8"))
+                h = jev.encode(tokens)
 
-            total_sample_loss = l_cat + l_bool * 0.5 + l_score
-            loss_scaled = total_sample_loss / batch_size
-            loss_scaled.backward()
+                # (a) Choice Head RLCD Loss
+                _, probs = jev.choice_heads["category_router"].forward(h)
+                target_cat = cat_to_idx[rec["category"]]
+                l_cat = rlcd_loss(probs, target_cat, lambda_cal=0.5, lambda_entropy=0.02)
 
-            if (i + 1) % batch_size == 0 or (i + 1) == len(records):
-                optimizer.step()
+                # (b) Boolean Head Loss (Binary Cross-Entropy)
+                _, prob_bool = jev.bool_heads["safety_flag"].forward(h)
+                target_bool = 1.0 if rec["is_safety"] else 0.0
+                l_bool = - (target_bool * (prob_bool + 1e-12).log() + (1.0 - target_bool) * (1.0 - prob_bool + 1e-12).log())
 
-            # Track Brier score on choice
-            probs_flat = probs.data.flatten()
-            one_hot = np.zeros(len(categories))
-            one_hot[target_cat] = 1.0
-            brier_val = float(np.sum((probs_flat - one_hot) ** 2))
+                # (c) Score Head Loss (MSE)
+                pred_score = jev.score_heads["complexity_score"].forward(h)
+                target_score = rec["complexity"]
+                l_score = ((pred_score - target_score) ** 2) * 0.1
 
-            total_loss += float(total_sample_loss.data.item())
-            total_brier += brier_val
+                total_sample_loss = l_cat + l_bool * 0.5 + l_score
+                loss_scaled = total_sample_loss / batch_size
+                loss_scaled.backward()
 
-        avg_loss = total_loss / len(records)
-        avg_brier = total_brier / len(records)
-        loss_history.append(avg_loss)
-        brier_history.append(avg_brier)
+                if (i + 1) % batch_size == 0 or (i + 1) == len(records):
+                    optimizer.step()
 
-        if ep == 1 or ep % max(1, epochs // 5) == 0 or ep == epochs:
-            print(f"   Epoch {ep:02d}/{epochs:02d} -> Total Loss: {avg_loss:.4f} | Brier Calibration: {avg_brier:.4f}")
+                # Track Brier score on choice
+                probs_flat = probs.data.flatten()
+                one_hot = np.zeros(len(categories))
+                one_hot[target_cat] = 1.0
+                brier_val = float(np.sum((probs_flat - one_hot) ** 2))
+
+                total_loss += float(total_sample_loss.data.item())
+                total_brier += brier_val
+
+            avg_loss = total_loss / len(records)
+            avg_brier = total_brier / len(records)
+            loss_history.append(avg_loss)
+            brier_history.append(avg_brier)
+
+            if ep == 1 or ep % max(1, epochs // 5) == 0 or ep == epochs:
+                print(f"   Epoch {ep:02d}/{epochs:02d} -> Total Loss: {avg_loss:.4f} | Brier Calibration: {avg_brier:.4f}")
 
     t_train = time.perf_counter() - t_start
     print(f"✓ RLCD Training finished in {t_train:.2f}s ({len(records)*epochs/t_train:.1f} decisions/sec)")
@@ -411,8 +457,28 @@ def main():
         default=REPO_ROOT / "checkpoints" / "jev",
         help="Directory to save checkpoints.",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        choices=["cpp", "python"],
+        default="cpp",
+        help="Execution engine: cpp (fast native C++ OpenMP) or python (autograd).",
+    )
+    parser.add_argument(
+        "--arch",
+        type=str,
+        choices=["pulse", "xtra"],
+        default="pulse",
+        help="Architecture preset: pulse (2-4 layers) or xtra (6 layers, dim=512, hidden=1024).",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=int(os.environ.get("DORANEURAL_NUM_THREADS", "4")),
+        help="Worker threads for OpenMP in C++ engine.",
+    )
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs.")
-    parser.add_argument("--batch-size", type=int, default=32, help="Mini-batch size for gradient accumulation.")
+    parser.add_argument("--batch-size", type=int, default=64, help="Mini-batch size for training.")
     parser.add_argument("--dim", type=int, default=128, help="Hidden representation dimension.")
     parser.add_argument("--layers", type=int, default=2, help="Number of encoder layers.")
     parser.add_argument("--lr", type=float, default=0.005, help="Learning rate.")
@@ -429,12 +495,15 @@ def main():
         dataset_path=args.data,
         output_dir=args.output_dir,
         eval_path=args.eval_data,
+        engine=args.engine,
+        arch=args.arch,
         dim=args.dim,
         hidden_dim=args.dim * 2,
         n_layers=args.layers,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
+        threads=args.threads,
         tag=args.tag,
         test_query=args.test_query,
     )

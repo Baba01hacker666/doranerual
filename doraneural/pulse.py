@@ -125,6 +125,36 @@ class ZexoPulse:
         ]
         lib.pulse_train_batch.restype = ctypes.c_float
 
+        lib.pulse_get_weights.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        lib.pulse_get_weights.restype = None
+
+        lib.pulse_set_weights.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_float,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_float,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_float,
+        ]
+        lib.pulse_set_weights.restype = None
+
         return lib
 
     def __del__(self):
@@ -247,6 +277,155 @@ class ZexoPulse:
             int(num_threads),
         )
         return float(loss)
+
+    def get_weights(self) -> Dict[str, np.ndarray]:
+        """Extract model weights from native engine into NumPy arrays."""
+        V = self.vocab_size
+        D = self.dim
+        H = self.hidden_dim
+        L = self.n_layers
+        K = self.n_classes
+
+        embed = np.empty(V * D, dtype=np.float32)
+        w_enc = np.empty(L * D * H, dtype=np.float32)
+        w_proj = np.empty(L * H * D, dtype=np.float32)
+        w_choice = np.empty(D * K, dtype=np.float32)
+        b_choice = np.empty(K, dtype=np.float32)
+        temp_choice = (ctypes.c_float * 1)()
+        w_bool = np.empty(D, dtype=np.float32)
+        b_bool = (ctypes.c_float * 1)()
+        w_score = np.empty(D, dtype=np.float32)
+        b_score = (ctypes.c_float * 1)()
+
+        c_float_p = ctypes.POINTER(ctypes.c_float)
+        self._lib.pulse_get_weights(
+            self._engine,
+            embed.ctypes.data_as(c_float_p),
+            w_enc.ctypes.data_as(c_float_p),
+            w_proj.ctypes.data_as(c_float_p),
+            w_choice.ctypes.data_as(c_float_p),
+            b_choice.ctypes.data_as(c_float_p),
+            temp_choice,
+            w_bool.ctypes.data_as(c_float_p),
+            b_bool,
+            w_score.ctypes.data_as(c_float_p),
+            b_score,
+        )
+
+        weights = {
+            "embed": embed.reshape(V, D),
+            "w_choice": w_choice.reshape(D, K),
+            "b_choice": b_choice,
+            "temp_choice": np.array(float(temp_choice[0]), dtype=np.float32),
+            "w_bool": w_bool.reshape(D, 1),
+            "b_bool": np.array(float(b_bool[0]), dtype=np.float32),
+            "w_score": w_score.reshape(D, 1),
+            "b_score": np.array(float(b_score[0]), dtype=np.float32),
+        }
+        enc_reshaped = w_enc.reshape(L, D, H)
+        proj_reshaped = w_proj.reshape(L, H, D)
+        for i in range(L):
+            weights[f"w_enc_{i}"] = enc_reshaped[i]
+            weights[f"w_proj_{i}"] = proj_reshaped[i]
+        return weights
+
+    def set_weights(self, weights: Dict[str, np.ndarray]):
+        """Set native model weights from dictionary of NumPy arrays."""
+        V = self.vocab_size
+        D = self.dim
+        H = self.hidden_dim
+        L = self.n_layers
+        K = self.n_classes
+
+        embed = np.ascontiguousarray(weights["embed"], dtype=np.float32)
+
+        w_enc_layers = []
+        w_proj_layers = []
+        for i in range(L):
+            w_enc_layers.append(weights[f"w_enc_{i}"])
+            w_proj_layers.append(weights[f"w_proj_{i}"])
+        w_enc = np.ascontiguousarray(np.stack(w_enc_layers, axis=0), dtype=np.float32)
+        w_proj = np.ascontiguousarray(np.stack(w_proj_layers, axis=0), dtype=np.float32)
+
+        w_choice = np.ascontiguousarray(weights["w_choice"], dtype=np.float32)
+        b_choice = np.ascontiguousarray(weights["b_choice"], dtype=np.float32)
+        temp_val = float(weights.get("temp_choice", 1.0))
+        w_bool = np.ascontiguousarray(weights["w_bool"].flatten(), dtype=np.float32)
+        b_bool_val = float(weights.get("b_bool", 0.0))
+        w_score = np.ascontiguousarray(weights["w_score"].flatten(), dtype=np.float32)
+        b_score_val = float(weights.get("b_score", 0.0))
+
+        c_float_p = ctypes.POINTER(ctypes.c_float)
+        self._lib.pulse_set_weights(
+            self._engine,
+            embed.ctypes.data_as(c_float_p),
+            w_enc.ctypes.data_as(c_float_p),
+            w_proj.ctypes.data_as(c_float_p),
+            w_choice.ctypes.data_as(c_float_p),
+            b_choice.ctypes.data_as(c_float_p),
+            ctypes.c_float(temp_val),
+            w_bool.ctypes.data_as(c_float_p),
+            ctypes.c_float(b_bool_val),
+            w_score.ctypes.data_as(c_float_p),
+            ctypes.c_float(b_score_val),
+        )
+
+    def save(self, path: Union[str, Path]) -> Path:
+        """Save ZexoPulse weights to .npz and schema to .json."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        weights = self.get_weights()
+        manifest = {
+            "vocab_size": self.vocab_size,
+            "dim": self.dim,
+            "hidden_dim": self.hidden_dim,
+            "n_layers": self.n_layers,
+            "categories": self.categories,
+            "score_min": self.score_min,
+            "score_max": self.score_max,
+        }
+        json_path = p.with_suffix(".json")
+        npz_path = p.with_suffix(".npz")
+        json_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        np.savez(npz_path, **weights)
+        return npz_path
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "ZexoPulse":
+        """Load ZexoPulse model from .json and .npz checkpoint files."""
+        p = Path(path)
+        json_path = p.with_suffix(".json")
+        npz_path = p.with_suffix(".npz")
+        if not json_path.exists() or not npz_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found at '{p}'. Need both {json_path.name} and {npz_path.name}")
+        manifest = json.loads(json_path.read_text(encoding="utf-8"))
+        categories = manifest.get("categories")
+        if not categories and "choice_heads" in manifest:
+            categories = list(manifest["choice_heads"].values())[0]
+
+        model = cls(
+            vocab_size=manifest.get("vocab_size", 256),
+            dim=manifest.get("dim", 128),
+            hidden_dim=manifest.get("hidden_dim", 256),
+            n_layers=manifest.get("n_layers", 2),
+            categories=categories,
+            score_min=manifest.get("score_min", 0.0),
+            score_max=manifest.get("score_max", 10.0),
+        )
+        loaded = np.load(npz_path)
+        weights = {k: loaded[k] for k in loaded.files}
+        if "choice_category_router_weight" in weights:
+            weights["w_choice"] = weights["choice_category_router_weight"]
+            weights["b_choice"] = weights["choice_category_router_bias"]
+            weights["temp_choice"] = weights.get("choice_category_router_temp", 1.0)
+        if "bool_safety_flag_weight" in weights:
+            weights["w_bool"] = weights["bool_safety_flag_weight"]
+            weights["b_bool"] = weights["bool_safety_flag_bias"]
+        if "score_complexity_score_weight" in weights:
+            weights["w_score"] = weights["score_complexity_score_weight"]
+            weights["b_score"] = weights["score_complexity_score_bias"]
+        model.set_weights(weights)
+        return model
 
 
 class ZexoXtra(ZexoPulse):
