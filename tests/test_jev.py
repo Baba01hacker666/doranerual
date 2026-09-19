@@ -56,3 +56,19 @@ def test_rlcd_loss_and_training_step():
     opt.step()
 
     assert float(l_init.data.item()) > 0.0
+
+
+def test_jev_save_and_load(tmp_path):
+    model = JevDecisionModel(vocab_size=256, dim=32, hidden_dim=64, n_layers=1)
+    model.add_choice_head("cat", options=["low", "high"])
+    model.add_score_head("score", min_val=0.0, max_val=5.0)
+
+    save_path = tmp_path / "test_jev_model"
+    model.save(save_path)
+    assert (tmp_path / "test_jev_model.npz").exists()
+    assert (tmp_path / "test_jev_model.json").exists()
+
+    loaded = JevDecisionModel.load(save_path)
+    assert "cat" in loaded.choice_heads
+    assert "score" in loaded.score_heads
+    assert np.allclose(model.embed.data, loaded.embed.data)

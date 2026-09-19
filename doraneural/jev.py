@@ -20,6 +20,7 @@ Inspired by TypeSafe AI's Jev architecture (Diogo Almeida):
 
 from dataclasses import dataclass, field
 import math
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
@@ -233,6 +234,81 @@ class JevDecisionModel(Module):
             )
 
         raise ValueError(f"Decision head '{head_name}' not found.")
+
+    def save(self, path: Union[str, Path]) -> Path:
+        """Save Jev weights to .npz and schema manifest to .json."""
+        import json
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tensors = {"embed": self.embed.data}
+        for i in range(self.n_layers):
+            tensors[f"w_enc_{i}"] = self.w_enc[i].data
+            tensors[f"w_proj_{i}"] = self.w_proj[i].data
+        for name, head in self.choice_heads.items():
+            tensors[f"choice_{name}_weight"] = head.weight.data
+            tensors[f"choice_{name}_bias"] = head.bias.data
+            tensors[f"choice_{name}_temp"] = head.temp_logit.data
+        for name, head in self.score_heads.items():
+            tensors[f"score_{name}_weight"] = head.weight.data
+            tensors[f"score_{name}_bias"] = head.bias.data
+        for name, head in self.bool_heads.items():
+            tensors[f"bool_{name}_weight"] = head.weight.data
+            tensors[f"bool_{name}_bias"] = head.bias.data
+
+        manifest = {
+            "vocab_size": self.vocab_size,
+            "dim": self.dim,
+            "hidden_dim": self.hidden_dim,
+            "n_layers": self.n_layers,
+            "choice_heads": {name: head.options for name, head in self.choice_heads.items()},
+            "score_heads": {name: [head.min_val, head.max_val] for name, head in self.score_heads.items()},
+            "bool_heads": list(self.bool_heads.keys()),
+        }
+        json_path = p.with_suffix(".json")
+        npz_path = p.with_suffix(".npz")
+        json_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        np.savez(npz_path, **tensors)
+        return npz_path
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "JevDecisionModel":
+        """Load Jev model and weights from .json and .npz checkpoint files."""
+        import json
+        p = Path(path)
+        json_path = p.with_suffix(".json")
+        npz_path = p.with_suffix(".npz")
+        if not json_path.exists() or not npz_path.exists():
+            raise FileNotFoundError(f"Checkpoint files not found for base path: {p}")
+        manifest = json.loads(json_path.read_text(encoding="utf-8"))
+        model = cls(
+            vocab_size=manifest["vocab_size"],
+            dim=manifest["dim"],
+            hidden_dim=manifest["hidden_dim"],
+            n_layers=manifest["n_layers"],
+        )
+        for name, options in manifest["choice_heads"].items():
+            model.add_choice_head(name, options=options)
+        for name, bounds in manifest["score_heads"].items():
+            model.add_score_head(name, min_val=bounds[0], max_val=bounds[1])
+        for name in manifest["bool_heads"]:
+            model.add_boolean_head(name)
+
+        weights = np.load(npz_path)
+        model.embed.data[...] = weights["embed"]
+        for i in range(model.n_layers):
+            model.w_enc[i].data[...] = weights[f"w_enc_{i}"]
+            model.w_proj[i].data[...] = weights[f"w_proj_{i}"]
+        for name in model.choice_heads:
+            model.choice_heads[name].weight.data[...] = weights[f"choice_{name}_weight"]
+            model.choice_heads[name].bias.data[...] = weights[f"choice_{name}_bias"]
+            model.choice_heads[name].temp_logit.data[...] = weights[f"choice_{name}_temp"]
+        for name in model.score_heads:
+            model.score_heads[name].weight.data[...] = weights[f"score_{name}_weight"]
+            model.score_heads[name].bias.data[...] = weights[f"score_{name}_bias"]
+        for name in model.bool_heads:
+            model.bool_heads[name].weight.data[...] = weights[f"bool_{name}_weight"]
+            model.bool_heads[name].bias.data[...] = weights[f"bool_{name}_bias"]
+        return model
 
 
 def rlcd_loss(

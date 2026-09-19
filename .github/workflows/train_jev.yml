@@ -1,0 +1,110 @@
+name: Train Jev System-1 & Calibrated Decisions
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: "Number of RLCD training epochs"
+        required: false
+        default: "30"
+        type: string
+      dim:
+        description: "Hidden representation dimension"
+        required: false
+        default: "128"
+        type: string
+      layers:
+        description: "Number of encoder layers"
+        required: false
+        default: "2"
+        type: string
+      learning_rate:
+        description: "Learning rate for AdamW"
+        required: false
+        default: "0.005"
+        type: string
+      test_query:
+        description: "Sample prompt evaluated before and after training"
+        required: false
+        default: "How do I optimize a CUDA kernel for matrix transpose?"
+        type: string
+      push_checkpoint_to_git:
+        description: "Commit updated Jev checkpoint back to git branch"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  train-jev:
+    name: Train Jev Non-Autoregressive Decision Engine
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore Previous Jev Checkpoint from Cache
+        uses: actions/cache/restore@v4
+        id: jev-cache
+        with:
+          path: checkpoints/jev/
+          key: jev-checkpoint-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            jev-checkpoint-${{ github.ref_name }}-
+            jev-checkpoint-
+
+      - name: Train Jev with RLCD
+        run: |
+          mkdir -p checkpoints/jev
+          python3 research/train_jev.py \
+            --data zexo/data/quality_dialogues.jsonl \
+            --output-dir checkpoints/jev \
+            --epochs "${{ github.event.inputs.epochs || '30' }}" \
+            --dim "${{ github.event.inputs.dim || '128' }}" \
+            --layers "${{ github.event.inputs.layers || '2' }}" \
+            --lr "${{ github.event.inputs.learning_rate || '0.005' }}" \
+            --tag "jev_run_${{ github.run_number }}" \
+            --test-query "${{ github.event.inputs.test_query || 'How do I optimize a CUDA kernel for matrix transpose?' }}"
+
+      - name: Save Jev Checkpoint to Actions Cache
+        uses: actions/cache/save@v4
+        with:
+          path: checkpoints/jev/
+          key: jev-checkpoint-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload Trained Jev Weights Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jev-checkpoint-run-${{ github.run_number }}
+          path: checkpoints/jev/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit Checkpoint to Git (Optional)
+        if: ${{ github.event.inputs.push_checkpoint_to_git == 'true' }}
+        run: |
+          git config user.name "baba01hacker666"
+          git config user.email "baba01hacker666@users.noreply.github.com"
+          git add checkpoints/jev/
+          if git diff --staged --quiet; then
+            echo "No checkpoint changes to commit."
+          else
+            git commit -m "chore(jev): update calibrated decision checkpoint [run ${{ github.run_number }}]"
+            git push origin HEAD:${{ github.ref }}
+          fi

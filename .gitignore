@@ -22,6 +22,7 @@ current_model.*
 .doraneural.json
 models/
 checkpoints/*.bin
+checkpoints/jev/
 zexo/checkpoints/*.bin
 
 # IDE and OS files
