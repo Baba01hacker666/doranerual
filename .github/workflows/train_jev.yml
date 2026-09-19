@@ -6,7 +6,12 @@ on:
       epochs:
         description: "Number of RLCD training epochs"
         required: false
-        default: "30"
+        default: "10"
+        type: string
+      batch_size:
+        description: "Batch size for gradient accumulation"
+        required: false
+        default: "32"
         type: string
       dim:
         description: "Hidden representation dimension"
@@ -73,9 +78,10 @@ jobs:
         run: |
           mkdir -p checkpoints/jev
           python3 research/train_jev.py \
-            --data zexo/data/quality_dialogues.jsonl \
+            --data zexo/data/jev_decisions_large.jsonl \
             --output-dir checkpoints/jev \
-            --epochs "${{ github.event.inputs.epochs || '30' }}" \
+            --epochs "${{ github.event.inputs.epochs || '10' }}" \
+            --batch-size "${{ github.event.inputs.batch_size || '32' }}" \
             --dim "${{ github.event.inputs.dim || '128' }}" \
             --layers "${{ github.event.inputs.layers || '2' }}" \
             --lr "${{ github.event.inputs.learning_rate || '0.005' }}" \

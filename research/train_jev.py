@@ -30,16 +30,20 @@ def load_decision_dataset(jsonl_path: Path) -> List[Dict[str, any]]:
                 continue
             row = json.loads(line)
             category = row.get("category", "general")
-            messages = row.get("messages", [])
-            user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
-            if user_msg:
-                is_safety = (category == "safety")
-                length_score = min(10.0, max(1.0, len(user_msg.split()) / 5.0))
+            text = row.get("text")
+            if not text:
+                messages = row.get("messages", [])
+                text = next((m["content"] for m in messages if m["role"] == "user"), "")
+            if text:
+                is_safety = row.get("is_safety", (category == "safety"))
+                complexity = row.get("complexity")
+                if complexity is None:
+                    complexity = min(10.0, max(1.0, len(text.split()) / 5.0))
                 data.append({
-                    "text": user_msg,
+                    "text": text,
                     "category": category,
-                    "is_safety": is_safety,
-                    "complexity": length_score,
+                    "is_safety": bool(is_safety),
+                    "complexity": float(complexity),
                 })
 
     # Add extra labeled edge cases to ensure rich decision boundaries
@@ -70,6 +74,7 @@ def train_jev_engine(
     hidden_dim: int = 256,
     n_layers: int = 2,
     epochs: int = 25,
+    batch_size: int = 16,
     lr: float = 0.005,
     tag: str = "jev_latest",
     test_query: str = "How do I optimize a CUDA kernel for matrix transpose?",
@@ -79,7 +84,7 @@ def train_jev_engine(
     print("=" * 80)
     print(f"Run Tag:            {tag}")
     print(f"Architecture:       Parallel Single-Pass Encoder (dim={dim}, hidden={hidden_dim}, layers={n_layers})")
-    print(f"Hyperparameters:    epochs={epochs}, lr={lr}")
+    print(f"Hyperparameters:    epochs={epochs}, batch_size={batch_size}, lr={lr}")
     print(f"Output Directory:   {output_dir}")
     print("-" * 80)
 
@@ -121,8 +126,10 @@ def train_jev_engine(
         total_brier = 0.0
         np.random.shuffle(records)
 
-        for rec in records:
-            optimizer.zero_grad()
+        for i, rec in enumerate(records):
+            if i % batch_size == 0:
+                optimizer.zero_grad()
+
             tokens = list(rec["text"].encode("utf-8"))
             h = jev.encode(tokens)
 
@@ -142,8 +149,11 @@ def train_jev_engine(
             l_score = ((pred_score - target_score) ** 2) * 0.1
 
             total_sample_loss = l_cat + l_bool * 0.5 + l_score
-            total_sample_loss.backward()
-            optimizer.step()
+            loss_scaled = total_sample_loss / batch_size
+            loss_scaled.backward()
+
+            if (i + 1) % batch_size == 0 or (i + 1) == len(records):
+                optimizer.step()
 
             # Track Brier score on choice
             probs_flat = probs.data.flatten()
@@ -230,10 +240,14 @@ def train_jev_engine(
 
 def main():
     parser = argparse.ArgumentParser(description="Train Jev System-1 Non-Autoregressive Decision Engine.")
+    default_data = REPO_ROOT / "zexo" / "data" / "jev_decisions_large.jsonl"
+    if not default_data.exists():
+        default_data = REPO_ROOT / "zexo" / "data" / "quality_dialogues.jsonl"
+
     parser.add_argument(
         "--data",
         type=Path,
-        default=REPO_ROOT / "zexo" / "data" / "quality_dialogues.jsonl",
+        default=default_data,
         help="Path to labeled dialogues dataset.",
     )
     parser.add_argument(
@@ -243,6 +257,7 @@ def main():
         help="Directory to save checkpoints.",
     )
     parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs.")
+    parser.add_argument("--batch-size", type=int, default=16, help="Mini-batch size for gradient accumulation.")
     parser.add_argument("--dim", type=int, default=128, help="Hidden representation dimension.")
     parser.add_argument("--layers", type=int, default=2, help="Number of encoder layers.")
     parser.add_argument("--lr", type=float, default=0.005, help="Learning rate.")
@@ -262,6 +277,7 @@ def main():
         hidden_dim=args.dim * 2,
         n_layers=args.layers,
         epochs=args.epochs,
+        batch_size=args.batch_size,
         lr=args.lr,
         tag=args.tag,
         test_query=args.test_query,
