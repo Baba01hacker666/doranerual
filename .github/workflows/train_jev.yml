@@ -6,12 +6,12 @@ on:
       epochs:
         description: "Number of RLCD training epochs"
         required: false
-        default: "10"
+        default: "3"
         type: string
       batch_size:
         description: "Batch size for gradient accumulation"
         required: false
-        default: "32"
+        default: "64"
         type: string
       dim:
         description: "Hidden representation dimension"
@@ -64,6 +64,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Cache Raw Datasets
+        uses: actions/cache@v4
+        with:
+          path: zexo/data/.dataset_cache/
+          key: dataset-cache-v1
+
+      - name: Assemble 100K Calibrated Decision Dataset
+        run: |
+          if [ ! -f "zexo/data/jev_100k_train.jsonl" ]; then
+            python3 zexo/data/build_100k_dataset.py
+          fi
+
       - name: Restore Previous Jev Checkpoint from Cache
         uses: actions/cache/restore@v4
         id: jev-cache
@@ -78,10 +90,11 @@ jobs:
         run: |
           mkdir -p checkpoints/jev
           python3 research/train_jev.py \
-            --data zexo/data/jev_decisions_large.jsonl \
+            --data zexo/data/jev_100k_train.jsonl \
+            --eval-data zexo/data/jev_100k_eval.jsonl \
             --output-dir checkpoints/jev \
-            --epochs "${{ github.event.inputs.epochs || '10' }}" \
-            --batch-size "${{ github.event.inputs.batch_size || '32' }}" \
+            --epochs "${{ github.event.inputs.epochs || '3' }}" \
+            --batch-size "${{ github.event.inputs.batch_size || '64' }}" \
             --dim "${{ github.event.inputs.dim || '128' }}" \
             --layers "${{ github.event.inputs.layers || '2' }}" \
             --lr "${{ github.event.inputs.learning_rate || '0.005' }}" \

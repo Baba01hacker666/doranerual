@@ -24,6 +24,9 @@ models/
 checkpoints/*.bin
 checkpoints/jev/
 zexo/checkpoints/*.bin
+zexo/data/.dataset_cache/
+zexo/data/jev_100k_train.jsonl
+zexo/data/jev_100k_eval.jsonl
 
 # IDE and OS files
 .DS_Store

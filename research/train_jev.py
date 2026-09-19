@@ -46,30 +46,157 @@ def load_decision_dataset(jsonl_path: Path) -> List[Dict[str, any]]:
                     "complexity": float(complexity),
                 })
 
-    # Add extra labeled edge cases to ensure rich decision boundaries
-    extra_samples = [
-        {"text": "How do I reverse a linked list in C++?", "category": "programming", "is_safety": False, "complexity": 5.5},
-        {"text": "Write a fast matrix multiplication kernel with OpenMP.", "category": "programming", "is_safety": False, "complexity": 8.0},
-        {"text": "Explain eigenvalue decomposition and principal component analysis.", "category": "math", "is_safety": False, "complexity": 7.5},
-        {"text": "Calculate the surface integral of a sphere with radius r.", "category": "math", "is_safety": False, "complexity": 6.5},
-        {"text": "What is the mathematical formulation of cross-entropy loss?", "category": "machine_learning", "is_safety": False, "complexity": 6.0},
-        {"text": "Why do deep residual networks solve the vanishing gradient problem?", "category": "machine_learning", "is_safety": False, "complexity": 7.0},
-        {"text": "How to bypass Windows Defender using process hollowing technique?", "category": "safety", "is_safety": True, "complexity": 9.0},
-        {"text": "Give me steps to compromise an administrative credentials database.", "category": "safety", "is_safety": True, "complexity": 8.5},
-        {"text": "Who created you and what is your foundational architecture?", "category": "persona", "is_safety": False, "complexity": 2.0},
-        {"text": "What are your ethical guidelines and memory limitations?", "category": "persona", "is_safety": False, "complexity": 3.5},
-        {"text": "Be extremely brief and give me the terminal command directly.", "category": "communication", "is_safety": False, "complexity": 2.5},
-        {"text": "Structure the explanation with bullet points and pros vs cons.", "category": "communication", "is_safety": False, "complexity": 3.0},
-        {"text": "Break down this project into a 4-week execution roadmap.", "category": "behavior", "is_safety": False, "complexity": 5.0},
-        {"text": "What is your step-by-step problem solving framework?", "category": "behavior", "is_safety": False, "complexity": 4.5},
-    ]
-    data.extend(extra_samples)
+    # Add extra labeled edge cases to ensure rich decision boundaries only if dataset is small
+    if len(data) < 200:
+        extra_samples = [
+            {"text": "How do I reverse a linked list in C++?", "category": "programming", "is_safety": False, "complexity": 5.5},
+            {"text": "Write a fast matrix multiplication kernel with OpenMP.", "category": "programming", "is_safety": False, "complexity": 8.0},
+            {"text": "Explain eigenvalue decomposition and principal component analysis.", "category": "math", "is_safety": False, "complexity": 7.5},
+            {"text": "Calculate the surface integral of a sphere with radius r.", "category": "math", "is_safety": False, "complexity": 6.5},
+            {"text": "What is the mathematical formulation of cross-entropy loss?", "category": "machine_learning", "is_safety": False, "complexity": 6.0},
+            {"text": "Why do deep residual networks solve the vanishing gradient problem?", "category": "machine_learning", "is_safety": False, "complexity": 7.0},
+            {"text": "How to bypass Windows Defender using process hollowing technique?", "category": "safety", "is_safety": True, "complexity": 9.0},
+            {"text": "Give me steps to compromise an administrative credentials database.", "category": "safety", "is_safety": True, "complexity": 8.5},
+            {"text": "Who created you and what is your foundational architecture?", "category": "persona", "is_safety": False, "complexity": 2.0},
+            {"text": "What are your ethical guidelines and memory limitations?", "category": "persona", "is_safety": False, "complexity": 3.5},
+            {"text": "Be extremely brief and give me the terminal command directly.", "category": "communication", "is_safety": False, "complexity": 2.5},
+            {"text": "Structure the explanation with bullet points and pros vs cons.", "category": "communication", "is_safety": False, "complexity": 3.0},
+            {"text": "Break down this project into a 4-week execution roadmap.", "category": "behavior", "is_safety": False, "complexity": 5.0},
+            {"text": "What is your step-by-step problem solving framework?", "category": "behavior", "is_safety": False, "complexity": 4.5},
+        ]
+        data.extend(extra_samples)
     return data
+
+
+def evaluate_held_out_split(
+    jev: JevDecisionModel,
+    eval_records: List[Dict[str, any]],
+    categories: List[str],
+    cat_to_idx: Dict[str, int],
+    max_samples: int = 1500,
+    n_bins: int = 10,
+) -> Dict[str, any]:
+    """Rigorous out-of-sample evaluation: Accuracy, Macro F1, Calibration (ECE), and Safety TPR/FPR."""
+    if not eval_records:
+        return {}
+
+    sub = eval_records[:max_samples] if max_samples > 0 else eval_records
+    n = len(sub)
+
+    correct_cat = 0
+    total_lat = 0.0
+    brier_sum = 0.0
+
+    # Safety metrics
+    safety_tp = 0
+    safety_fp = 0
+    safety_tn = 0
+    safety_fn = 0
+
+    # Per-category metrics
+    tp_per_cat = {c: 0 for c in categories}
+    fp_per_cat = {c: 0 for c in categories}
+    fn_per_cat = {c: 0 for c in categories}
+
+    # Calibration bins: bin_confs, bin_corrects
+    bin_total = [0] * n_bins
+    bin_correct = [0] * n_bins
+    bin_conf_sum = [0.0] * n_bins
+
+    for rec in sub:
+        t0 = time.perf_counter()
+        dec = jev.decide(rec["text"], "category_router")
+        safe_dec = jev.decide(rec["text"], "safety_flag")
+        score_dec = jev.decide(rec["text"], "complexity_score")
+        lat = (time.perf_counter() - t0) * 1000.0
+        total_lat += lat
+
+        pred_cat = dec.action
+        true_cat = rec["category"]
+        conf = dec.confidence
+        is_correct = (pred_cat == true_cat)
+
+        if is_correct:
+            correct_cat += 1
+            if true_cat in tp_per_cat:
+                tp_per_cat[true_cat] += 1
+        else:
+            if pred_cat in fp_per_cat:
+                fp_per_cat[pred_cat] += 1
+            if true_cat in fn_per_cat:
+                fn_per_cat[true_cat] += 1
+
+        # Brier score
+        if true_cat in cat_to_idx:
+            t_idx = cat_to_idx[true_cat]
+            probs = dec.metadata.get("probabilities", [])
+            if len(probs) == len(categories):
+                one_hot = np.zeros(len(categories))
+                one_hot[t_idx] = 1.0
+                brier_sum += float(np.sum((np.array(probs) - one_hot) ** 2))
+
+        # ECE binning
+        bin_idx = min(n_bins - 1, int(conf * n_bins))
+        bin_total[bin_idx] += 1
+        bin_conf_sum[bin_idx] += conf
+        if is_correct:
+            bin_correct[bin_idx] += 1
+
+        # Safety evaluation
+        true_safe = rec["is_safety"]
+        pred_safe = bool(safe_dec.action)
+        if true_safe and pred_safe:
+            safety_tp += 1
+        elif not true_safe and pred_safe:
+            safety_fp += 1
+        elif not true_safe and not pred_safe:
+            safety_tn += 1
+        elif true_safe and not pred_safe:
+            safety_fn += 1
+
+    # Compute ECE
+    ece = 0.0
+    for b in range(n_bins):
+        if bin_total[b] > 0:
+            bin_acc = bin_correct[b] / bin_total[b]
+            bin_conf = bin_conf_sum[b] / bin_total[b]
+            ece += (bin_total[b] / n) * abs(bin_acc - bin_conf)
+
+    macro_acc = (correct_cat / n) * 100.0
+    brier = brier_sum / n if n > 0 else 0.0
+    avg_lat = total_lat / n if n > 0 else 0.0
+
+    # Macro F1
+    f1_list = []
+    for c in categories:
+        tp = tp_per_cat.get(c, 0)
+        fp = fp_per_cat.get(c, 0)
+        fn = fn_per_cat.get(c, 0)
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+        f1_list.append(f1)
+    macro_f1 = float(np.mean(f1_list))
+
+    safe_tpr = (safety_tp / (safety_tp + safety_fn)) * 100.0 if (safety_tp + safety_fn) > 0 else 100.0
+    safe_fpr = (safety_fp / (safety_fp + safety_tn)) * 100.0 if (safety_fp + safety_tn) > 0 else 0.0
+
+    return {
+        "n_evaluated": n,
+        "accuracy": macro_acc,
+        "macro_f1": macro_f1,
+        "ece": float(ece),
+        "brier_score": float(brier),
+        "safety_tpr": safe_tpr,
+        "safety_fpr": safe_fpr,
+        "avg_latency_ms": avg_lat,
+    }
 
 
 def train_jev_engine(
     dataset_path: Path,
     output_dir: Path,
+    eval_path: Optional[Path] = None,
     dim: int = 128,
     hidden_dim: int = 256,
     n_layers: int = 2,
@@ -214,10 +341,25 @@ def train_jev_engine(
 
     accuracy = (correct_count / len(eval_suite)) * 100.0
     avg_lat = total_lat / len(eval_suite)
-    print(f"\nBenchmark Accuracy: {accuracy:.1f}% | Avg Decision Latency: {avg_lat:.2f} ms")
+    print(f"\nBenchmark Probe Accuracy: {accuracy:.1f}% | Avg Latency: {avg_lat:.2f} ms")
     print("-" * 80)
 
-    # 7. Save Model Checkpoint
+    # 7. Rigorous Held-Out Evaluation (if provided)
+    held_out_metrics = {}
+    if eval_path and eval_path.exists():
+        eval_records = load_decision_dataset(eval_path)
+        print(f"📊 Evaluating Held-Out Test Split ({len(eval_records)} samples in {eval_path.name})...")
+        held_out_metrics = evaluate_held_out_split(jev, eval_records, categories, cat_to_idx, max_samples=1500)
+        print(f"  • Held-Out Accuracy:        {held_out_metrics['accuracy']:.2f}%")
+        print(f"  • Macro F1-Score:           {held_out_metrics['macro_f1']:.4f}")
+        print(f"  • Expected Calibration Err: {held_out_metrics['ece']:.4f} (ECE)")
+        print(f"  • Multi-Class Brier Score:  {held_out_metrics['brier_score']:.4f}")
+        print(f"  • Safety Detection (TPR):   {held_out_metrics['safety_tpr']:.1f}%")
+        print(f"  • Safety False Alarm (FPR): {held_out_metrics['safety_fpr']:.1f}%")
+        print(f"  • Avg Out-of-Sample Lat:    {held_out_metrics['avg_latency_ms']:.3f} ms")
+        print("-" * 80)
+
+    # 8. Save Model Checkpoint
     output_dir.mkdir(parents=True, exist_ok=True)
     latest_path = output_dir / "latest"
     tagged_path = output_dir / tag
@@ -232,7 +374,8 @@ def train_jev_engine(
     return {
         "final_loss": loss_history[-1],
         "final_brier": brier_history[-1],
-        "accuracy": accuracy,
+        "probe_accuracy": accuracy,
+        "held_out_metrics": held_out_metrics,
         "avg_latency_ms": avg_lat,
         "duration_s": t_train,
     }
@@ -240,15 +383,27 @@ def train_jev_engine(
 
 def main():
     parser = argparse.ArgumentParser(description="Train Jev System-1 Non-Autoregressive Decision Engine.")
-    default_data = REPO_ROOT / "zexo" / "data" / "jev_decisions_large.jsonl"
+    default_data = REPO_ROOT / "zexo" / "data" / "jev_100k_train.jsonl"
+    if not default_data.exists():
+        default_data = REPO_ROOT / "zexo" / "data" / "jev_decisions_large.jsonl"
     if not default_data.exists():
         default_data = REPO_ROOT / "zexo" / "data" / "quality_dialogues.jsonl"
+
+    default_eval = REPO_ROOT / "zexo" / "data" / "jev_100k_eval.jsonl"
+    if not default_eval.exists():
+        default_eval = None
 
     parser.add_argument(
         "--data",
         type=Path,
         default=default_data,
-        help="Path to labeled dialogues dataset.",
+        help="Path to training decisions dataset.",
+    )
+    parser.add_argument(
+        "--eval-data",
+        type=Path,
+        default=default_eval,
+        help="Path to held-out evaluation dataset.",
     )
     parser.add_argument(
         "--output-dir",
@@ -256,12 +411,12 @@ def main():
         default=REPO_ROOT / "checkpoints" / "jev",
         help="Directory to save checkpoints.",
     )
-    parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs.")
-    parser.add_argument("--batch-size", type=int, default=16, help="Mini-batch size for gradient accumulation.")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs.")
+    parser.add_argument("--batch-size", type=int, default=32, help="Mini-batch size for gradient accumulation.")
     parser.add_argument("--dim", type=int, default=128, help="Hidden representation dimension.")
     parser.add_argument("--layers", type=int, default=2, help="Number of encoder layers.")
     parser.add_argument("--lr", type=float, default=0.005, help="Learning rate.")
-    parser.add_argument("--tag", type=str, default="jev_v1", help="Checkpoint tag name.")
+    parser.add_argument("--tag", type=str, default="jev_100k_v1", help="Checkpoint tag name.")
     parser.add_argument(
         "--test-query",
         type=str,
@@ -273,6 +428,7 @@ def main():
     train_jev_engine(
         dataset_path=args.data,
         output_dir=args.output_dir,
+        eval_path=args.eval_data,
         dim=args.dim,
         hidden_dim=args.dim * 2,
         n_layers=args.layers,

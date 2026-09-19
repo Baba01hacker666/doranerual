@@ -1,0 +1,39 @@
+{
+  "dataset_name": "jev_calibrated_decision_100k",
+  "version": "2.0.0",
+  "total_samples": 100000,
+  "train_samples": 85000,
+  "eval_samples": 15000,
+  "categories": [
+    "programming",
+    "math",
+    "machine_learning",
+    "systems",
+    "reasoning",
+    "safety",
+    "creative_writing",
+    "dialogue"
+  ],
+  "train_distribution": {
+    "creative_writing": 10624,
+    "programming": 10608,
+    "machine_learning": 10650,
+    "math": 10627,
+    "dialogue": 10606,
+    "safety": 10634,
+    "reasoning": 10612,
+    "systems": 10639
+  },
+  "eval_distribution": {
+    "creative_writing": 1876,
+    "reasoning": 1888,
+    "machine_learning": 1850,
+    "dialogue": 1894,
+    "systems": 1861,
+    "programming": 1892,
+    "math": 1873,
+    "safety": 1866
+  },
+  "train_sha256": "048711287a6f58eb84753dcf9226bee5be2d71245ca26aa5a29794fe796f368b",
+  "eval_sha256": "0812458c18d8fcd79bead8b0320f8f3320a76a5436254838540fb64f270110e7"
+}
