@@ -116,6 +116,7 @@ from .autograd import (
 from .transformer import LoRAAdapter, TransformerDecoderLM, TransformerDecoderBlock, TensorAdamW
 from .dora_norm import DoraNormBlock, DoraNormDecoderLM
 from .jev import JevDecisionModel, JevChoiceHead, JevScoreHead, JevBooleanHead, rlcd_loss
+from .pulse import ZexoPulse, ZexoXtra
 from .compiler import (
     compile_model,
     CompiledModel,
@@ -276,12 +277,14 @@ __all__ = [
     "TensorAdamW",
     "DoraNormBlock",
     "DoraNormDecoderLM",
-    # Jev System-1 Non-Autoregressive Intelligence
+    # Jev / Zexo-Pulse System-1 Non-Autoregressive Intelligence
     "JevDecisionModel",
     "JevChoiceHead",
     "JevScoreHead",
     "JevBooleanHead",
     "rlcd_loss",
+    "ZexoPulse",
+    "ZexoXtra",
     # Static Graph Compiler & AOT
     "compile_model",
     "CompiledModel",

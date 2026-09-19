@@ -125,4 +125,6 @@ void llama_print_cpu_features();
 }
 #endif
 
+#include "pulse_engine.h"
+
 #endif // DORANEURAL_LLM_ENGINE_H

@@ -1395,3 +1395,5 @@ float llama_train_step(LlamaCppEngine* engine, const int* input_tokens, const in
 }
 
 } // extern C
+
+#include "pulse_engine.cpp"
