@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -129,11 +129,11 @@ def evaluate_held_out_split(
         # Brier score
         if true_cat in cat_to_idx:
             t_idx = cat_to_idx[true_cat]
-            probs = dec.metadata.get("probabilities", [])
-            if len(probs) == len(categories):
+            probs = dec.probabilities
+            if probs is not None and len(probs) == len(categories):
                 one_hot = np.zeros(len(categories))
                 one_hot[t_idx] = 1.0
-                brier_sum += float(np.sum((np.array(probs) - one_hot) ** 2))
+                brier_sum += float(np.sum((probs - one_hot) ** 2))
 
         # ECE binning
         bin_idx = min(n_bins - 1, int(conf * n_bins))
