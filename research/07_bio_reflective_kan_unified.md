@@ -70,7 +70,7 @@ model = dn.Sequential([
 
 ## 4. Empirical Evaluation: 8x8 Digits under Heavy Gaussian Noise ($\sigma = 0.18$)
 
-Trained using [`Adam`](file:///root/doranerual/doraneural/optimizers.py#L175) and [`CosineAnnealingLR`](file:///root/doranerual/doraneural/schedulers.py#L86):
+Trained using [`Adam`](../doraneural/optimizers.py#L175) and [`CosineAnnealingLR`](../doraneural/schedulers.py#L86):
 
 ```
 ==================================================================================
@@ -84,12 +84,12 @@ Bio-Reflective KAN (Unified Novel)   |    9798 |    0.1045 |    96.4% |   5648ms
 ```
 
 ### Observations:
-1. **Denoising Effect:** The first layer ([`ReflectiveDense`](file:///root/doranerual/doraneural/layers.py#L1101)) acts as a predictive filter that iteratively denoises input features against its own preliminary hypothesis.
-2. **Sharper Margins:** The combination of [`BifurcatedDense`](file:///root/doranerual/doraneural/layers.py#L981) and [`DendriticDense`](file:///root/doranerual/doraneural/layers.py#L618) provides non-linear boundary separation without requiring deep multi-layer stacks.
-3. **High-Order Polynomial Fitting:** [`ChebyshevKAN`](file:///root/doranerual/doraneural/layers.py#L797) maps the dendritic representations to target classes with smooth, continuous polynomial synaptic curves, yielding lower validation loss (`0.1045` vs `0.1226`).
+1. **Denoising Effect:** The first layer ([`ReflectiveDense`](../doraneural/layers.py#L1101)) acts as a predictive filter that iteratively denoises input features against its own preliminary hypothesis.
+2. **Sharper Margins:** The combination of [`BifurcatedDense`](../doraneural/layers.py#L981) and [`DendriticDense`](../doraneural/layers.py#L618) provides non-linear boundary separation without requiring deep multi-layer stacks.
+3. **High-Order Polynomial Fitting:** [`ChebyshevKAN`](../doraneural/layers.py#L797) maps the dendritic representations to target classes with smooth, continuous polynomial synaptic curves, yielding lower validation loss (`0.1045` vs `0.1226`).
 
 ---
 
 ## 5. Persistence & Reproducibility
-- **Serialization:** Full roundtrip supported via [`save_model`](file:///root/doranerual/doraneural/serialization.py#L68) and [`load_model`](file:///root/doranerual/doraneural/serialization.py#L106).
-- **Executable Script:** Run [`python3 examples/train_bio_hybrid_model.py`](file:///root/doranerual/examples/train_bio_hybrid_model.py).
+- **Serialization:** Full roundtrip supported via [`save_model`](../doraneural/serialization.py#L68) and [`load_model`](../doraneural/serialization.py#L106).
+- **Executable Script:** Run [`python3 examples/train_bio_hybrid_model.py`](../examples/train_bio_hybrid_model.py).

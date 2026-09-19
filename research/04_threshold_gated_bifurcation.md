@@ -9,7 +9,7 @@ Classical artificial neurons apply a static affine transformation $x W + b$ to a
 When a standard network attempts to model both regimes with a single weight matrix, the high-energy regime gradients dominate, resulting in catastrophic gradient conflict.
 
 ## 2. Mathematical Formulation
-[`BifurcatedDense`](file:///root/doranerual/doraneural/layers.py#L981) implements neuron-level dynamic conditional routing via a differentiable gate:
+[`BifurcatedDense`](../doraneural/layers.py#L981) implements neuron-level dynamic conditional routing via a differentiable gate:
 
 ```mermaid
 flowchart TD
@@ -52,6 +52,6 @@ The router gate automatically discovers which pathway yields lower loss for each
 **Outcome:** Bifurcated routing achieved a **2.00x reduction in MSE** and nearly **doubled the explained variance** by separating the conflicting sub-threshold and supra-threshold dynamics!
 
 ## 5. Implementation Reference
-- Source code: [`doraneural/layers.py`](file:///root/doranerual/doraneural/layers.py#L981)
-- Test suite: [`tests/test_neural_lib.py`](file:///root/doranerual/tests/test_neural_lib.py#L414)
-- Demo script: [`examples/explore_reflection_and_gating.py`](file:///root/doranerual/examples/explore_reflection_and_gating.py)
+- Source code: [`doraneural/layers.py`](../doraneural/layers.py#L981)
+- Test suite: [`tests/test_neural_lib.py`](../tests/test_neural_lib.py#L414)
+- Demo script: [`examples/explore_reflection_and_gating.py`](../examples/explore_reflection_and_gating.py)

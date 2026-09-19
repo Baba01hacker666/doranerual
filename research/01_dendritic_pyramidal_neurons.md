@@ -9,7 +9,7 @@ However, biological pyramidal neurons in the cerebral cortex (e.g. layer 5 pyram
 - Local dendritic branches perform **active non-linear operations (dendritic spikes and multiplicative gating)** before the summed potential reaches the axon initial segment (soma).
 
 ## 2. Mathematical Formulation
-[`DendriticDense`](file:///root/doranerual/doraneural/layers.py#L618) implements a multi-compartment pyramidal neuron layer with $K$ distinct dendritic branches:
+[`DendriticDense`](../doraneural/layers.py#L618) implements a multi-compartment pyramidal neuron layer with $K$ distinct dendritic branches:
 
 For input $x \in \mathbb{R}^{B \times D_{\text{in}}}$:
 $$\text{branch}_k = (x W_{\text{signal}, k} + b_{\text{signal}, k}) \odot \text{SiLU}(x W_{\text{gate}, k} + b_{\text{gate}, k})$$
@@ -45,6 +45,6 @@ For each branch $k \in \{1 \dots K\}$:
 - **1-Layer DendriticDense ($K=3$):** Reaches **100.0% accuracy** and loss `< 0.001` in 50 epochs.
 
 ## 5. Implementation Reference
-- Source code: [`doraneural/layers.py`](file:///root/doranerual/doraneural/layers.py#L618)
-- Test suite: [`tests/test_neural_lib.py`](file:///root/doranerual/tests/test_neural_lib.py#L320)
-- Demo script: [`examples/explore_novel_neurons.py`](file:///root/doranerual/examples/explore_novel_neurons.py)
+- Source code: [`doraneural/layers.py`](../doraneural/layers.py#L618)
+- Test suite: [`tests/test_neural_lib.py`](../tests/test_neural_lib.py#L320)
+- Demo script: [`examples/explore_novel_neurons.py`](../examples/explore_novel_neurons.py)

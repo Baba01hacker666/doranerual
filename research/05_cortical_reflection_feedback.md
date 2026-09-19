@@ -9,7 +9,7 @@ In contrast, biological cortical sensory processing (e.g. human visual areas V1 
 Top-down feedback provides a predictive prior that reflects back to the earlier representation, resolving ambiguous, noisy, or occluded sensory signals through iterative relaxation.
 
 ## 2. Mathematical Formulation
-[`ReflectiveDense`](file:///root/doranerual/doraneural/layers.py#L1101) models recurrent predictive coding within an individual layer over $K$ reflection passes:
+[`ReflectiveDense`](../doraneural/layers.py#L1101) models recurrent predictive coding within an individual layer over $K$ reflection passes:
 
 For input $x^{(0)} \in \mathbb{R}^{B \times D_{\text{in}}}$ and iteration $k \in \{0, 1, \dots, K-1\}$:
 
@@ -52,6 +52,6 @@ Verified via finite-difference gradient checks with relative error $< 10^{-4}$.
 - Reflective feedback ($K=3$) iteratively relaxes the input representation against its own intermediate hypothesis, lowering error and enhancing signal clarity.
 
 ## 5. Implementation Reference
-- Source code: [`doraneural/layers.py`](file:///root/doranerual/doraneural/layers.py#L1101)
-- Test suite: [`tests/test_neural_lib.py`](file:///root/doranerual/tests/test_neural_lib.py#L465)
-- Demo script: [`examples/explore_reflection_and_gating.py`](file:///root/doranerual/examples/explore_reflection_and_gating.py)
+- Source code: [`doraneural/layers.py`](../doraneural/layers.py#L1101)
+- Test suite: [`tests/test_neural_lib.py`](../tests/test_neural_lib.py#L465)
+- Demo script: [`examples/explore_reflection_and_gating.py`](../examples/explore_reflection_and_gating.py)

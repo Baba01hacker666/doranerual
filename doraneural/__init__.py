@@ -114,6 +114,8 @@ from .autograd import (
     binary_cross_entropy,
 )
 from .transformer import LoRAAdapter, TransformerDecoderLM, TransformerDecoderBlock, TensorAdamW
+from .dora_norm import DoraNormBlock, DoraNormDecoderLM
+from .jev import JevDecisionModel, JevChoiceHead, JevScoreHead, JevBooleanHead, rlcd_loss
 from .compiler import (
     compile_model,
     CompiledModel,
@@ -272,6 +274,14 @@ __all__ = [
     "TransformerDecoderLM",
     "TransformerDecoderBlock",
     "TensorAdamW",
+    "DoraNormBlock",
+    "DoraNormDecoderLM",
+    # Jev System-1 Non-Autoregressive Intelligence
+    "JevDecisionModel",
+    "JevChoiceHead",
+    "JevScoreHead",
+    "JevBooleanHead",
+    "rlcd_loss",
     # Static Graph Compiler & AOT
     "compile_model",
     "CompiledModel",

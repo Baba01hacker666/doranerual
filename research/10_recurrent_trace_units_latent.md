@@ -117,9 +117,9 @@ In reference to [`test-model-thing/issues/9`](https://github.com/jrz97619761/tes
 ## 7. Sandbox Implementation & Verification
 
 The complete reference implementation is maintained in the research sandbox:
-- **Model Definition:** [`research/rtu_sandbox/rtu.py`](file:///root/doranerual/research/rtu_sandbox/rtu.py)
+- **Model Definition:** [`research/rtu_sandbox/rtu.py`](rtu_sandbox/rtu.py)
   - `RTUConfig`: Hyperparameter specification (dimensions, layers, learning rates, loss weights).
   - `RTULayerState`: Persistent linear state, eligibility traces, and LayerNorm cache.
   - `RTULanguageModel`: Full forward pass, real-time RTRL training loop, byte-level generation, and `.npz` serialization.
-- **Verification Suite:** [`research/rtu_sandbox/verify_rtu.py`](file:///root/doranerual/research/rtu_sandbox/verify_rtu.py)
+- **Verification Suite:** [`research/rtu_sandbox/verify_rtu.py`](rtu_sandbox/verify_rtu.py)
   - Unit tests for exact parameter counts, recurrence state propagation, loss convergence on sequence fitting, streaming generation, and state round-trip serialization.

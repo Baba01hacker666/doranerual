@@ -9,7 +9,7 @@ In contrast to Multi-Layer Perceptrons (MLPs), which place fixed activation func
 - **KAN:** $y = \sum_i \phi_i(x_i)$ (Linear node summation, **learnable continuous non-linear functions on edges**)
 
 ## 2. Orthogonal Chebyshev Basis Representation
-Instead of expensive B-splines which require non-uniform grid lookups and GPU/CPU branch divergences, [`ChebyshevKAN`](file:///root/doranerual/doraneural/layers.py#L797) utilizes **orthogonal Chebyshev polynomials of the first kind** $T_k(u)$:
+Instead of expensive B-splines which require non-uniform grid lookups and GPU/CPU branch divergences, [`ChebyshevKAN`](../doraneural/layers.py#L797) utilizes **orthogonal Chebyshev polynomials of the first kind** $T_k(u)$:
 
 1. **Input Normalization to $[-1, 1]$:**
    $$u = \tanh(x)$$
@@ -40,6 +40,6 @@ Under matched parameter budgets (~170-205 parameters):
 Chebyshev KAN delivered an **18.2x reduction in Test MSE** and a **5.2x reduction in peak error** compared to the Classical MLP while using fewer parameters!
 
 ## 4. Implementation Reference
-- Source code: [`doraneural/layers.py`](file:///root/doranerual/doraneural/layers.py#L797)
-- Test suite: [`tests/test_neural_lib.py`](file:///root/doranerual/tests/test_neural_lib.py#L358)
-- Demo script: [`examples/benchmark_neuron_arena.py`](file:///root/doranerual/examples/benchmark_neuron_arena.py)
+- Source code: [`doraneural/layers.py`](../doraneural/layers.py#L797)
+- Test suite: [`tests/test_neural_lib.py`](../tests/test_neural_lib.py#L358)
+- Demo script: [`examples/benchmark_neuron_arena.py`](../examples/benchmark_neuron_arena.py)

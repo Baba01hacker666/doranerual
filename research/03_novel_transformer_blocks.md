@@ -8,9 +8,9 @@ In standard Transformer architectures (Vaswani et al., 2017), the Transformer bl
 
 While attention has seen massive innovation (flash attention, linear attention, sliding window), the FFN sublayer has remained largely locked into static MLPs (with variations like SwiGLU / GeGLU).
 
-We introduced two novel Transformer blocks in [`doraneural/attention.py`](file:///root/doranerual/doraneural/attention.py):
-1. **[`KANTransformerBlock`](file:///root/doranerual/doraneural/attention.py#L393)** (KAN-Former): Replaces MLP with continuous orthogonal polynomial KAN layers.
-2. **[`DendriticTransformerBlock`](file:///root/doranerual/doraneural/attention.py#L484)** (Dendritic-Former): Replaces MLP with multi-branch pyramidal gating.
+We introduced two novel Transformer blocks in [`doraneural/attention.py`](../doraneural/attention.py):
+1. **[`KANTransformerBlock`](../doraneural/attention.py#L393)** (KAN-Former): Replaces MLP with continuous orthogonal polynomial KAN layers.
+2. **[`DendriticTransformerBlock`](../doraneural/attention.py#L484)** (Dendritic-Former): Replaces MLP with multi-branch pyramidal gating.
 
 ---
 
@@ -51,6 +51,6 @@ KAN and Dendritic Transformer blocks possess significantly higher fitting expres
 ---
 
 ## 4. Implementation Reference
-- Source code: [`doraneural/attention.py`](file:///root/doranerual/doraneural/attention.py#L393)
-- Test suite: [`tests/test_neural_lib.py`](file:///root/doranerual/tests/test_neural_lib.py#L873)
-- Demo script: [`examples/explore_novel_transformers.py`](file:///root/doranerual/examples/explore_novel_transformers.py)
+- Source code: [`doraneural/attention.py`](../doraneural/attention.py#L393)
+- Test suite: [`tests/test_neural_lib.py`](../tests/test_neural_lib.py#L873)
+- Demo script: [`examples/explore_novel_transformers.py`](../examples/explore_novel_transformers.py)

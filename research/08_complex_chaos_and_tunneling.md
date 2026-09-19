@@ -7,9 +7,9 @@ Classical connectionist architectures rely almost uniformly on real-valued scala
 3. **Quantum Barrier Penetration / Tunneling:** Transition probabilities through finite energy barriers that prevent complete signal death beneath arbitrary thresholds.
 
 To explore these frontiers, `doraneural` introduces three exotic neuron architectures:
-- [`ComplexWaveDense`](file:///root/doranerual/doraneural/layers.py#L1583): Complex-valued neural layer with modReLU phase preservation and destructive interference.
-- [`FractalChaosDense`](file:///root/doranerual/doraneural/layers.py#L1771): Deterministic logistic chaotic attractor layer with learnable bifurcation parameters.
-- [`TunnelingDense`](file:///root/doranerual/doraneural/layers.py#L1926): Quantum potential barrier tunneling layer permanently eliminating the "Dead Neuron" vanishing gradient problem.
+- [`ComplexWaveDense`](../doraneural/layers.py#L1583): Complex-valued neural layer with modReLU phase preservation and destructive interference.
+- [`FractalChaosDense`](../doraneural/layers.py#L1771): Deterministic logistic chaotic attractor layer with learnable bifurcation parameters.
+- [`TunnelingDense`](../doraneural/layers.py#L1926): Quantum potential barrier tunneling layer permanently eliminating the "Dead Neuron" vanishing gradient problem.
 
 ---
 
@@ -72,7 +72,7 @@ If weights shift a neuron into the negative regime, its gradient permanently die
 In quantum mechanics, a wave function encountering a potential barrier $V > E$ has a non-zero transmission probability given by exponential wave attenuation:
 $$P_{\text{tunnel}} = \exp\left(-\frac{\max(0, V - z)}{\tau}\right)$$
 
-[`TunnelingDense`](file:///root/doranerual/doraneural/layers.py#L1926) applies this principle to neural activation:
+[`TunnelingDense`](../doraneural/layers.py#L1926) applies this principle to neural activation:
 $$y = z \cdot P_{\text{tunnel}}$$
 
 ### Analytical Gradients
@@ -87,6 +87,6 @@ $$y = z \cdot P_{\text{tunnel}}$$
 ---
 
 ## 5. Implementation & Verification Summary
-- **Layer Implementations:** [`ComplexWaveDense`](file:///root/doranerual/doraneural/layers.py#L1583), [`FractalChaosDense`](file:///root/doranerual/doraneural/layers.py#L1771), [`TunnelingDense`](file:///root/doranerual/doraneural/layers.py#L1926)
-- **Serialization:** Full JSON/NPZ roundtrip support in [`LAYER_REGISTRY`](file:///root/doranerual/doraneural/serialization.py#L20).
-- **Unit Test Coverage:** All mathematical forward passes, finite-difference gradient derivations, and dead neuron immunity verified in [`tests/test_neural_lib.py`](file:///root/doranerual/tests/test_neural_lib.py#L622).
+- **Layer Implementations:** [`ComplexWaveDense`](../doraneural/layers.py#L1583), [`FractalChaosDense`](../doraneural/layers.py#L1771), [`TunnelingDense`](../doraneural/layers.py#L1926)
+- **Serialization:** Full JSON/NPZ roundtrip support in [`LAYER_REGISTRY`](../doraneural/serialization.py#L20).
+- **Unit Test Coverage:** All mathematical forward passes, finite-difference gradient derivations, and dead neuron immunity verified in [`tests/test_neural_lib.py`](../tests/test_neural_lib.py#L622).
