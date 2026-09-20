@@ -20,8 +20,8 @@ def test_dora_x2_config_dimensions():
     assert cfg.head_dim == 64
     assert cfg.hidden_dim == 2048
     assert cfg.vocab_size == 256
-    # 16 layers, 768 dim, 12 heads produces > 150M parameters
-    assert cfg.parameter_count > 150_000_000
+    # 16 layers, 768 dim, 12 heads produces ~123M parameters with pure SwiGLU (no novel neuron bloat)
+    assert 120_000_000 < cfg.parameter_count < 130_000_000
     assert abs(cfg.layer_scale - 1.0 / np.sqrt(32)) < 1e-5
 
 
@@ -45,7 +45,7 @@ def test_multi_head_rtu_forward_and_state():
     assert final_st.shape == (4, 32)
 
 
-def test_dora_x2_block_novel_neurons():
+def test_dora_x2_block_forward():
     cfg = DoraX2Config(dim=128, hidden_dim=256, n_heads=4, n_layers=2)
     block = DoraX2Block(cfg, layer_idx=0)
 

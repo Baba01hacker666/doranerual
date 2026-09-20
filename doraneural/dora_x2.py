@@ -9,11 +9,11 @@ Architecture Blueprint:
     S_{t, h, j} = sigmoid(w_decay_{h, j}) * S_{t-1, h, j} + K_{t, h, j} * V_{t, h, j}
     O_{t, h, j} = Q_{t, h, j} * S_{t, h, j} * SiLU(G_{t, h, j})
     Provides exact O(1) constant state memory per head for infinite-context streaming.
-- Novel Bio-Reflective Neurons (Dora-Norm):
-    1. Bounded Dendritic Gating (centered at 1.0)
-    2. Normalized Chebyshev KAN orthogonal polynomial basis (T1, T2, T3)
-    3. Additive Cortical Reflection loop preserving 100% primary representation highway
-    4. Layer-scale residual stabilization: 1 / sqrt(2 * n_layers) = 1 / sqrt(32) ~ 0.1768
+- FeedForward: Standard SwiGLU MLP:
+    hidden = SiLU(x @ W1) * (x @ W3)
+    down = hidden @ W2
+- Residual Stabilization:
+    Deep layer-scale: 1 / sqrt(2 * n_layers) = 1 / sqrt(32) ~ 0.1768
 - Conversational Engine:
     Interactive Dora-X2 ChatSession with multi-turn streaming generation, context tracking,
     slash commands, and calibrated confidence diagnostics.
@@ -56,17 +56,15 @@ class DoraX2Config:
     n_heads: int = 12
     vocab_size: int = 256  # Default byte-level (zero tokenization dependency, O(1) streaming)
     seq_len: int = 1024
-    kan_degree: int = 3
     dropout: float = 0.0
     temperature: float = 0.7
     top_p: float = 0.9
     top_k: int = 40
     system_prompt: str = (
         "You are Dora-X2, a high-capacity 16-layer Multi-Head Recurrent Trace (MH-RTU) "
-        "conversational AI assistant. You think deeply, respond with clarity, empathy, and technical rigor, "
-        "and leverage bio-reflective non-linear reasoning to assist the user."
+        "conversational AI assistant. You think deeply, respond with clarity, empathy, and technical rigor."
     )
-    version: str = "2.0.0"
+    version: str = "2.1.0"
 
     @property
     def head_dim(self) -> int:
@@ -82,11 +80,9 @@ class DoraX2Config:
         emb = self.vocab_size * self.dim
         # MH-RTU: Wq, Wk, Wv, Wg, Wo (5 * D * D) + w_decay (H * head_dim = D) + rms (D)
         rtu_per_layer = 5 * (self.dim * self.dim) + self.dim + self.dim
-        # FeedForward: w1, w2, w3 (3 * D * hidden_dim)
-        ffn_linear = 3 * (self.dim * self.hidden_dim)
-        # Novel Neurons: w_dend (D * hidden_dim) + c_poly (kan_degree * hidden_dim) + w_ref (D * D) + norms (3 * D)
-        novel_per_layer = (self.dim * self.hidden_dim) + (self.kan_degree * self.hidden_dim) + (self.dim * self.dim) + (3 * self.dim)
-        per_layer = rtu_per_layer + ffn_linear + novel_per_layer
+        # FeedForward: w1, w2, w3 (3 * D * hidden_dim) + rms (D)
+        ffn_per_layer = 3 * (self.dim * self.hidden_dim) + self.dim
+        per_layer = rtu_per_layer + ffn_per_layer
         total = emb + (per_layer * self.n_layers) + self.dim + (self.dim * self.vocab_size)
         return total
 
@@ -189,23 +185,11 @@ class DoraX2Block:
         # 1. Multi-Head RTU
         self.rtu = MultiHeadRTU(config)
 
-        # 2. SwiGLU FeedForward
+        # 2. Standard SwiGLU FeedForward
         self.rms_ffn = np.ones(self.dim, dtype=np.float32)
         self.w1 = (np.random.randn(self.dim, self.hidden_dim) * scale).astype(np.float32)
         self.w2 = (np.random.randn(self.hidden_dim, self.dim) * hidden_scale).astype(np.float32)
         self.w3 = (np.random.randn(self.dim, self.hidden_dim) * scale).astype(np.float32)
-
-        # 3. Novel Bio-Reflective Neurons
-        # (a) Bounded Dendritic Gating (dim -> hidden_dim)
-        self.w_dend = (np.random.randn(self.dim, self.hidden_dim) * (scale * 0.05)).astype(np.float32)
-
-        # (b) Normalized Chebyshev KAN Coefficients
-        self.rms_kan = np.ones(self.hidden_dim, dtype=np.float32)
-        self.c_poly = (np.random.randn(config.kan_degree, self.hidden_dim) * (hidden_scale * 0.02)).astype(np.float32)
-
-        # (c) Additive Cortical Reflection (dim -> dim)
-        self.rms_ref = np.ones(self.dim, dtype=np.float32)
-        self.w_ref = (np.random.randn(self.dim, self.dim) * (scale * 0.05)).astype(np.float32)
 
     def forward_step(
         self,
@@ -217,34 +201,12 @@ class DoraX2Block:
         rtu_out, next_rtu_state = self.rtu.forward_step(x, rtu_state)
         x = x + rtu_out * self.layer_scale
 
-        # 2. Bio-Reflective SwiGLU FeedForward
+        # 2. Standard SwiGLU FeedForward
         norm_ffn = _rmsnorm(x, self.rms_ffn)
         gate = norm_ffn @ self.w1
         up = norm_ffn @ self.w3
-
-        # (a) Bounded Dendritic Modulation: centered at 1.0 with max +/- 10% gain
-        dend_mod = np.tanh(norm_ffn @ self.w_dend) * 0.1
-        up = up * (1.0 + dend_mod)
-
-        # (b) SwiGLU Non-Linearity
         hidden = _silu(gate) * up
-
-        # (c) Normalized Chebyshev KAN Expansion
-        norm_kan = _rmsnorm(hidden, self.rms_kan)
-        u = np.tanh(norm_kan)
-        t1 = u
-        t2 = 2.0 * (u * u) - 1.0
-        t3 = 4.0 * (u * u * u) - 3.0 * u
-        p_kan = (t1 * self.c_poly[0] + t2 * self.c_poly[1] + t3 * self.c_poly[2]) * 0.1
-        hidden = hidden + p_kan
-
-        # (d) Down Projection
         down = hidden @ self.w2
-
-        # (e) Additive Cortical Reflection Loop (preserves 100% primary highway)
-        norm_ref = _rmsnorm(down, self.rms_ref)
-        down_ref = np.tanh(norm_ref @ self.w_ref) * 0.1
-        down = down + down_ref
 
         # Final FeedForward Residual
         x = x + down * self.layer_scale
@@ -349,8 +311,6 @@ class DoraX2LM:
                 "w1": np.zeros_like(layer.w1),
                 "w2": np.zeros_like(layer.w2),
                 "w3": np.zeros_like(layer.w3),
-                "w_dend": np.zeros_like(layer.w_dend),
-                "w_ref": np.zeros_like(layer.w_ref),
             }
             v_l = {k: np.zeros_like(v) for k, v in m_l.items()}
             self._m_layers.append(m_l)
@@ -387,8 +347,6 @@ class DoraX2LM:
                 "w1": np.zeros_like(layer.w1),
                 "w2": np.zeros_like(layer.w2),
                 "w3": np.zeros_like(layer.w3),
-                "w_dend": np.zeros_like(layer.w_dend),
-                "w_ref": np.zeros_like(layer.w_ref),
             }
             for layer in self.layers
         ]
@@ -584,12 +542,6 @@ class DoraX2LM:
             tensors[f"layer_{l}_ffn_w2"] = layer.w2
             tensors[f"layer_{l}_ffn_w3"] = layer.w3
 
-            tensors[f"layer_{l}_w_dend"] = layer.w_dend
-            tensors[f"layer_{l}_rms_kan"] = layer.rms_kan
-            tensors[f"layer_{l}_c_poly"] = layer.c_poly
-            tensors[f"layer_{l}_rms_ref"] = layer.rms_ref
-            tensors[f"layer_{l}_w_ref"] = layer.w_ref
-
         np.savez(npz_path, **tensors)
         return npz_path
 
@@ -625,12 +577,6 @@ class DoraX2LM:
             layer.w1 = loaded[f"layer_{l}_ffn_w1"]
             layer.w2 = loaded[f"layer_{l}_ffn_w2"]
             layer.w3 = loaded[f"layer_{l}_ffn_w3"]
-
-            layer.w_dend = loaded[f"layer_{l}_w_dend"]
-            layer.rms_kan = loaded[f"layer_{l}_rms_kan"]
-            layer.c_poly = loaded[f"layer_{l}_c_poly"]
-            layer.rms_ref = loaded[f"layer_{l}_rms_ref"]
-            layer.w_ref = loaded[f"layer_{l}_w_ref"]
 
         return model
 

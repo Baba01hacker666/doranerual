@@ -30,21 +30,18 @@ Heads are concatenated and projected through output matrix $W_O \in \mathbb{R}^{
 $$x_t \leftarrow x_t + \alpha_L \cdot \left(\text{Concat}(O_{t, 0}, \dots, O_{t, 11}) W_O\right)$$
 where $\alpha_L = \frac{1}{\sqrt{2 \cdot 16}} = \frac{1}{\sqrt{32}} \approx 0.1768$ is the deep layer-scale normalization constant.
 
-### 2.2 Dora-Norm Bio-Reflective FeedForward Block
-The representation then passes into the stabilized Dora-Norm SwiGLU feedforward block ($D = 768, d_{\text{hidden}} = 2048$):
-1. **Bounded Dendritic Modulation**:
+### 2.2 Pure SwiGLU FeedForward Block
+Following the ablation of novel neurons (which empirical studies in Research Paper 11 showed caused gradient extinction and C++ lockout), Dora-X2 employs a clean, mathematically optimal SwiGLU feedforward block ($D = 768, d_{\text{hidden}} = 2048$):
+1. **RMSNorm Pre-FFN Projection**:
    $$\text{gate} = \text{RMSNorm}(x_t) W_1, \quad \text{up} = \text{RMSNorm}(x_t) W_3$$
-   $$\text{up} \leftarrow \text{up} \cdot \left(1.0 + 0.1 \cdot \tanh\left(\text{RMSNorm}(x_t) W_{\text{dend}}\right)\right)$$
 2. **SwiGLU Non-Linearity**:
    $$h_t = \text{SiLU}(\text{gate}) \odot \text{up}$$
-3. **Normalized Chebyshev Orthogonal Polynomial Expansion (KAN)**:
-   $$u = \tanh(\text{RMSNorm}(h_t))$$
-   $$T_1(u) = u, \quad T_2(u) = 2u^2 - 1, \quad T_3(u) = 4u^3 - 3u$$
-   $$h_t \leftarrow h_t + 0.1 \cdot \sum_{k=1}^3 c_k \odot T_k(u)$$
-4. **Additive Cortical Reflection Highway**:
+3. **Down Projection**:
    $$\text{down} = h_t W_2$$
-   $$\text{down} \leftarrow \text{down} + 0.1 \cdot \tanh(\text{RMSNorm}(\text{down}) W_{\text{ref}})$$
+4. **Layer-Scale Residual**:
    $$x_t \leftarrow x_t + \alpha_L \cdot \text{down}$$
+
+This eliminates 34.7M parameters of unstable polynomial and dendritic bloat, accelerates backpropagation, and allows direct compilation into native C++ SIMD kernels.
 
 ---
 
@@ -55,11 +52,9 @@ The representation then passes into the stabilized Dora-Norm SwiGLU feedforward 
 | **MH-RTU Projections ($W_q, W_k, W_v, W_g, W_o$)** | $5 \times (768 \times 768)$ | $2{,}949{,}120$ | $47{,}185{,}920$ |
 | **MH-RTU Decays & RMSNorm** | $12 \times 64 + 768$ | $1{,}536$ | $24{,}576$ |
 | **SwiGLU Linear ($W_1, W_2, W_3$)** | $3 \times (768 \times 2{,}048)$ | $4{,}718{,}592$ | $75{,}497{,}472$ |
-| **Dendritic Gating ($W_{\text{dend}}$)** | $768 \times 2{,}048$ | $1{,}572{,}864$ | $25{,}165{,}824$ |
-| **Chebyshev KAN ($c_1, c_2, c_3$)** | $3 \times 2{,}048$ | $6{,}144$ | $98{,}304$ |
-| **Cortical Reflection ($W_{\text{ref}}$)** | $768 \times 768$ | $589{,}824$ | $9{,}437{,}184$ |
+| **FFN RMSNorm** | $768$ | $768$ | $12{,}288$ |
 | **Embeddings & Final LM Head ($V=256$)** | $2 \times (256 \times 768)$ | — | $393{,}216$ |
-| **TOTAL (Full 16-Layer Dora-X2)** | — | **$9{,}838{,}080$** | **$157{,}802{,}496$ (~157.8M)** |
+| **TOTAL (Full 16-Layer Dora-X2)** | — | **$7{,}670{,}016$** | **$123{,}113{,}472$ (~123.1M)** |
 
 ### Inference Memory Comparison:
 | Model Type | Context Length = 1,024 | Context Length = 8,192 | Context Length = 64,000 |

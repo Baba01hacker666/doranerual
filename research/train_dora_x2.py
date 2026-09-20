@@ -56,7 +56,7 @@ def train_dora_x2_engine(
     print("=" * 80)
     print(f"Run Tag:            {tag}")
     print(f"Architecture:       {n_layers} Layers | {dim} Dim | {n_heads} Heads (head_dim={dim//n_heads})")
-    print(f"FFN Hidden Dim:     {hidden_dim} (SwiGLU + Bio-Reflective KANs)")
+    print(f"FFN Hidden Dim:     {hidden_dim} (Standard SwiGLU)")
     print(f"Corpus Path:        {data_path} (max_bytes={max_bytes})")
     print(f"Hyperparameters:    epochs={epochs}, chunk_size={chunk_size}, lr={lr}")
     print(f"Output Directory:   {output_dir}")
