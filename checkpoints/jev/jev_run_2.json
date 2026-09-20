@@ -1,0 +1,30 @@
+{
+  "vocab_size": 256,
+  "dim": 128,
+  "hidden_dim": 256,
+  "n_layers": 2,
+  "choice_heads": {
+    "category_router": [
+      "behavior",
+      "communication",
+      "creative_writing",
+      "dialogue",
+      "machine_learning",
+      "math",
+      "persona",
+      "programming",
+      "reasoning",
+      "safety",
+      "systems"
+    ]
+  },
+  "score_heads": {
+    "complexity_score": [
+      0.0,
+      10.0
+    ]
+  },
+  "bool_heads": [
+    "safety_flag"
+  ]
+}

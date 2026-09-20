@@ -1,0 +1,18 @@
+{
+  "vocab_size": 256,
+  "dim": 512,
+  "hidden_dim": 1024,
+  "n_layers": 6,
+  "categories": [
+    "creative_writing",
+    "dialogue",
+    "machine_learning",
+    "math",
+    "programming",
+    "reasoning",
+    "safety",
+    "systems"
+  ],
+  "score_min": 0.0,
+  "score_max": 10.0
+}
