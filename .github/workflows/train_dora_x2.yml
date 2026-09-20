@@ -1,0 +1,121 @@
+name: Train Dora-X2 16-Layer MH-RTU Chat Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      dim:
+        description: "Model representation dimension"
+        required: false
+        default: "768"
+        type: string
+      layers:
+        description: "Number of MH-RTU layers"
+        required: false
+        default: "16"
+        type: string
+      heads:
+        description: "Number of recurrent / attention heads"
+        required: false
+        default: "12"
+        type: string
+      epochs:
+        description: "Number of training epochs"
+        required: false
+        default: "3"
+        type: string
+      max_bytes:
+        description: "Max corpus bytes to process (-1 for full)"
+        required: false
+        default: "100000"
+        type: string
+      learning_rate:
+        description: "Learning rate for AdamW"
+        required: false
+        default: "0.001"
+        type: string
+      test_prompt:
+        description: "Sample prompt evaluated before and after training"
+        required: false
+        default: "User: Hello Dora-X2! What is your architecture?\nAssistant: "
+        type: string
+      push_checkpoint_to_git:
+        description: "Commit updated checkpoint back to repository"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  train-dora-x2:
+    name: Train Dora-X2 MH-RTU Language Model
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore Previous Dora-X2 Checkpoint from Cache
+        uses: actions/cache/restore@v4
+        id: dora-cache
+        with:
+          path: checkpoints/dora_x2/
+          key: dora-x2-checkpoint-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            dora-x2-checkpoint-${{ github.ref_name }}-
+            dora-x2-checkpoint-
+
+      - name: Train Dora-X2 with MH-RTU
+        run: |
+          mkdir -p checkpoints/dora_x2
+          python3 research/train_dora_x2.py \
+            --output-dir checkpoints/dora_x2 \
+            --dim "${{ github.event.inputs.dim || '768' }}" \
+            --layers "${{ github.event.inputs.layers || '16' }}" \
+            --heads "${{ github.event.inputs.heads || '12' }}" \
+            --epochs "${{ github.event.inputs.epochs || '3' }}" \
+            --max-bytes "${{ github.event.inputs.max_bytes || '100000' }}" \
+            --lr "${{ github.event.inputs.learning_rate || '0.001' }}" \
+            --tag "dora_x2_run_${{ github.run_number }}" \
+            --test-prompt "${{ github.event.inputs.test_prompt || 'User: Hello Dora-X2! What is your architecture?\nAssistant: ' }}"
+
+      - name: Save Dora-X2 Checkpoint to Actions Cache
+        uses: actions/cache/save@v4
+        with:
+          path: checkpoints/dora_x2/
+          key: dora-x2-checkpoint-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload Trained Dora-X2 Weights Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dora-x2-checkpoint-run-${{ github.run_number }}
+          path: checkpoints/dora_x2/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit Checkpoint to Git (Optional)
+        if: ${{ github.event.inputs.push_checkpoint_to_git == 'true' }}
+        run: |
+          git config user.name "baba01hacker666"
+          git config user.email "baba01hacker666@users.noreply.github.com"
+          git add -f checkpoints/dora_x2/
+          if git diff --staged --quiet; then
+            echo "No checkpoint changes to commit."
+          else
+            git commit -m "chore(dora_x2): update 16-layer MH-RTU model checkpoint [run ${{ github.run_number }}]"
+            git push origin HEAD:${{ github.ref }}
+          fi

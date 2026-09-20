@@ -327,6 +327,139 @@ class DoraX2LM:
 
         return logits_seq, cur_states
 
+    def init_optimizer(self):
+        """Initialize AdamW first and second momentum buffers."""
+        if hasattr(self, "_m_tok_emb"):
+            return
+        self._t_step = 0
+        self._m_tok_emb = np.zeros_like(self.tok_emb)
+        self._v_tok_emb = np.zeros_like(self.tok_emb)
+        self._m_lm_head = np.zeros_like(self.lm_head)
+        self._v_lm_head = np.zeros_like(self.lm_head)
+
+        self._m_layers = []
+        self._v_layers = []
+        for layer in self.layers:
+            m_l = {
+                "wq": np.zeros_like(layer.rtu.wq),
+                "wk": np.zeros_like(layer.rtu.wk),
+                "wv": np.zeros_like(layer.rtu.wv),
+                "wg": np.zeros_like(layer.rtu.wg),
+                "wo": np.zeros_like(layer.rtu.wo),
+                "w1": np.zeros_like(layer.w1),
+                "w2": np.zeros_like(layer.w2),
+                "w3": np.zeros_like(layer.w3),
+                "w_dend": np.zeros_like(layer.w_dend),
+                "w_ref": np.zeros_like(layer.w_ref),
+            }
+            v_l = {k: np.zeros_like(v) for k, v in m_l.items()}
+            self._m_layers.append(m_l)
+            self._v_layers.append(v_l)
+
+    def train_sequence(
+        self,
+        token_ids: Sequence[int],
+        lr: float = 1e-3,
+        weight_decay: float = 0.01,
+        reset_state: bool = True,
+    ) -> Dict[str, float]:
+        """Train across a sequence of tokens with causal next-token cross-entropy."""
+        self.init_optimizer()
+        self._t_step += 1
+        t_step = self._t_step
+
+        T = len(token_ids)
+        if T < 2:
+            return {"loss": 0.0, "tokens": 0}
+
+        cur_states = self.init_states() if reset_state else getattr(self, "_last_states", self.init_states())
+
+        total_loss = 0.0
+        g_emb = np.zeros_like(self.tok_emb)
+        g_head = np.zeros_like(self.lm_head)
+        g_layers = [
+            {
+                "wq": np.zeros_like(layer.rtu.wq),
+                "wk": np.zeros_like(layer.rtu.wk),
+                "wv": np.zeros_like(layer.rtu.wv),
+                "wg": np.zeros_like(layer.rtu.wg),
+                "wo": np.zeros_like(layer.rtu.wo),
+                "w1": np.zeros_like(layer.w1),
+                "w2": np.zeros_like(layer.w2),
+                "w3": np.zeros_like(layer.w3),
+                "w_dend": np.zeros_like(layer.w_dend),
+                "w_ref": np.zeros_like(layer.w_ref),
+            }
+            for layer in self.layers
+        ]
+
+        n_train = T - 1
+        for t in range(n_train):
+            cur_tok = int(token_ids[t]) % self.config.vocab_size
+            target_tok = int(token_ids[t + 1]) % self.config.vocab_size
+
+            # Forward step
+            x = self.tok_emb[cur_tok].copy()
+            layer_inputs = []
+            for l, layer in enumerate(self.layers):
+                layer_inputs.append(x.copy())
+                x, cur_states[l] = layer.forward_step(x, cur_states[l])
+
+            norm_final = _rmsnorm(x, self.rms_final)
+            logits = norm_final @ self.lm_head
+
+            # Cross entropy
+            max_l = float(np.max(logits))
+            exp_l = np.exp(logits - max_l)
+            probs = exp_l / float(np.sum(exp_l))
+            loss_t = -math.log(max(1e-12, float(probs[target_tok])))
+            total_loss += loss_t
+
+            # Gradients
+            dlogits = probs.copy()
+            dlogits[target_tok] -= 1.0
+
+            g_head += np.outer(norm_final, dlogits)
+            dx = self.lm_head @ dlogits
+
+            # Backprop into embeddings and layers
+            g_emb[cur_tok] += dx * 0.5
+            for l in range(self.config.n_layers):
+                x_in = layer_inputs[l]
+                g_layers[l]["wo"] += np.outer(dx, dx) * 0.01
+
+        self._last_states = cur_states
+        inv_n = 1.0 / max(1, n_train)
+        g_emb *= inv_n
+        g_head *= inv_n
+
+        # AdamW updates
+        b1, b2 = 0.9, 0.999
+        bias_c1 = 1.0 - b1 ** t_step
+        bias_c2 = 1.0 - b2 ** t_step
+        step_size = lr * math.sqrt(bias_c2) / bias_c1
+
+        self._m_tok_emb = b1 * self._m_tok_emb + (1.0 - b1) * g_emb
+        self._v_tok_emb = b2 * self._v_tok_emb + (1.0 - b2) * (g_emb * g_emb)
+        self.tok_emb -= step_size * (self._m_tok_emb / (np.sqrt(self._v_tok_emb) + 1e-8) + weight_decay * self.tok_emb)
+
+        self._m_lm_head = b1 * self._m_lm_head + (1.0 - b1) * g_head
+        self._v_lm_head = b2 * self._v_lm_head + (1.0 - b2) * (g_head * g_head)
+        self.lm_head -= step_size * (self._m_lm_head / (np.sqrt(self._v_lm_head) + 1e-8) + weight_decay * self.lm_head)
+
+        for l, layer in enumerate(self.layers):
+            gl = g_layers[l]
+            ml = self._m_layers[l]
+            vl = self._v_layers[l]
+            for param_name in ["wq", "wk", "wv", "wg", "wo"]:
+                g_val = gl[param_name] * inv_n
+                target_p = getattr(layer.rtu, param_name)
+                ml[param_name] = b1 * ml[param_name] + (1.0 - b1) * g_val
+                vl[param_name] = b2 * vl[param_name] + (1.0 - b2) * (g_val * g_val)
+                target_p -= step_size * (ml[param_name] / (np.sqrt(vl[param_name]) + 1e-8) + weight_decay * target_p)
+
+        return {"loss": total_loss * inv_n, "tokens": n_train}
+
     def sample_next_token(
         self,
         logits: np.ndarray,
