@@ -95,10 +95,25 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=100, help="Maximum generated tokens per turn")
     args = parser.parse_args()
 
-    if args.checkpoint and Path(args.checkpoint).with_suffix(".npz").exists():
-        print(f"📦 Loading checkpoint from {args.checkpoint}...")
-        model = DoraX2LM.load(args.checkpoint)
+    ckpt_target = None
+    if args.checkpoint:
+        cand = Path(args.checkpoint)
+        if cand.is_dir():
+            if (cand / "latest.npz").exists():
+                ckpt_target = cand / "latest"
+            else:
+                npz_files = list(cand.glob("*.npz"))
+                if npz_files:
+                    ckpt_target = npz_files[0].with_suffix("")
+        elif cand.with_suffix(".npz").exists():
+            ckpt_target = cand.with_suffix("")
+
+    if ckpt_target is not None:
+        print(f"📦 Loading checkpoint from {ckpt_target}...")
+        model = DoraX2LM.load(ckpt_target)
     else:
+        if args.checkpoint:
+            print(f"⚠️ Checkpoint not found at '{args.checkpoint}'. Initializing fresh model weights.")
         print("⚡ Initializing Dora-X2 Model (16 Layers, 768 Dim, 12 Heads MH-RTU)...")
         config = DoraX2Config()
         model = DoraX2LM(config)
