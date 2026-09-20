@@ -15,6 +15,12 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
+# Ensure live line-buffered output in CI/CD pipelines
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -271,11 +277,13 @@ def train_jev_engine(
     brier_history = []
 
     if engine == "cpp":
+        total_batches = (len(records) + batch_size - 1) // batch_size
         for ep in range(1, epochs + 1):
             total_loss = 0.0
             np.random.shuffle(records)
+            ep_start = time.perf_counter()
 
-            for i in range(0, len(records), batch_size):
+            for step, i in enumerate(range(0, len(records), batch_size)):
                 batch = records[i : i + batch_size]
                 loss_val = jev.train_batch(
                     batch,
@@ -286,12 +294,20 @@ def train_jev_engine(
                 )
                 total_loss += loss_val * len(batch)
 
+                if (step + 1) % 50 == 0 or (step + 1) == total_batches:
+                    elapsed = time.perf_counter() - ep_start
+                    sps = (i + len(batch)) / elapsed if elapsed > 0 else 0.0
+                    print(
+                        f"   [Epoch {ep:02d}/{epochs:02d}] Step {step+1:04d}/{total_batches:04d} "
+                        f"| Batch Loss: {loss_val:.4f} | Throughput: {sps:.1f} samples/sec",
+                        flush=True,
+                    )
+
             avg_loss = total_loss / len(records)
             loss_history.append(avg_loss)
             brier_history.append(0.0)
-
-            if ep == 1 or ep % max(1, epochs // 5) == 0 or ep == epochs:
-                print(f"   Epoch {ep:02d}/{epochs:02d} -> Mini-batch Loss: {avg_loss:.4f}")
+            ep_dur = time.perf_counter() - ep_start
+            print(f"✨ Epoch {ep:02d}/{epochs:02d} Complete -> Avg Loss: {avg_loss:.4f} in {ep_dur:.1f}s", flush=True)
     else:
         optimizer = TensorAdamW(jev.parameters(), lr=lr, weight_decay=0.001)
         for ep in range(1, epochs + 1):

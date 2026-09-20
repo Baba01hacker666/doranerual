@@ -344,17 +344,25 @@ float pulse_train_sample(
         const float* W_e = engine->w_enc.data() + l * D * H;
         const float* W_p = engine->w_proj.data() + l * H * D;
 
+        std::fill(layers[l].z_enc.begin(), layers[l].z_enc.end(), 0.0f);
+        for (int i = 0; i < D; i++) {
+            float h_i = h[i];
+            const float* row = W_e + i * H;
+            for (int j = 0; j < H; j++) {
+                layers[l].z_enc[j] += h_i * row[j];
+            }
+        }
         for (int j = 0; j < H; j++) {
-            float acc = 0.0f;
-            for (int i = 0; i < D; i++) acc += h[i] * W_e[i * H + j];
-            layers[l].z_enc[j] = acc;
-            layers[l].a_enc[j] = pulse_relu(acc);
+            layers[l].a_enc[j] = pulse_relu(layers[l].z_enc[j]);
         }
 
-        for (int j = 0; j < D; j++) {
-            float acc = 0.0f;
-            for (int i = 0; i < H; i++) acc += layers[l].a_enc[i] * W_p[i * D + j];
-            layers[l].proj[j] = acc;
+        std::fill(layers[l].proj.begin(), layers[l].proj.end(), 0.0f);
+        for (int i = 0; i < H; i++) {
+            float a_i = layers[l].a_enc[i];
+            const float* row = W_p + i * D;
+            for (int j = 0; j < D; j++) {
+                layers[l].proj[j] += a_i * row[j];
+            }
         }
 
         float sum_sq = 0.0f;
@@ -374,12 +382,17 @@ float pulse_train_sample(
     std::vector<float> logits(K);
     float inv_temp = 1.0f / engine->temp_choice;
 
+    for (int k = 0; k < K; k++) logits[k] = engine->b_choice[k];
+    for (int d = 0; d < D; d++) {
+        float h_d = h[d];
+        const float* row = engine->w_choice.data() + d * K;
+        for (int k = 0; k < K; k++) {
+            logits[k] += h_d * row[k];
+        }
+    }
     for (int k = 0; k < K; k++) {
-        float acc = engine->b_choice[k];
-        for (int d = 0; d < D; d++) acc += h[d] * engine->w_choice[d * K + k];
-        acc *= inv_temp;
-        logits[k] = acc;
-        if (acc > max_logit) max_logit = acc;
+        logits[k] *= inv_temp;
+        if (logits[k] > max_logit) max_logit = logits[k];
     }
     float sum_exp = 0.0f;
     for (int k = 0; k < K; k++) {
@@ -421,7 +434,6 @@ float pulse_train_sample(
     std::vector<float> grad_h(D, 0.0f);
 
     // (a) Choice Head Gradients
-    // dL/dlogit_k = (p_k - y_k) + 2*lambda_cal * p_k * ((p_k - y_k) - sum_j p_j(p_j - y_j))
     float sum_p_diff = 0.0f;
     for (int j = 0; j < K; j++) {
         float y_j = (j == target_category) ? 1.0f : 0.0f;
@@ -436,20 +448,28 @@ float pulse_train_sample(
     }
 
     for (int k = 0; k < K; k++) {
-        float g_k = grad_logits[k];
-        engine->b_choice[k] -= lr * g_k;
-        for (int d = 0; d < D; d++) {
-            grad_h[d] += g_k * engine->w_choice[d * K + k];
-            engine->w_choice[d * K + k] -= lr * (g_k * h[d] + weight_decay * engine->w_choice[d * K + k]);
+        engine->b_choice[k] -= lr * grad_logits[k];
+    }
+    for (int d = 0; d < D; d++) {
+        float h_d = h[d];
+        float* w_choice_row = engine->w_choice.data() + d * K;
+        float gh_acc = 0.0f;
+        for (int k = 0; k < K; k++) {
+            float g_k = grad_logits[k];
+            float w_val = w_choice_row[k];
+            gh_acc += g_k * w_val;
+            w_choice_row[k] = w_val - lr * (g_k * h_d + weight_decay * w_val);
         }
+        grad_h[d] += gh_acc;
     }
 
     // (b) Bool Head Gradients
     float grad_bool_logit = (bool_prob - target_b) * 0.5f;
     engine->b_bool -= lr * grad_bool_logit;
     for (int d = 0; d < D; d++) {
-        grad_h[d] += grad_bool_logit * engine->w_bool[d];
-        engine->w_bool[d] -= lr * (grad_bool_logit * h[d] + weight_decay * engine->w_bool[d]);
+        float w_val = engine->w_bool[d];
+        grad_h[d] += grad_bool_logit * w_val;
+        engine->w_bool[d] = w_val - lr * (grad_bool_logit * h[d] + weight_decay * w_val);
     }
 
     // (c) Score Head Gradients
@@ -457,8 +477,9 @@ float pulse_train_sample(
     float grad_score_logit = 0.2f * score_diff * (engine->config.score_max - engine->config.score_min) * d_score_sig;
     engine->b_score -= lr * grad_score_logit;
     for (int d = 0; d < D; d++) {
-        grad_h[d] += grad_score_logit * engine->w_score[d];
-        engine->w_score[d] -= lr * (grad_score_logit * h[d] + weight_decay * engine->w_score[d]);
+        float w_val = engine->w_score[d];
+        grad_h[d] += grad_score_logit * w_val;
+        engine->w_score[d] = w_val - lr * (grad_score_logit * h[d] + weight_decay * w_val);
     }
 
     // (d) Backprop through Encoder Layers (Reverse order)
@@ -479,12 +500,17 @@ float pulse_train_sample(
 
         // Backward through W_proj: proj = a_enc @ W_proj
         std::vector<float> grad_a(H, 0.0f);
-        for (int j = 0; j < D; j++) {
-            float g_p = grad_hres[j];
-            for (int i = 0; i < H; i++) {
-                grad_a[i] += g_p * W_p[i * D + j];
-                engine->w_proj[l * H * D + i * D + j] -= lr * (g_p * layers[l].a_enc[i] + weight_decay * W_p[i * D + j]);
+        for (int i = 0; i < H; i++) {
+            float a_i = layers[l].a_enc[i];
+            float* w_p_row = engine->w_proj.data() + l * H * D + i * D;
+            float acc = 0.0f;
+            for (int j = 0; j < D; j++) {
+                float g_p = grad_hres[j];
+                float w_val = w_p_row[j];
+                acc += g_p * w_val;
+                w_p_row[j] = w_val - lr * (g_p * a_i + weight_decay * w_val);
             }
+            grad_a[i] = acc;
         }
 
         // Backward through ReLU
@@ -495,12 +521,17 @@ float pulse_train_sample(
 
         // Backward through W_enc: z = h_in @ W_enc
         std::vector<float> grad_hin(D, 0.0f);
-        for (int j = 0; j < H; j++) {
-            float g_z = grad_z[j];
-            for (int i = 0; i < D; i++) {
-                grad_hin[i] += g_z * W_e[i * H + j];
-                engine->w_enc[l * D * H + i * H + j] -= lr * (g_z * layers[l].h_in[i] + weight_decay * W_e[i * H + j]);
+        for (int i = 0; i < D; i++) {
+            float h_i = layers[l].h_in[i];
+            float* w_e_row = engine->w_enc.data() + l * D * H + i * H;
+            float acc = 0.0f;
+            for (int j = 0; j < H; j++) {
+                float g_z = grad_z[j];
+                float w_val = w_e_row[j];
+                acc += g_z * w_val;
+                w_e_row[j] = w_val - lr * (g_z * h_i + weight_decay * w_val);
             }
+            grad_hin[i] = acc;
         }
 
         // Add residual gradient: h_res = h_in + proj -> grad_in += grad_hres
@@ -539,6 +570,9 @@ float pulse_train_batch(
     if (!engine || !flat_tokens || batch_size <= 0) return 0.0f;
 
     float total_loss = 0.0f;
+    int threads = (num_threads > 0) ? num_threads : 1;
+
+    #pragma omp parallel for schedule(static) num_threads(threads) reduction(+:total_loss)
     for (int b = 0; b < batch_size; b++) {
         const uint8_t* tok = flat_tokens + token_offsets[b];
         int len = token_lens[b];
