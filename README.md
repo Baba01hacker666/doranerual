@@ -4,6 +4,8 @@ An intuitive, beginner-friendly neural network toolkit and CLI built purely with
 
 `doraneural` strips away the complexity of heavyweight frameworks like PyTorch and TensorFlow. It hides tedious math behind clean one-liners, displays real-time ASCII training curves, and exports models to zero-dependency standalone scripts.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Baba01hacker666/doranerual/blob/main/notebooks/train_dora_x2_colab.ipynb)
+
 ---
 
 ## ⚡ Quick Installation
