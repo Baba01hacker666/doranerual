@@ -117,6 +117,7 @@ from .transformer import LoRAAdapter, TransformerDecoderLM, TransformerDecoderBl
 from .dora_norm import DoraNormBlock, DoraNormDecoderLM
 from .jev import JevDecisionModel, JevChoiceHead, JevScoreHead, JevBooleanHead, rlcd_loss
 from .pulse import ZexoPulse, ZexoXtra
+from .dora_x2 import DoraX2Config, DoraX2LM, DoraX2Block, MultiHeadRTU, DoraX2ChatSession
 from .compiler import (
     compile_model,
     CompiledModel,
@@ -285,6 +286,12 @@ __all__ = [
     "rlcd_loss",
     "ZexoPulse",
     "ZexoXtra",
+    # Dora-X2 16-Layer MH-RTU Chat Architecture
+    "DoraX2Config",
+    "DoraX2LM",
+    "DoraX2Block",
+    "MultiHeadRTU",
+    "DoraX2ChatSession",
     # Static Graph Compiler & AOT
     "compile_model",
     "CompiledModel",
