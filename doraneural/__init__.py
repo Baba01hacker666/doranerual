@@ -33,6 +33,7 @@ from .optimizers import (
     Optimizer,
     SGD,
     Adam,
+    AdamW,
     RMSprop,
     clip_grad_norm,
     clip_grad_value,
@@ -42,6 +43,7 @@ from .schedulers import (
     StepLR,
     CosineAnnealingLR,
     WarmupCosineLR,
+    ReduceLROnPlateau,
 )
 from .recurrent import (
     SimpleRNN,
@@ -242,6 +244,7 @@ __all__ = [
     "Optimizer",
     "SGD",
     "Adam",
+    "AdamW",
     "RMSprop",
     "clip_grad_norm",
     "clip_grad_value",
@@ -250,6 +253,7 @@ __all__ = [
     "StepLR",
     "CosineAnnealingLR",
     "WarmupCosineLR",
+    "ReduceLROnPlateau",
     # Metrics
     "Metric",
     "Accuracy",
