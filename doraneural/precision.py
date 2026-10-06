@@ -114,7 +114,7 @@ def to_precision(model_or_layer: Any, dtype: Union[str, np.dtype, type]) -> Any:
         if opt is not None:
             for state_name in (
                 "m", "v", "velocity", "v_mean",
-                "_m", "_v", "_velocities", "_buf",
+                "_m", "_v", "_v_max", "_velocities", "_buf",
             ):
                 state = getattr(opt, state_name, None)
                 if isinstance(state, dict):

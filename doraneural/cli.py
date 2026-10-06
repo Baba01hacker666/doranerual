@@ -262,7 +262,7 @@ def cmd_info(args: argparse.Namespace) -> None:
     print("  • ReLU, Sigmoid, Softmax")
     print("\nSupported Optimizers & Schedulers:")
     print("  • SGD, Adam, RMSprop (Weight Decay, L1/L2 Regularization)")
-    print("  • StepLR, CosineAnnealingLR, WarmupCosineLR, Gradient Clipping")
+    print("  • StepLR, CosineAnnealingLR, WarmupCosineLR, ReduceLROnPlateau, Gradient Clipping")
     print("\nSupported Losses & Metrics:")
     print("  • BinaryCrossEntropy, CategoricalCrossEntropy, MeanSquaredError (MSE)")
     print("  • Accuracy, MSE, MAE")

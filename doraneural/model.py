@@ -24,6 +24,9 @@ class History:
 
     def __init__(self) -> None:
         self.history: Dict[str, List[float]] = {}
+        self.best_epoch: Optional[int] = None
+        self.stopped_early: bool = False
+        self.stopped_epoch: Optional[int] = None
 
     def log(self, metrics: Dict[str, float]) -> None:
         """Append metric values for the completed epoch.
@@ -210,6 +213,10 @@ class Sequential:
         clip_norm: Optional[float] = None,
         dataloader: Optional[Any] = None,
         prefetch_factor: int = 2,
+        gradient_accumulation_steps: int = 1,
+        early_stopping_patience: Optional[int] = None,
+        min_delta: float = 0.0,
+        restore_best_weights: bool = True,
     ) -> History:
         """Train the model using mini-batch gradient descent with thread prefetching.
 
@@ -225,12 +232,46 @@ class Sequential:
             clip_norm (Optional[float]): Global gradient norm threshold for clipping.
             dataloader (Optional[DataLoader]): Explicit DataLoader instance with prefetching.
             prefetch_factor (int): Number of batches prefetched on background thread.
+            gradient_accumulation_steps (int): Micro-batches per optimizer update. Raises the effective
+                batch size without retaining all micro-batch activations at once.
+            early_stopping_patience (Optional[int]): Stop after this many epochs without improved
+                validation loss. Requires ``validation_data``; ``None`` disables early stopping.
+            min_delta (float): Minimum validation-loss improvement needed to reset patience.
+            restore_best_weights (bool): Restore the parameters from the best validation-loss epoch.
 
         Returns:
-            History: Object containing recorded training metrics across epochs.
+            History: Object containing recorded training metrics and early-stopping metadata.
         """
         if not self._is_compiled or self.loss is None or self.optimizer is None:
             raise ModelNotCompiledError()
+
+        if (
+            not isinstance(gradient_accumulation_steps, (int, np.integer))
+            or isinstance(gradient_accumulation_steps, (bool, np.bool_))
+            or gradient_accumulation_steps < 1
+        ):
+            raise ValueError("gradient_accumulation_steps must be a positive integer")
+        if getattr(scheduler, "requires_metric", False) and validation_data is None:
+            raise ValueError("this learning-rate scheduler requires validation_data")
+        if early_stopping_patience is not None:
+            if (
+                not isinstance(early_stopping_patience, (int, np.integer))
+                or isinstance(early_stopping_patience, (bool, np.bool_))
+                or early_stopping_patience < 0
+            ):
+                raise ValueError("early_stopping_patience must be a non-negative integer or None")
+            if validation_data is None:
+                raise ValueError("early stopping requires validation_data")
+        try:
+            min_delta = float(min_delta)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("min_delta must be a finite non-negative number") from exc
+        if not np.isfinite(min_delta) or min_delta < 0.0:
+            raise ValueError("min_delta must be a finite non-negative number")
+
+        gradient_accumulation_steps = int(gradient_accumulation_steps)
+        if early_stopping_patience is not None:
+            early_stopping_patience = int(early_stopping_patience)
 
         from .dataloader import DataLoader
 
@@ -254,6 +295,10 @@ class Sequential:
             )
 
         history = History()
+        best_val_loss = float("inf")
+        early_stopping_reference = float("inf")
+        early_stopping_wait = 0
+        best_weights = None
 
         for epoch in range(1, epochs + 1):
             self.train(True)
@@ -265,6 +310,29 @@ class Sequential:
             loss_total = 0.0
             metric_totals = {metric.name: 0.0 for metric in self.metrics}
             sample_total = 0
+            gradient_sums = {}
+            accumulated_samples = 0
+            accumulated_batches = 0
+
+            def apply_accumulated_gradients() -> None:
+                nonlocal accumulated_samples, accumulated_batches
+                if accumulated_samples == 0:
+                    return
+                for (layer_idx, param_name), (grad_buffer, grad_sum) in gradient_sums.items():
+                    grad_map = self.layers[layer_idx].get_grads()
+                    grad_map[param_name] = grad_buffer
+                    np.copyto(
+                        grad_buffer,
+                        grad_sum / float(accumulated_samples),
+                        casting="unsafe",
+                    )
+                if clip_norm is not None:
+                    from .optimizers import clip_grad_norm
+                    clip_grad_norm(self.layers, clip_norm)
+                self.optimizer.step(self.layers)
+                gradient_sums.clear()
+                accumulated_samples = 0
+                accumulated_batches = 0
 
             # Mini-batch gradient descent loop via prefetching DataLoader
             for X_batch, y_batch in active_loader:
@@ -276,6 +344,8 @@ class Sequential:
 
                 # 2. Loss computation
                 batch_loss = self.loss.forward(preds, y_batch_arr)
+                if not np.isfinite(batch_loss):
+                    raise FloatingPointError("Training loss became NaN or infinity")
                 batch_samples = len(X_batch_arr)
                 loss_total += batch_loss * batch_samples
                 sample_total += batch_samples
@@ -286,17 +356,59 @@ class Sequential:
                 loss_grad = self.loss.backward(preds, y_batch_arr)
                 self.backward(loss_grad)
 
-                # 4. Optional gradient clipping
-                if clip_norm is not None:
-                    from .optimizers import clip_grad_norm
-                    clip_grad_norm(self.layers, clip_norm)
+                if gradient_accumulation_steps == 1:
+                    # 4. Optional gradient clipping
+                    if clip_norm is not None:
+                        from .optimizers import clip_grad_norm
+                        clip_grad_norm(self.layers, clip_norm)
 
-                # 5. Optimizer step
-                self.optimizer.step(self.layers)
+                    # 5. Optimizer step
+                    self.optimizer.step(self.layers)
+                else:
+                    # Loss.backward returns batch-mean gradients. Weight each
+                    # micro-batch by its sample count so a short final batch does
+                    # not receive the same influence as a full one.
+                    for layer_idx, layer in enumerate(self.layers):
+                        if not layer.trainable:
+                            continue
+                        grads = layer.get_grads()
+                        for param_name, param in layer.get_params().items():
+                            if param is None:
+                                continue
+                            grad = grads.get(param_name)
+                            if grad is None:
+                                continue
+                            if not isinstance(grad, np.ndarray):
+                                raise TypeError(
+                                    f"Gradient for parameter '{param_name}' must be a NumPy array"
+                                )
+                            if not np.issubdtype(grad.dtype, np.floating):
+                                raise TypeError(
+                                    f"Gradient for parameter '{param_name}' must be floating point"
+                                )
+                            if grad.shape != param.shape:
+                                raise ValueError(
+                                    f"Gradient shape mismatch for parameter '{param_name}': "
+                                    f"expected {param.shape}, got {grad.shape}"
+                                )
+                            key = (layer_idx, param_name)
+                            if key not in gradient_sums:
+                                accumulator_dtype = np.result_type(grad.dtype, np.float32)
+                                gradient_sums[key] = (
+                                    grad,
+                                    np.zeros_like(grad, dtype=accumulator_dtype),
+                                )
+                            grad_buffer, grad_sum = gradient_sums[key]
+                            grad_sum += grad.astype(grad_sum.dtype, copy=False) * batch_samples
 
-            # Step learning rate scheduler if present
-            if scheduler is not None:
-                scheduler.step()
+                    accumulated_samples += batch_samples
+                    accumulated_batches += 1
+                    if accumulated_batches >= gradient_accumulation_steps:
+                        apply_accumulated_gradients()
+
+            # Flush the final partial accumulation window each epoch.
+            if gradient_accumulation_steps > 1:
+                apply_accumulated_gradients()
 
             self.eval()
             denominator = max(1, sample_total)
@@ -304,19 +416,57 @@ class Sequential:
             for metric in self.metrics:
                 epoch_logs[metric.name] = metric_totals[metric.name] / denominator
 
+            should_stop = False
             if validation_data is not None:
                 X_val, y_val = validation_data
                 val_preds = self.forward(np.asarray(X_val, dtype=self.dtype))
                 val_loss = self.loss.forward(val_preds, y_val)
+                if not np.isfinite(val_loss):
+                    raise FloatingPointError("Validation loss became NaN or infinity")
                 epoch_logs["val_loss"] = val_loss
                 for metric in self.metrics:
                     val_score = metric(y_val, val_preds)
                     epoch_logs[f"val_{metric.name}"] = val_score
 
+                if early_stopping_patience is not None:
+                    # Save the true lowest-loss weights, while min_delta controls
+                    # whether a change is large enough to reset patience.
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        history.best_epoch = epoch
+                        if restore_best_weights:
+                            best_weights = [
+                                {
+                                    name: np.array(param, copy=True)
+                                    for name, param in layer.get_params().items()
+                                    if param is not None
+                                }
+                                for layer in self.layers
+                            ]
+
+                    if val_loss < early_stopping_reference - min_delta:
+                        early_stopping_reference = val_loss
+                        early_stopping_wait = 0
+                    else:
+                        early_stopping_wait += 1
+                        if early_stopping_wait >= early_stopping_patience:
+                            history.stopped_early = True
+                            history.stopped_epoch = epoch
+                            should_stop = True
+
+            if scheduler is not None:
+                if getattr(scheduler, "requires_metric", False):
+                    scheduler.step(epoch_logs["val_loss"])
+                else:
+                    scheduler.step()
+
             history.log(epoch_logs)
 
             # Verbose logging
-            if verbose == 1 or (verbose > 1 and (epoch % verbose == 0 or epoch == epochs)):
+            if verbose == 1 or (
+                verbose > 1
+                and (epoch % verbose == 0 or epoch == epochs or should_stop)
+            ):
                 log_strs = [f"loss: {epoch_logs['loss']:.4f}"]
                 for metric in self.metrics:
                     if metric.name in epoch_logs:
@@ -332,6 +482,25 @@ class Sequential:
                     log_strs.append(f"lr: {self.optimizer.lr:.6f}")
 
                 print(f"Epoch {epoch:3d}/{epochs} - " + " - ".join(log_strs))
+
+            if should_stop:
+                if verbose:
+                    print(
+                        f"Early stopping at epoch {epoch}; best validation loss was "
+                        f"{best_val_loss:.6f} at epoch {history.best_epoch}."
+                    )
+                break
+
+        if best_weights is not None:
+            for layer, saved_params in zip(self.layers, best_weights):
+                params = layer.get_params()
+                for name, saved_value in saved_params.items():
+                    current_value = params.get(name)
+                    if current_value is None or current_value.shape != saved_value.shape:
+                        raise RuntimeError(
+                            f"Cannot restore best weights: parameter '{name}' changed shape"
+                        )
+                    np.copyto(current_value, saved_value)
 
         return history
 

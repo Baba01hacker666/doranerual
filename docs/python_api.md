@@ -13,7 +13,7 @@
 - [Zero-Dependency Image Loader & Vision](#5-zero-dependency-image-loader--vision)
 - [Sequence Modeling & Recurrent Networks (RNN, LSTM, GRU)](#6-sequence-modeling--recurrent-networks)
 - [Attention & Transformer Blocks (Pure NumPy)](#7-attention--transformer-blocks)
-- [Learning Rate Schedulers](#8-learning-rate-schedulers)
+- [Training Controls and Learning Rate Schedulers](#8-training-controls-and-learning-rate-schedulers)
 - [Core Modular Components](#9-core-modular-components)
   - [Layers](#layers)
   - [Activations](#activations)
@@ -240,7 +240,7 @@ transformer = dn.TransformerBlock(
 
 ---
 
-## 8. Learning Rate Schedulers
+## 8. Training Controls and Learning Rate Schedulers
 
 Dynamic learning rate scheduling integrated directly into `model.fit()`:
 
@@ -256,7 +256,12 @@ scheduler2 = dn.CosineAnnealingLR(opt, T_max=20, eta_min=1e-4)
 # 3. Linear Warmup + Cosine Annealing
 scheduler3 = dn.WarmupCosineLR(opt, warmup_epochs=3, total_epochs=20, eta_min=1e-4)
 
-# Pass scheduler and gradient clipping to fit():
+# 4. Reduce the learning rate when validation loss plateaus
+plateau_scheduler = dn.ReduceLROnPlateau(
+    opt, factor=0.5, patience=3, min_lr=1e-5
+)
+
+# Epoch-based schedules do not need validation data:
 model.fit(
     X_train,
     y_train,
@@ -264,7 +269,39 @@ model.fit(
     scheduler=scheduler3,
     clip_norm=1.0  # Global gradient clipping
 )
+
+# ReduceLROnPlateau is metric-based and receives val_loss from fit():
+model.fit(
+    X_train,
+    y_train,
+    epochs=20,
+    validation_data=(X_valid, y_valid),
+    scheduler=plateau_scheduler,
+)
+
+### Larger effective batches and early stopping
+
+Use gradient accumulation when a model cannot fit a large batch in memory. The optimizer updates after each group of micro-batches, using a correctly sample-weighted average; the final incomplete group is also applied.
+
+```python
+history = model.fit(
+    X_train,
+    y_train,
+    epochs=100,
+    batch_size=8,                    # micro-batch size
+    gradient_accumulation_steps=4,    # effective batch size is about 32
+    validation_data=(X_valid, y_valid),
+    early_stopping_patience=8,
+    min_delta=1e-4,
+    restore_best_weights=True,
+    scheduler=scheduler3,
+    clip_norm=1.0,
+)
+
+print(history.best_epoch, history.stopped_early)
 ```
+
+Early stopping monitors validation loss and restores the best weights by default. It requires `validation_data`; leave `early_stopping_patience=None` to train for all requested epochs.
 
 ---
 
@@ -295,11 +332,14 @@ model.fit(
 - `MeanSquaredError()` (alias `MSELoss`): Continuous regression loss.
 
 ### Optimizers & Regularizers
-- `SGD(lr=0.01, momentum=0.9, weight_decay=0.0)`: Stochastic Gradient Descent with velocity momentum and decoupled weight decay.
-- `Adam(lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0)`: Adaptive Moment Estimation with bias correction and decoupled AdamW weight decay.
-- `RMSprop(lr=0.001, alpha=0.9, eps=1e-8)`: Root Mean Square Propagation.
-- `clip_grad_norm(layers_or_grads, max_norm)`: Global L2 gradient norm clipping.
+- `SGD(lr=0.01, momentum=0.0, weight_decay=0.0, nesterov=False)`: Stochastic Gradient Descent with scheduler-friendly momentum, optional Nesterov acceleration, and decoupled weight decay.
+- `Adam(lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0, amsgrad=False)`: Adam with parameter-wise bias correction, optional AMSGrad, and decoupled weight decay.
+- `AdamW(...)`: Explicit AdamW spelling; in this library `Adam(weight_decay=...)` already uses decoupled AdamW behavior.
+- `RMSprop(lr=0.001, alpha=0.99, eps=1e-8, momentum=0.0, weight_decay=0.0)`: RMSprop with optional momentum and decoupled weight decay.
+- `clip_grad_norm(layers_or_grads, max_norm)`: Numerically stable global L2 gradient clipping; accepts layers, arrays, or a gradient dictionary.
 - `clip_grad_value(layers_or_grads, clip_value)`: Element-wise gradient threshold clipping.
+
+All optimizers validate parameter/gradient shapes and reject non-finite values early. Their gradient clipping options apply globally across the trainable parameters.
 
 ### Metrics
 - `Accuracy()`: Binary and multiclass classification accuracy.

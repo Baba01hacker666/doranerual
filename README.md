@@ -90,7 +90,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 - **Batch-Parallel Threaded DataLoader**: Overlaps data slicing, memory formatting, and augmentation on background threads with zero heavy dependencies (`threading` + `queue`).
 - **Pure NumPy Sequence & Recurrent Models**: Full analytical BPTT support for `SimpleRNN`, `LSTM`, and `GRU` sequence modeling.
 - **Pure NumPy Attention & Transformers**: Pre-LN `TransformerBlock`, `MultiHeadAttention` (with causal autoregressive masking), and `PositionalEncoding`—all in pure NumPy without PyTorch or JAX.
-- **LR Schedulers & Gradient Clipping**: Dynamic `StepLR`, `CosineAnnealingLR`, `WarmupCosineLR`, along with `clip_grad_norm`, `clip_grad_value`, and decoupled weight decay.
+- **Practical Training Controls**: Gradient accumulation for larger effective batches, validation-based early stopping with best-weight restoration, and `ReduceLROnPlateau` alongside warmup/cosine schedules and gradient clipping.
 - **Zero-Dependency Image Loader & Cat vs Dog Vision**: Load `.bmp`, `.ppm`, and `.pgm` images without Pillow or OpenCV. Run real CPU computer vision with `Conv2D` (stride, dilation, padding) and `MaxPool2D`:
   ```bash
   doraneural demo catdog
