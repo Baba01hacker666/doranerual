@@ -293,3 +293,48 @@ def test_bench_script_reports_cpu_dispatch_signature():
     weights = module.make_weights(module.TIERS["mini-byte"])
     assert weights["token_embedding_table"].size == 258 * 192
     assert weights["shared_classifier"] == 0
+
+# --------------------------------------------------------------------------
+# BPE vs byte experiment harness (Paper 16)
+# --------------------------------------------------------------------------
+
+def test_experiment_script_plan_is_step_matched():
+    """The harness must step-match, not epoch-match, or it measures vocab size."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "exp_byte_vs_bpe", REPO_ROOT / "scripts" / "exp_byte_vs_bpe.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Byte tiers use 258 tokens; BPE tiers use their declared vocab.
+    assert module.variant_config("micro", byte_level=False).vocab_size == 512
+    assert module.variant_config("micro", byte_level=True).vocab_size == BYTE_VOCAB_SIZE
+    assert module.variant_config("mini", byte_level=False).vocab_size == 32000
+
+    # The body must be identical across the pair, which is what isolates the vocabulary.
+    bpe = module.variant_config("mini", byte_level=False)
+    byte_cfg = module.variant_config("mini", byte_level=True)
+    for field in ("dim", "hidden_dim", "n_layers", "n_heads", "n_kv_heads", "seq_len"):
+        assert getattr(bpe, field) == getattr(byte_cfg, field), field
+
+    # Step matching must be the documented framing, or equal epochs silently
+    # favours the byte model (one token per byte => ~3.8x the supervised tokens).
+    assert "--match-steps" in module.__doc__
+    assert "STEPS" in module.__doc__
+    # ...and the CLI must actually expose it.
+    source = (REPO_ROOT / "scripts" / "exp_byte_vs_bpe.py").read_text()
+    assert '"--match-steps"' in source
+    assert source.count("variant_epochs") >= 2
+
+
+def test_experiment_reports_bits_per_byte_not_raw_ce():
+    """Paper 16 §4.3: raw CE across vocabularies is meaningless. Guard the framing."""
+    import math
+
+    bpe_bits = 2.8175 / 1.464 / math.log(2)
+    byte_bits = 1.9473 / 1.0 / math.log(2)
+    # The BPE tokenizer compresses slightly better even though its raw CE is higher.
+    assert bpe_bits < byte_bits
+    # ...and the vocabulary entropy floor gap dwarfs the raw CE gap at the 32k scale.
+    assert math.log(32000) - math.log(258) > (4.3515 - 1.6829)

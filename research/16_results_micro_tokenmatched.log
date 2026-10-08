@@ -1,0 +1,32 @@
+🔧 Initializing Zexo-Micro Base Weights...
+   Architecture: 64 dim, 172 hidden, 5 layers, 4 heads, 4 kv-heads
+   Parameters:   280,512
+   Destination:  /tmp/doranerual_exp/tokenmatched/model.bin
+✅ Checkpoint successfully created: model.bin (1,187,612 bytes)
+   Config saved: model.json
+{
+  "label": "BPE pack=on token-matched",
+  "tier": "micro",
+  "tokenizer": "bpe",
+  "vocab_size": 512,
+  "parameters": 280512,
+  "seq_len": 256,
+  "pack_documents": true,
+  "init_seconds": 0.017,
+  "train_seconds": 244.86,
+  "epochs": 9,
+  "windows_per_epoch": 292,
+  "optimizer_steps": 2628,
+  "supervised_tokens_per_epoch": 64279,
+  "supervised_tokens_total": 578511,
+  "bytes_per_token": 1.464,
+  "corpus_bytes": 109763,
+  "final_train_loss": 2.8995,
+  "val_loss": 2.2612,
+  "val_perplexity": 9.595,
+  "decode_tps": 7298.69,
+  "sample": "User: tell me a story about the sea\nZexo:\n\n\n\n\n1]````````````````````:\n                   ",
+  "prefill_serial_tps": 11982.09,
+  "prefill_batched_tps": 20949.73,
+  "prefill_speedup": 1.748
+}
