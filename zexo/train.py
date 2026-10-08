@@ -131,8 +131,16 @@ def main():
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=128,
-        help="Sequence chunk length (default: 128).",
+        default=256,
+        help="Sequence chunk length (default: 256). Raise this for byte-level tiers, "
+             "which consume one token per byte.",
+    )
+    parser.add_argument(
+        "--no-pack",
+        action="store_true",
+        help="Disable cross-dialogue packing. By default all dialogues are concatenated "
+             "(EOS-delimited) and windowed once, instead of rounding each dialogue up to "
+             "whole windows.",
     )
     parser.add_argument(
         "--replay-ratio",
@@ -381,6 +389,7 @@ def main():
         lora_targets=[item.strip() for item in args.lora_targets.split(",") if item.strip()],
         adapter_path=args.adapter_output,
         grad_clip=args.grad_clip,
+        pack_documents=not args.no_pack,
     )
     duration = time.perf_counter() - t0
     final_report = f"Final loss: {hist['loss'][-1]:.4f}"
@@ -428,6 +437,7 @@ def main():
         "weight_decay": args.weight_decay,
         "seq_len": args.seq_len,
         "stride": args.stride or args.seq_len,
+        "pack_documents": not args.no_pack,
         "seed": args.seed,
         "training_mode": "full_backprop" if args.full_backprop else (
             "lora" if args.lora_rank is not None else "head_only"

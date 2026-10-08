@@ -17,10 +17,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from doraneural.llm import LlamaConfig
 
+# Vocabulary-free byte tiers use raw UTF-8 byte ids (0-255) plus BOS and EOS.
+# See research/10_recurrent_trace_units_latent.md for the derivation.
+BYTE_VOCAB_SIZE = 258
 
 @dataclass
 class ZexoConfig:
     """Configuration hyperparameter blueprint for Zexo AI models."""
+
     name: str = "zexo"
     tier: str = "chat"
     dim: int = 384
@@ -32,12 +36,18 @@ class ZexoConfig:
     seq_len: int = 1024
     rope_type: str = "interleaved"
     novel_neurons: bool = False
+    tokenizer: str = "bpe"  # "bpe" (SentencePiece) or "byte" (vocabulary-free)
     system_prompt: str = (
         "You are Zexo, an intelligent, thoughtful, and creative conversational AI assistant. "
         "You communicate with clarity, warmth, and precision. You love helping users explore ideas, "
         "solve challenging problems, explain complex topics simply, and hold engaging, meaningful conversations."
     )
     version: str = "1.0.0"
+
+    @property
+    def is_byte_level(self) -> bool:
+        """True when this tier models raw UTF-8 bytes instead of BPE tokens."""
+        return self.tokenizer == "byte"
 
     @property
     def head_size(self) -> int:
@@ -74,6 +84,10 @@ class ZexoConfig:
             rope_type=self.rope_type,
         )
         cfg.novel_neurons = self.novel_neurons
+        if self.is_byte_level:
+            # Byte tiers reserve ids 256/257 for BOS/EOS; the LLaMA default of 2
+            # would otherwise treat a raw control byte as end-of-text.
+            cfg.eos_token_id = 257
         return cfg
 
     # ---------------- Predefined Architectural Tiers ----------------
@@ -164,9 +178,91 @@ class ZexoConfig:
         )
 
     @classmethod
+    def micro_byte(cls) -> "ZexoConfig":
+        """Byte-level Zexo-Micro: same transformer body as `micro`, 258-token vocab."""
+        return cls(
+            tier="micro-byte",
+            dim=64,
+            hidden_dim=172,
+            n_layers=5,
+            n_heads=4,
+            n_kv_heads=4,
+            vocab_size=BYTE_VOCAB_SIZE,
+            seq_len=256,
+            tokenizer="byte",
+        )
+
+    @classmethod
+    def mini_byte(cls) -> "ZexoConfig":
+        """Byte-level Zexo-Mini: identical body to `mini` with a 258-token vocab.
+
+        This is the single largest parameter saving in the ladder: the BPE tier
+        spends 89.8% of its 6.8M parameters on the embedding matrix, while the
+        byte tier holds the same 700,992 transformer parameters in 750K total.
+        """
+        return cls(
+            tier="mini-byte",
+            dim=192,
+            hidden_dim=1024,
+            n_layers=1,
+            n_heads=2,
+            n_kv_heads=1,
+            vocab_size=BYTE_VOCAB_SIZE,
+            seq_len=512,
+            tokenizer="byte",
+        )
+
+    @classmethod
+    def chat_byte(cls) -> "ZexoConfig":
+        """Byte-level Zexo-Chat: identical body to `chat` with a 258-token vocab.
+
+        Halves the parameter count (25.3M -> 13.1M) without touching any
+        transformer capacity. Freed budget can be spent on depth if desired.
+        """
+        return cls(
+            tier="chat-byte",
+            dim=384,
+            hidden_dim=1024,
+            n_layers=8,
+            n_heads=8,
+            n_kv_heads=4,
+            vocab_size=BYTE_VOCAB_SIZE,
+            seq_len=1024,
+            tokenizer="byte",
+        )
+
+    @classmethod
+    def base_byte(cls) -> "ZexoConfig":
+        """Byte-level Zexo-Base: identical body to `base` with a 258-token vocab."""
+        return cls(
+            tier="base-byte",
+            dim=768,
+            hidden_dim=2048,
+            n_layers=12,
+            n_heads=12,
+            n_kv_heads=12,
+            vocab_size=BYTE_VOCAB_SIZE,
+            seq_len=2048,
+            tokenizer="byte",
+        )
+
+    @classmethod
     def from_tier(cls, tier: str) -> "ZexoConfig":
         """Factory constructor by tier name string."""
         t = tier.lower().strip()
+        byte_tiers = {
+            "micro-byte": cls.micro_byte,
+            "microbyte": cls.micro_byte,
+            "mini-byte": cls.mini_byte,
+            "minibyte": cls.mini_byte,
+            "chat-byte": cls.chat_byte,
+            "chatbyte": cls.chat_byte,
+            "small-byte": cls.chat_byte,
+            "base-byte": cls.base_byte,
+            "basebyte": cls.base_byte,
+        }
+        if t in byte_tiers:
+            return byte_tiers[t]()
         if t == "micro":
             return cls.micro()
         elif t == "mini":
@@ -180,7 +276,10 @@ class ZexoConfig:
         elif t == "large":
             return cls.large()
         else:
-            raise ValueError(f"Unknown Zexo tier '{tier}'. Available: micro, mini, chat, dora, base, large.")
+            raise ValueError(
+                f"Unknown Zexo tier '{tier}'. Available: micro, mini, chat, dora, base, large, "
+                "or the vocabulary-free byte tiers micro-byte, mini-byte, chat-byte, base-byte."
+            )
 
     def to_dict(self) -> Dict[str, any]:
         d = asdict(self)

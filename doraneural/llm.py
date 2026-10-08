@@ -381,6 +381,68 @@ class HFTokenizer:
         return [self.decode(tokens) for tokens in batches]
 
 
+class ByteTokenizer:
+    """Tokenizer-free UTF-8 byte-level tokenizer.
+
+    Implements the vocabulary-free scheme derived in Research Paper 10: token ids
+    ``0..255`` are raw UTF-8 bytes, so encoding is lossless for *any* input and
+    no merge table has to be learned or shipped. Ids ``256`` and ``257`` are
+    reserved for BOS and EOS, giving a total vocabulary of 258.
+
+    Compared with a 32k SentencePiece BPE this removes ~99.2% of the embedding
+    and unembedding parameters. The trade-off is that text costs one token per
+    byte instead of ~3.8 bytes per token, so a fixed corpus yields more gradient
+    updates (which is the point: it fights the data starvation documented in
+    Research Paper 11) at the price of longer sequences for the same text.
+    """
+
+    BOS_ID = 256
+    EOS_ID = 257
+    VOCAB_SIZE = 258
+
+    def __init__(self, tokenizer_path: Optional[Union[str, Path]] = None) -> None:
+        # tokenizer_path is accepted for interface parity with the BPE
+        # tokenizers but is unused: the byte vocabulary is implicit.
+        self.tokenizer_path = tokenizer_path
+        self.vocab_size = self.VOCAB_SIZE
+
+    @property
+    def bytes_per_token(self) -> float:
+        """Average UTF-8 bytes consumed per token (always 1.0 here)."""
+        return 1.0
+
+    def encode(self, text: str, bos: bool = True) -> List[int]:
+        """Encode text to raw UTF-8 byte ids, optionally prefixed with BOS."""
+        tokens: List[int] = [self.BOS_ID] if bos else []
+        tokens.extend(text.encode("utf-8"))
+        return tokens
+
+    def encode_batch(self, texts: Sequence[str], bos: bool = True) -> List[List[int]]:
+        """Encode multiple strings, sharing one UTF-8 encoder pass per string."""
+        return [self.encode(text, bos=bos) for text in texts]
+
+    def decode_token(self, token_id: int) -> str:
+        """Decode a single token id to its character (empty for BOS/EOS)."""
+        if token_id < 0 or token_id > 255:
+            return ""
+        return bytes([token_id]).decode("utf-8", errors="replace")
+
+    def encode_token_id(self, byte_value: int) -> int:
+        """Map a raw byte value to its token id (identity in the byte vocabulary)."""
+        if not 0 <= byte_value <= 255:
+            raise ValueError(f"byte value must be in [0, 255], got {byte_value}")
+        return byte_value
+
+    def decode(self, tokens: List[int]) -> str:
+        """Decode byte ids back to a UTF-8 string, dropping BOS/EOS markers."""
+        payload = bytes([t for t in tokens if 0 <= t <= 255])
+        return payload.decode("utf-8", errors="replace")
+
+    def decode_batch(self, batches: Sequence[List[int]]) -> List[str]:
+        """Decode multiple token sequences."""
+        return [self.decode(tokens) for tokens in batches]
+
+
 def load_safetensors(path: Union[str, Path]) -> Dict[str, np.ndarray]:
     """Load a safetensors file or sharded ``*.index.json`` into NumPy arrays.
 
@@ -456,12 +518,12 @@ class LlamaLLM:
     def __init__(
         self,
         model_path: Union[str, Path],
-        tokenizer_path: Union[str, Path],
+        tokenizer_path: Optional[Union[str, Path]],
         backend: str = "auto",
         config_path: Optional[Union[str, Path]] = None,
     ) -> None:
         self.model_path = Path(model_path)
-        self.tokenizer_path = Path(tokenizer_path)
+        self.tokenizer_path = Path(tokenizer_path) if tokenizer_path else None
 
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
@@ -476,12 +538,16 @@ class LlamaLLM:
         else:
             self._load_llama2c_bin()
 
-        # Load Tokenizer (detect format by extension)
-        tok_path = Path(self.tokenizer_path)
-        if tok_path.name.endswith(".json"):
-            self.tokenizer = HFTokenizer(tok_path)
+        # Load Tokenizer. The literal "byte" (or None) selects the vocabulary-free
+        # UTF-8 byte tokenizer instead of a BPE file.
+        if self.tokenizer_path is None or str(self.tokenizer_path).lower() in ("byte", "bytes"):
+            self.tokenizer = ByteTokenizer()
         else:
-            self.tokenizer = LlamaTokenizer(tok_path, vocab_size=self.config.vocab_size)
+            tok_path = self.tokenizer_path
+            if tok_path.name.endswith(".json"):
+                self.tokenizer = HFTokenizer(tok_path)
+            else:
+                self.tokenizer = LlamaTokenizer(tok_path, vocab_size=self.config.vocab_size)
 
         # Allocate Key-Value Cache
         p = self.config
@@ -1107,12 +1173,22 @@ class LlamaLLM:
         seq_len: int,
         mask_prompts: bool = True,
         max_batches: Optional[int] = None,
+        pack_documents: bool = True,
     ) -> List[Tuple[List[int], List[int]]]:
         """Convert training text into paired (input_seq, target_seq) training chunks.
 
         If conversational dialogue format is detected (User:/Zexo: or User:/Assistant:),
         it applies SFT instruction masking so prompt tokens have target=-1 (ignored in loss),
         and responses have their true token targets.
+
+        With ``pack_documents=True`` the per-dialogue token streams are concatenated
+        into a single stream (separated by the EOS id) and windowed once, instead of
+        rounding every dialogue up to a whole number of windows. Windowing each
+        dialogue independently wastes the tail of every dialogue: on the shipped
+        quality corpus that is 285 windows for 29,049 tokens (67.4% supervised-token
+        density) versus 227 windows at full density. Documents are still delimited by
+        EOS/BOS so the model can learn boundaries; the causal mask is not blocked
+        across documents because the native engine has no document mask.
         """
         batches = []
         is_dialogue = bool(re.search(r'(?:^|\n)User:\s*', text, re.IGNORECASE))
@@ -1123,13 +1199,15 @@ class LlamaLLM:
             turn_pattern = re.compile(r'(User:\s*.*?\n(?:Zexo|Assistant):\s*)(.*?)(?=(?:\nUser:|$))', re.DOTALL | re.IGNORECASE)
             total_d = len(raw_dialogues)
             log_interval = max(500, total_d // 10)
+            eos_id = int(getattr(self.config, "eos_token_id", 2) or 2)
+
+            stream_in: List[int] = []
+            stream_tgt: List[int] = []
 
             for d_idx, d in enumerate(raw_dialogues):
-                if max_batches is not None and len(batches) >= max_batches:
-                    break
                 if total_d > 500 and (d_idx + 1) % log_interval == 0:
                     pct = (d_idx + 1) / total_d * 100.0
-                    print(f"   Tokenized {d_idx + 1:,}/{total_d:,} dialogues ({pct:5.1f}%) -> {len(batches):,} batches packed", flush=True)
+                    print(f"   Tokenized {d_idx + 1:,}/{total_d:,} dialogues ({pct:5.1f}%)", flush=True)
 
                 matches = list(turn_pattern.finditer(d))
                 if not matches:
@@ -1146,14 +1224,35 @@ class LlamaLLM:
                     d_inputs.extend(turn_tokens[:-1])
                     d_targets.extend(turn_targets[1:])
 
-                # Window dialogue into chunks of length seq_len
-                for j in range(0, len(d_inputs), seq_len):
-                    chunk_in = d_inputs[j : j + seq_len]
-                    chunk_tgt = d_targets[j : j + seq_len]
+                if not pack_documents:
+                    for j in range(0, len(d_inputs), seq_len):
+                        chunk_in = d_inputs[j : j + seq_len]
+                        chunk_tgt = d_targets[j : j + seq_len]
+                        if len(chunk_in) >= 4 and any(t >= 0 for t in chunk_tgt):
+                            batches.append((chunk_in, chunk_tgt))
+                            if max_batches is not None and len(batches) >= max_batches:
+                                break
+                    if max_batches is not None and len(batches) >= max_batches:
+                        break
+                    continue
+
+                # Global packing: append this dialogue's stream, then an EOS
+                # delimiter so the next document starts cleanly.
+                stream_in.extend(d_inputs)
+                stream_tgt.extend(d_targets)
+                stream_in.append(eos_id)
+                stream_tgt.append(-1)  # never predict the delimiter itself
+
+            if pack_documents:
+                for j in range(0, len(stream_in) - seq_len, seq_len):
+                    chunk_in = stream_in[j : j + seq_len]
+                    chunk_tgt = stream_tgt[j : j + seq_len]
                     if len(chunk_in) >= 4 and any(t >= 0 for t in chunk_tgt):
                         batches.append((chunk_in, chunk_tgt))
                         if max_batches is not None and len(batches) >= max_batches:
                             break
+                packed = len(stream_in)
+                print(f"   Document packing: {len(raw_dialogues):,} dialogues -> {len(batches):,} windows ({packed:,} tokens).", flush=True)
             print(f"📦 Packed {len(batches):,} training batches ({len(batches) * seq_len:,} sequence tokens).", flush=True)
         else:
             print(f"🔤 Tokenizing pretraining corpus ({len(text):,} chars)...", flush=True)
@@ -1224,6 +1323,7 @@ class LlamaLLM:
         max_batches: Optional[int] = None,
         grad_clip: float = 1.0,
         mask_prompts: bool = True,
+        pack_documents: bool = True,
     ) -> dict:
         """Native C++ full-transformer training loop with LR schedule and gradient clipping."""
         if self.cpp_engine is None:
@@ -1242,6 +1342,7 @@ class LlamaLLM:
         if is_dialogue and mask_prompts:
             masked_batches = self._prepare_training_batches(
                 text, seq_len=seq_len, mask_prompts=True, max_batches=max_batches,
+                pack_documents=pack_documents,
             )
             if not masked_batches:
                 raise ValueError("No training batches generated from corpus.")
@@ -1394,6 +1495,7 @@ class LlamaLLM:
         max_batches: Optional[int] = None,
         grad_clip: float = 1.0,
         mask_prompts: bool = True,
+        pack_documents: bool = True,
     ) -> dict:
         """Fine-tune every transformer parameter using native C++ or NumPy autograd.
 
@@ -1415,7 +1517,7 @@ class LlamaLLM:
                 text, epochs, lr, seq_len, weight_decay, verbose,
                 eval_text, validation_split, stride, shuffle, seed, max_eval_steps,
                 max_batches=max_batches, grad_clip=grad_clip,
-                mask_prompts=mask_prompts,
+                mask_prompts=mask_prompts, pack_documents=pack_documents,
             )
 
         def encode_nonempty(value: str, label: str) -> List[int]:
@@ -1429,6 +1531,7 @@ class LlamaLLM:
         if is_dialogue and mask_prompts:
             masked_batches = self._prepare_training_batches(
                 text, seq_len=seq_len, mask_prompts=True, max_batches=max_batches,
+                pack_documents=pack_documents,
             )
             if not masked_batches:
                 raise ValueError("No training batches generated from corpus.")
@@ -1491,6 +1594,7 @@ class LlamaLLM:
         max_eval_steps: Optional[int] = None,
         adapter_path: Optional[Union[str, Path]] = None,
         mask_prompts: bool = True,
+        pack_documents: bool = True,
     ) -> dict:
         """Fine-tune a pretrained checkpoint with adapter-only LoRA weights."""
         if not text:
@@ -1506,6 +1610,7 @@ class LlamaLLM:
         if is_dialogue and mask_prompts:
             masked_batches = self._prepare_training_batches(
                 text, seq_len=seq_len, mask_prompts=True, max_batches=None,
+                pack_documents=pack_documents,
             )
             if not masked_batches:
                 raise ValueError("No training batches generated from corpus.")
@@ -1582,6 +1687,7 @@ class LlamaLLM:
         lora_targets: Optional[Sequence[str]] = None,
         adapter_path: Optional[Union[str, Path]] = None,
         grad_clip: float = 1.0,
+        pack_documents: bool = True,
     ) -> dict:
         """Fine-tune the model on custom text with reproducible validation.
 
@@ -1593,6 +1699,8 @@ class LlamaLLM:
             weight_decay: L2 regularization factor.
             verbose: 1 to print epoch progress, 0 to silence.
             mask_prompts: If True and dialogue tags are present, mask prompt tokens.
+            pack_documents: Concatenate per-dialogue token streams (EOS-delimited) and
+                window once instead of rounding each dialogue up to whole windows.
             max_batches: Maximum batches/steps per epoch.
             eval_text: Optional held-out evaluation corpus.
             validation_split: Fraction of training text to reserve for validation if eval_text omitted.
@@ -1631,6 +1739,7 @@ class LlamaLLM:
                 max_eval_steps=max_eval_steps,
                 adapter_path=adapter_path,
                 mask_prompts=mask_prompts,
+                pack_documents=pack_documents,
             )
         if full_backprop:
             return self.train_full(
@@ -1649,6 +1758,7 @@ class LlamaLLM:
                 native=native_full,
                 grad_clip=grad_clip,
                 mask_prompts=mask_prompts,
+                pack_documents=pack_documents,
             )
         if verbose:
             print(
@@ -1674,7 +1784,10 @@ class LlamaLLM:
 
         is_dialogue = bool(re.search(r'(?:^|\n)User:\s*', text, re.IGNORECASE))
         if is_dialogue and mask_prompts:
-            batches = self._prepare_training_batches(text, seq_len=seq_len, mask_prompts=mask_prompts, max_batches=max_batches)
+            batches = self._prepare_training_batches(
+                text, seq_len=seq_len, mask_prompts=mask_prompts, max_batches=max_batches,
+                pack_documents=pack_documents,
+            )
             if not batches:
                 raise ValueError("No training batches generated from corpus.")
             train_tokens = []

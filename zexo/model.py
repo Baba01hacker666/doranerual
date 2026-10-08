@@ -96,6 +96,7 @@ class ZexoModel:
         lora_targets: Optional[List[str]] = None,
         adapter_path: Optional[Union[str, Path]] = None,
         grad_clip: float = 1.0,
+        pack_documents: bool = True,
     ) -> dict:
         """Fine-tune Zexo on custom text or conversational dialogue, optionally with full backprop or LoRA."""
         return self.llm.train(
@@ -120,6 +121,7 @@ class ZexoModel:
             lora_targets=lora_targets,
             adapter_path=adapter_path,
             grad_clip=grad_clip,
+            pack_documents=pack_documents,
         )
 
     def full_backprop_model(self):
@@ -144,6 +146,32 @@ class ZexoModel:
         return out_bin
 
 
+def _load_byte_tier_llm(
+    checkpoint_path: Optional[Union[str, Path]],
+    tier: str,
+    backend: str,
+    from_scratch: bool,
+    repo_root: Path,
+):
+    """Resolve weights for a byte-level Zexo tier (no BPE tokenizer file)."""
+    ckpt_p = Path(checkpoint_path) if checkpoint_path else None
+    if ckpt_p and ckpt_p.exists() and not from_scratch:
+        return LlamaLLM(model_path=ckpt_p, tokenizer_path="byte", backend=backend)
+
+    latest_zexo = repo_root / "zexo" / "checkpoints" / "latest.bin"
+    if latest_zexo.exists() and not from_scratch:
+        cfg_file = latest_zexo.with_suffix(".json")
+        loaded_cfg = ZexoConfig.load(cfg_file) if cfg_file.exists() else None
+        if loaded_cfg is None or loaded_cfg.tier == tier:
+            return LlamaLLM(model_path=latest_zexo, tokenizer_path="byte", backend=backend)
+
+    cfg = ZexoConfig.from_tier(tier)
+    fresh_bin = repo_root / "zexo" / "checkpoints" / f"zexo_{tier}_base.bin"
+    if not fresh_bin.exists():
+        initialize_zexo_checkpoint(cfg, fresh_bin)
+    return LlamaLLM(model_path=fresh_bin, tokenizer_path="byte", backend=backend)
+
+
 def load_zexo(
     checkpoint_path: Optional[Union[str, Path]] = None,
     tokenizer_path: Optional[Union[str, Path]] = None,
@@ -153,6 +181,12 @@ def load_zexo(
 ) -> ZexoModel:
     """Load or initialize a ready-to-run Zexo model instance."""
     repo_root = REPO_ROOT
+
+    # 0. Byte-level tiers are vocabulary-free: no tokenizer file is needed.
+    if ZexoConfig.from_tier(tier).is_byte_level:
+        llm = _load_byte_tier_llm(checkpoint_path, tier, backend, from_scratch, repo_root)
+        cfg = ZexoConfig.load(Path(checkpoint_path).with_suffix(".json")) if checkpoint_path else ZexoConfig.from_tier(tier)
+        return ZexoModel(llm=llm, config=cfg)
 
     # 1. Resolve Tokenizer
     tok_p = Path(tokenizer_path) if tokenizer_path else None
