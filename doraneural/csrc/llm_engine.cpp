@@ -553,6 +553,74 @@ void matmul_forward(float* __restrict__ y, const float* __restrict__ x, const fl
     }
 }
 
+// Batched GEMM used by llama_forward_chunk.
+//
+//   y[t*n + j] = sum_i x[t*d + i] * W[i*n + j]      for t in [0,T), j in [0,n)
+//
+// W keeps the same [d][n] layout as matmul_forward, so a fixed reduction index i
+// reads a contiguous span of n weights. Blocking over the output index j keeps a
+// T x JB tile of y hot in L1/L2 while i sweeps, which means each weight element is
+// read from DRAM exactly once for the whole batch instead of once per token. That
+// is the whole point: single-token decode is DRAM-bound on the weight stream
+// (~1.8% of AVX2 FMA peak on an AVX2 host), so amortising the weight traffic over
+// T rows is where the speedup comes from.
+// Batched GEMM used by llama_forward_chunk.
+//
+//   y[t*d_out + i] = sum_{j<n_in} W[i*n_in + j] * x[t*n_in + j]
+//
+// for t in [0,T), i in [0,d_out). W keeps the same [d_out][n_in] layout as
+// matmul_forward (row i is a contiguous run of n_in weights), and x is [T][n_in].
+//
+// Why this exists: single-token decode is DRAM-bound on the weight matrices, so the
+// serialised prefill loop re-streams every weight element once per prompt token.
+// Blocking the output index i keeps a IB x TB accumulator tile live while the
+// reduction index j sweeps, so each weight element is read from DRAM roughly
+// T/TB times instead of T times. Attention still has to run per position, so this
+// only accelerates the linear layers.
+//
+// Scalar accumulators in a register tile, with the (i,t) FMA inner loop left to
+// -O3 -funroll-loops. Every SIMD path here has a scalar fallback so the kernel
+// stays portable to ARM64 and to baseline x86 (AGENTS.md Rule 3).
+void matmul_forward_batched(float* __restrict__ y, const float* __restrict__ x, const float* __restrict__ W, int T, int d_out, int n_in) {
+    if (!y || !x || !W || T <= 0 || d_out <= 0 || n_in <= 0) return;
+
+    // IB matches the 4-row blocking already used by matmul_forward; TB is the
+    // batch tile that sets the weight-reuse factor (W is streamed ~T/TB times).
+    const int IB = 16;
+    const int TB = 64;
+    const int n_iblocks = (d_out + IB - 1) / IB;
+
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static) if((size_t)T * d_out * n_in >= 262144)
+#endif
+    for (int b = 0; b < n_iblocks; b++) {
+        const int i0 = b * IB;
+        const int ib = std::min(IB, d_out - i0);
+
+        for (int t0 = 0; t0 < T; t0 += TB) {
+            const int tb = std::min(TB, T - t0);
+            float acc[IB][TB];
+            for (int ii = 0; ii < ib; ii++)
+                for (int tt = 0; tt < tb; tt++) acc[ii][tt] = 0.0f;
+
+            for (int j = 0; j < n_in; j++) {
+                float xv[TB];
+                for (int tt = 0; tt < tb; tt++) xv[tt] = x[(size_t)(t0 + tt) * n_in + j];
+                for (int ii = 0; ii < ib; ii++) {
+                    const float w = W[(size_t)(i0 + ii) * n_in + j];
+                    float* a = acc[ii];
+                    for (int tt = 0; tt < tb; tt++) a[tt] += w * xv[tt];
+                }
+            }
+
+            for (int ii = 0; ii < ib; ii++)
+                for (int tt = 0; tt < tb; tt++)
+                    y[(size_t)(t0 + tt) * d_out + (i0 + ii)] = acc[ii][tt];
+        }
+    }
+}
+
+
 void matmul_backward(float* dx, float* dW, const float* dy, const float* x, const float* W, int n, int d) {
     if (dx) {
 #ifdef _OPENMP
@@ -618,6 +686,11 @@ struct LlamaCppEngine {
     LlamaCppConfig config; LlamaCppWeights weights;
     std::vector<float> key_cache,val_cache,cos_cache,sin_cache;
     std::vector<float> x,xb,q,k,v,att,attn_out,hb1,hb3,hb,logits;
+    // Scratch arenas for the batched prefill path (llama_forward_chunk). Sized on
+    // demand in ensure_prefill_capacity so the single-token decode path above keeps
+    // its original allocation and cache behaviour.
+    std::vector<float> pre_x,pre_xb,pre_q,pre_k,pre_v,pre_attn_out,pre_hb1,pre_hb3,pre_hb;
+    int pre_capacity;
     std::vector<float> sample_probs; std::vector<std::pair<float,int>> sample_candidates;
     std::vector<float> train_step_logits,train_dlogits,train_probs,train_grad_embedding;
     FullTrainWorkspace full_workspace;
@@ -639,7 +712,7 @@ struct LlamaCppEngine {
         bool enabled = false;
     } profile;
     int adam_step; std::mt19937 rng;
-    LlamaCppEngine(const LlamaCppConfig* cfg, LlamaCppWeights* w) : config(*cfg), weights(*w), use_fp16(false), use_i8(false), use_vnni(false), adam_step(0), rng(42) {
+    LlamaCppEngine(const LlamaCppConfig* cfg, LlamaCppWeights* w) : config(*cfg), weights(*w), use_fp16(false), use_i8(false), use_vnni(false), adam_step(0), rng(42), pre_capacity(0) {
         int head_size=config.dim/config.n_heads; int half=head_size/2; int kv_dim=(config.dim*config.n_kv_heads)/config.n_heads;
         key_cache.resize((size_t)config.n_layers*config.seq_len*kv_dim,0.0f); val_cache.resize((size_t)config.n_layers*config.seq_len*kv_dim,0.0f);
         x.resize(config.dim,0.0f); xb.resize(config.dim,0.0f); q.resize(config.dim,0.0f); k.resize(kv_dim,0.0f); v.resize(kv_dim,0.0f);
@@ -702,6 +775,22 @@ struct LlamaCppEngine {
         return total;
     }
     void reset_kv_cache(){ std::fill(key_cache.begin(),key_cache.end(),0.0f); std::fill(val_cache.begin(),val_cache.end(),0.0f); }
+
+    void ensure_prefill_capacity(int T){
+        if(T<=pre_capacity) return;
+        int kv_dim=(config.dim*config.n_kv_heads)/config.n_heads;
+        size_t rows=(size_t)T;
+        pre_x.assign(rows*config.dim,0.0f);
+        pre_xb.assign(rows*config.dim,0.0f);
+        pre_q.assign(rows*config.dim,0.0f);
+        pre_k.assign(rows*kv_dim,0.0f);
+        pre_v.assign(rows*kv_dim,0.0f);
+        pre_attn_out.assign(rows*config.dim,0.0f);
+        pre_hb1.assign(rows*config.hidden_dim,0.0f);
+        pre_hb3.assign(rows*config.hidden_dim,0.0f);
+        pre_hb.assign(rows*config.hidden_dim,0.0f);
+        pre_capacity=T;
+    }
 };
 
 extern "C" {
@@ -1005,6 +1094,185 @@ void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits
     }
 }
 
+// Batched prefill: run T prompt positions in one pass instead of T serialised
+// llama_forward calls. Returns the number of tokens actually written to the KV
+// cache (0 on failure, -1 if the engine fell back to the serialised path).
+//
+// Motivation: the weight matrices are the DRAM bottleneck in this engine, and the
+// serialised loop re-streams every weight element once per prompt token. The
+// batched path streams each weight once for the whole chunk. Attention stays
+// per-position and causal: position t reads keys 0..(pos_start+t) from the cache
+// that this very call is filling, so it cannot be expressed as a single GEMM.
+//
+// Scope: the float32 path only. Per AGENTS.md Rule 4 float32 is the reference
+// path and lossy INT8/FP16 is opt-in, so the quantized engines delegate to the
+// existing serialised llama_forward loop rather than silently changing their
+// quantisation granularity (INT8 here quantises one activation vector per
+// matmul, which has no batched equivalent without redefining the scale).
+int llama_forward_chunk(LlamaCppEngine* engine, const int* tokens, int T, int pos_start, float* out_logits) {
+    if(!engine){
+        std::fprintf(stderr, "[llama_forward_chunk] null engine\n");
+        return 0;
+    }
+    if(!tokens || T<=0){
+        std::fprintf(stderr, "[llama_forward_chunk] null tokens or non-positive count\n");
+        return 0;
+    }
+    const LlamaCppConfig& p=engine->config;
+    if(pos_start<0 || pos_start+T > p.seq_len){
+        std::fprintf(stderr, "[llama_forward_chunk] window [%d,%d) out of range [0,%d)\n", pos_start, pos_start+T, p.seq_len);
+        return 0;
+    }
+    for(int t=0;t<T;t++){
+        if(tokens[t]<0 || tokens[t]>=p.vocab_size){
+            std::fprintf(stderr, "[llama_forward_chunk] token %d out of vocab range [0,%d)\n", tokens[t], p.vocab_size);
+            return 0;
+        }
+    }
+    if(!engine->weights.token_embedding_table){
+        std::fprintf(stderr, "[llama_forward_chunk] null token_embedding_table\n");
+        return 0;
+    }
+
+    // Quantized engines keep the serialised path so their numerics are unchanged.
+    if(engine->use_i8 || engine->use_fp16){
+        for(int t=0;t<T;t++) llama_forward(engine, tokens[t], pos_start+t, (t==T-1)?out_logits:nullptr);
+        return -1;
+    }
+
+    const LlamaCppWeights& w=engine->weights;
+    int head_size=p.dim/p.n_heads; int half=head_size/2;
+    int kv_dim=(p.dim*p.n_kv_heads)/p.n_heads; int kv_mul=p.n_heads/p.n_kv_heads;
+    float inv_sqrt_head=1.0f/std::sqrt((float)head_size);
+
+    bool prof = engine->profile.enabled;
+    auto now = []() { return std::chrono::high_resolution_clock::now(); };
+    auto elapsed_us = [](std::chrono::high_resolution_clock::time_point t0, std::chrono::high_resolution_clock::time_point t1) {
+        return (double)std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count() / 1000.0;
+    };
+    auto t_start = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+
+    engine->ensure_prefill_capacity(T);
+
+    for(int t=0;t<T;t++)
+        std::memcpy(engine->pre_x.data()+(size_t)t*p.dim, w.token_embedding_table+(size_t)tokens[t]*p.dim, (size_t)p.dim*sizeof(float));
+
+    for(int l=0;l<p.n_layers;l++){
+        auto t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+        for(int t=0;t<T;t++)
+            rmsnorm_forward(engine->pre_xb.data()+(size_t)t*p.dim, engine->pre_x.data()+(size_t)t*p.dim, w.rms_att_weight+(size_t)l*p.dim, p.dim);
+        if(prof) engine->profile.rmsnorm_us += elapsed_us(t0, now());
+
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+        matmul_forward_batched(engine->pre_q.data(), engine->pre_xb.data(), w.wq+(size_t)l*p.dim*p.dim, T, p.dim, p.dim);
+        matmul_forward_batched(engine->pre_k.data(), engine->pre_xb.data(), w.wk+(size_t)l*kv_dim*p.dim, T, kv_dim, p.dim);
+        matmul_forward_batched(engine->pre_v.data(), engine->pre_xb.data(), w.wv+(size_t)l*kv_dim*p.dim, T, kv_dim, p.dim);
+        if(prof) engine->profile.qkv_us += elapsed_us(t0, now());
+
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+        for(int t=0;t<T;t++){
+            const int pos=pos_start+t;
+            const float* cos_ptr=engine->cos_cache.data()+(size_t)pos*half;
+            const float* sin_ptr=engine->sin_cache.data()+(size_t)pos*half;
+            float* qrow=engine->pre_q.data()+(size_t)t*p.dim;
+            float* krow=engine->pre_k.data()+(size_t)t*kv_dim;
+            if(p.rope_type==1){
+                for(int h=0;h<p.n_heads;h++){ float* qh=qrow+(size_t)h*head_size; for(int i=0;i<half;i++){ float fcr=cos_ptr[i]; float fci=sin_ptr[i]; float q0=qh[i]; float q1=qh[i+half]; qh[i]=q0*fcr - q1*fci; qh[i+half]=q1*fcr + q0*fci; } }
+                for(int h=0;h<p.n_kv_heads;h++){ float* kh=krow+(size_t)h*head_size; for(int i=0;i<half;i++){ float fcr=cos_ptr[i]; float fci=sin_ptr[i]; float k0=kh[i]; float k1=kh[i+half]; kh[i]=k0*fcr - k1*fci; kh[i+half]=k1*fcr + k0*fci; } }
+            }else{
+                for(int i=0;i<p.dim;i+=2){ int h_dim=(i%head_size)/2; float fcr=cos_ptr[h_dim]; float fci=sin_ptr[h_dim]; float q0=qrow[i]; float q1=qrow[i+1]; qrow[i]=q0*fcr - q1*fci; qrow[i+1]=q0*fci + q1*fcr; if(i<kv_dim){ float k0=krow[i]; float k1=krow[i+1]; krow[i]=k0*fcr - k1*fci; krow[i+1]=k0*fci + k1*fcr; } }
+            }
+        }
+        if(prof) engine->profile.rope_us += elapsed_us(t0, now());
+
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+        int loff=l * p.seq_len * kv_dim;
+        for(int t=0;t<T;t++)
+            std::memcpy(engine->key_cache.data()+(size_t)loff+(size_t)(pos_start+t)*kv_dim, engine->pre_k.data()+(size_t)t*kv_dim, (size_t)kv_dim*sizeof(float));
+        for(int t=0;t<T;t++)
+            std::memcpy(engine->val_cache.data()+(size_t)loff+(size_t)(pos_start+t)*kv_dim, engine->pre_v.data()+(size_t)t*kv_dim, (size_t)kv_dim*sizeof(float));
+
+        for(int t=0;t<T;t++){
+            const int pos=pos_start+t;
+            const float* q_row=engine->pre_q.data()+(size_t)t*p.dim;
+            float* out_row=engine->pre_attn_out.data()+(size_t)t*p.dim;
+            std::memset(out_row, 0, (size_t)p.dim*sizeof(float));
+            for(int h=0;h<p.n_heads;h++){
+                const float* q_head=q_row+(size_t)h*head_size;
+                float* att_head=engine->att.data()+(size_t)h*p.seq_len;
+                int kv_h=h/kv_mul;
+                for(int tt=0;tt<=pos;tt++){
+                    const float* k_past=engine->key_cache.data()+(size_t)loff+(size_t)tt*kv_dim+(size_t)kv_h*head_size;
+                    att_head[tt]=dot_product_simd(q_head,k_past,head_size)*inv_sqrt_head;
+                }
+                softmax(att_head,pos+1);
+                float* out_head=out_row+(size_t)h*head_size;
+                for(int tt=0;tt<=pos;tt++){
+                    const float* v_past=engine->val_cache.data()+(size_t)loff+(size_t)tt*kv_dim+(size_t)kv_h*head_size;
+                    float a=att_head[tt];
+#if defined(__ARM_NEON) || defined(__aarch64__)
+                    float32x4_t va=vdupq_n_f32(a); int dd=0;
+                    for(; dd+3<head_size; dd+=4){ float32x4_t vout=vld1q_f32(out_head+dd); float32x4_t vv=vld1q_f32(v_past+dd); vst1q_f32(out_head+dd, vfmaq_f32(vout,vv,va)); }
+                    for(; dd<head_size; dd++) out_head[dd]+=a*v_past[dd];
+#elif defined(__AVX512F__)
+                    __m512 va=_mm512_set1_ps(a); int dd=0; for(; dd+15<head_size; dd+=16){ __m512 vout=_mm512_loadu_ps(out_head+dd); __m512 vv=_mm512_loadu_ps(v_past+dd); _mm512_storeu_ps(out_head+dd,_mm512_fmadd_ps(vv,va,vout)); } if(dd+7<head_size){ __m256 va256=_mm256_set1_ps(a); __m256 vout=_mm256_loadu_ps(out_head+dd); __m256 vv=_mm256_loadu_ps(v_past+dd); _mm256_storeu_ps(out_head+dd,_mm256_fmadd_ps(vv,va256,vout)); dd+=8; } for(; dd<head_size; dd++) out_head[dd]+=a*v_past[dd];
+#elif defined(__AVX2__)
+                    __m256 va=_mm256_set1_ps(a); int dd=0; for(; dd+7<head_size; dd+=8){ __m256 vout=_mm256_loadu_ps(out_head+dd); __m256 vv=_mm256_loadu_ps(v_past+dd); _mm256_storeu_ps(out_head+dd,_mm256_fmadd_ps(vv,va,vout)); } for(; dd<head_size; dd++) out_head[dd]+=a*v_past[dd];
+#else
+                    for(int dd=0;dd<head_size;dd++) out_head[dd]+=a*v_past[dd];
+#endif
+                }
+            }
+        }
+
+        matmul_forward_batched(engine->pre_xb.data(), engine->pre_attn_out.data(), w.wo+(size_t)l*p.dim*p.dim, T, p.dim, p.dim);
+        for(int t=0;t<T;t++){
+            float* xr=engine->pre_x.data()+(size_t)t*p.dim; float* xbr=engine->pre_xb.data()+(size_t)t*p.dim;
+            for(int i=0;i<p.dim;i++) xr[i]+=xbr[i];
+        }
+        if(prof) engine->profile.attn_us += elapsed_us(t0, now());
+
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+        for(int t=0;t<T;t++)
+            rmsnorm_forward(engine->pre_xb.data()+(size_t)t*p.dim, engine->pre_x.data()+(size_t)t*p.dim, w.rms_ffn_weight+(size_t)l*p.dim, p.dim);
+        if(prof) engine->profile.rmsnorm_us += elapsed_us(t0, now());
+
+        t0 = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+        matmul_forward_batched(engine->pre_hb1.data(), engine->pre_xb.data(), w.w1+(size_t)l*p.hidden_dim*p.dim, T, p.hidden_dim, p.dim);
+        matmul_forward_batched(engine->pre_hb3.data(), engine->pre_xb.data(), w.w3+(size_t)l*p.hidden_dim*p.dim, T, p.hidden_dim, p.dim);
+        for(size_t idx=0; idx<(size_t)T*p.hidden_dim; idx++)
+            engine->pre_hb[idx]=fast_silu(engine->pre_hb1[idx])*engine->pre_hb3[idx];
+        matmul_forward_batched(engine->pre_xb.data(), engine->pre_hb.data(), w.w2+(size_t)l*p.dim*p.hidden_dim, T, p.dim, p.hidden_dim);
+        for(int t=0;t<T;t++){
+            float* xr=engine->pre_x.data()+(size_t)t*p.dim; float* xbr=engine->pre_xb.data()+(size_t)t*p.dim;
+            for(int i=0;i<p.dim;i++) xr[i]+=xbr[i];
+        }
+        if(prof) engine->profile.ffn_us += elapsed_us(t0, now());
+    }
+
+    // Only the final position needs logits for generation, but every position must
+    // have a correct residual stream because it is the input to the next call.
+    float* last_x = engine->pre_x.data()+(size_t)(T-1)*p.dim;
+    auto t_fnorm = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+    rmsnorm_forward(engine->xb.data(), last_x, w.rms_final_weight, p.dim);
+    if(prof) engine->profile.rmsnorm_us += elapsed_us(t_fnorm, now());
+
+    if(out_logits){
+        auto t_cls = prof ? now() : std::chrono::high_resolution_clock::time_point{};
+        const float* cls_w = w.wcls ? w.wcls : w.token_embedding_table;
+        matmul_forward(engine->logits.data(), engine->xb.data(), cls_w, p.dim, p.vocab_size);
+        if (out_logits != engine->logits.data())
+            std::memcpy(out_logits, engine->logits.data(), (size_t)p.vocab_size*sizeof(float));
+        if(prof) engine->profile.classifier_us += elapsed_us(t_cls, now());
+    }
+
+    if(prof){
+        engine->profile.total_us += elapsed_us(t_start, now());
+        engine->profile.count+=T;
+    }
+    return T;
+}
+
 int llama_forward_argmax(LlamaCppEngine* engine, int token, int pos) {
     if(!engine || pos < 0 || pos >= engine->config.seq_len || token < 0 || token >= engine->config.vocab_size || !engine->weights.token_embedding_table) return 0;
     llama_forward(engine, token, pos, nullptr);
@@ -1151,10 +1419,21 @@ int llama_generate_ex(LlamaCppEngine* engine, const int* prompt_tokens, int prom
     int eos = (eos_token_id >= 0) ? eos_token_id : (engine->config.eos_token_id >= 0 ? engine->config.eos_token_id : 2);
     engine->reset_kv_cache();
     int pos=0;
-    for(int i=0;i<prompt_len;i++){
-        if(i==prompt_len-1) llama_forward(engine, prompt_tokens[i], pos, engine->logits.data());
-        else llama_forward(engine, prompt_tokens[i], pos, nullptr);
-        pos++;
+    // Prefill the whole prompt in one batched pass. llama_forward_chunk streams
+    // each weight element roughly prompt_len/TB times instead of once per token,
+    // which is the dominant cost when the prompt is long. It returns 0 only if the
+    // window failed validation, in which case we fall back to the original serial
+    // loop so behaviour is unchanged; -1 means it already ran the serial fallback
+    // internally (quantized engine) and the KV cache is fully populated.
+    int chunk_rc = llama_forward_chunk(engine, prompt_tokens, prompt_len, 0, engine->logits.data());
+    if(chunk_rc == 0){
+        for(int i=0;i<prompt_len;i++){
+            if(i==prompt_len-1) llama_forward(engine, prompt_tokens[i], pos, engine->logits.data());
+            else llama_forward(engine, prompt_tokens[i], pos, nullptr);
+            pos++;
+        }
+    } else {
+        pos = prompt_len;
     }
 
     int generated_count=0;

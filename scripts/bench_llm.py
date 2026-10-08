@@ -112,6 +112,46 @@ def bench_tier(name: str, cfg: LlamaConfig, threads: int, token_counts: List[int
     return results
 
 
+def bench_prefill(name: str, cfg: LlamaConfig, threads: int, prompt_lens: List[int],
+                  repeats: int) -> Dict[str, object]:
+    """Compare serialised per-token prefill against the batched path.
+
+    Decode and prefill have opposite bottlenecks. Decode streams all weights once
+    per token and is DRAM-bound; prefill is weight-streaming work that a batched
+    GEMM can amortise over the whole window. Measuring them separately is the only
+    way to see the batched prefill win, because a mixed TPS figure hides it.
+    """
+    engine = CppLlamaEngine(cfg, make_weights(cfg))
+    engine.set_threads(threads)
+    rng = np.random.default_rng(0)
+    results: Dict[str, object] = {}
+    try:
+        for plen in prompt_lens:
+            if plen > cfg.seq_len:
+                continue
+            toks = [int(t) for t in rng.integers(0, cfg.vocab_size, plen)]
+            serial_tps = chunk_tps = 0.0
+            for _ in range(repeats):
+                engine.reset_cache()
+                t0 = time.perf_counter()
+                for pos, tok in enumerate(toks):
+                    engine.forward(tok, pos)
+                serial_tps = max(serial_tps, plen / (time.perf_counter() - t0))
+
+                engine.reset_cache()
+                t0 = time.perf_counter()
+                engine.forward_chunk(toks, 0)
+                chunk_tps = max(chunk_tps, plen / (time.perf_counter() - t0))
+            results[str(plen)] = {
+                "serial_tps": round(serial_tps, 2),
+                "batched_tps": round(chunk_tps, 2),
+                "speedup": round(chunk_tps / serial_tps, 3) if serial_tps else None,
+            }
+    finally:
+        del engine
+    return results
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -123,6 +163,8 @@ def main(argv=None) -> int:
                         help="Pinned OpenMP thread count (default: min(4, cpus)).")
     parser.add_argument("--repeats", type=int, default=3,
                         help="Repeats per measurement; the best is reported (default: 3).")
+    parser.add_argument("--prompt-lens", nargs="*", type=int, default=[16, 64, 256, 512],
+                        help="Prompt lengths for the prefill comparison.")
     parser.add_argument("--output", type=Path, default=None,
                         help="Optional path to write the JSON report to.")
     args = parser.parse_args(argv)
@@ -155,9 +197,14 @@ def main(argv=None) -> int:
             "vocab_size": cfg.vocab_size,
             "measurements": bench_tier(name, cfg, args.threads, args.tokens,
                                        args.repeats, library),
+            "prefill": bench_prefill(name, cfg, args.threads, args.prompt_lens,
+                                     args.repeats),
         }
         for ntok, data in report["tiers"][name]["measurements"].items():
-            print(f"{name:10s} {ntok:>4s}tok  {data['best_tps']:9.2f} TPS")
+            print(f"{name:10s} {ntok:>4s}tok  {data['best_tps']:9.2f} TPS (decode)")
+        for plen, data in report["tiers"][name]["prefill"].items():
+            print(f"{name:10s} {plen:>4s}prompt {data['serial_tps']:9.2f} -> "
+                  f"{data['batched_tps']:9.2f} TPS (prefill, {data['speedup']}x)")
 
     payload = json.dumps(report, indent=2)
     if args.output:

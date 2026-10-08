@@ -764,6 +764,26 @@ from 55.8% to 84.4%. Pass `pack_documents=False` (CLI: `--no-pack`) for the old 
 history = llm.train(corpus, epochs=5, seq_len=256, pack_documents=True)
 ```
 
+### Batched prefill
+
+`generate()` now prefills the whole prompt with one weight stream instead of one serialised
+forward pass per prompt token. Use it directly to measure or control the window:
+
+```python
+from doraneural.cpp_backend import CppLlamaEngine
+
+logits = engine.forward_chunk(prompt_token_ids, pos_start=0)   # returns last-position logits
+# returns None if the native symbol is unavailable, so callers can fall back:
+if logits is None:
+    for pos, tok in enumerate(prompt_token_ids):
+        engine.forward(tok, pos)
+```
+
+Measured prefill throughput on an AVX2 CPU (4 threads): the `zexo-chat` tier goes from
+123 tok/s serialised to **1483 tok/s batched on a 256-token prompt (11.98x)**. Decode speed is
+unchanged. The batched GEMM covers the float32 path; engines configured for INT8 or FP16 keep
+the serialised path so their numerics are unchanged.
+
 ### Benchmarking
 
 Raw tokens/sec figures are meaningless without the CPU dispatch path, because the INT8

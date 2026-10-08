@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-08
 **Scope:** Efficiency of the LLM path itself (architecture, configuration, data pipeline) rather than SIMD kernel tuning.
-**Outcome:** Byte-level Zexo tiers shipped, cross-document packing shipped, benchmark harness hardened. Full suite: 176 passed, 2 skipped.
+**Outcome:** Byte-level Zexo tiers, cross-document packing, batched prefill and a
+CPU-dispatch-aware benchmark harness all shipped. Full suite: 198 passed, 2 skipped.
 
 ---
 
@@ -86,21 +87,18 @@ The Alpaca 0-byte file was harmless at runtime (the loader already guards on
 cache file. It has been untracked and gitignored; `build_100k_dataset.py` already
 keeps its downloads in the gitignored `zexo/data/.dataset_cache/`.
 
-### 2.4 Prefill is serialised
+### 2.4 Prefill was serialised
 
-`csrc/llm_engine.cpp:1154` processes the prompt one token at a time:
+`csrc/llm_engine.cpp` processed the prompt one token at a time:
 
 ```cpp
 for(int i=0;i<prompt_len;i++){
     if(i==prompt_len-1) llama_forward(engine, prompt_tokens[i], pos, engine->logits.data());
 ```
 
-A 1024-token context therefore costs 1024 serialised forward passes. Under a
-causal mask every prompt position is independent, so prefill is embarrassingly
-parallel and belongs in a batched kernel. This is an architectural issue, not a
-SIMD issue, and is the largest single inference win still available. **Deferred** —
-it needs a new engine entry point and NumPy-parity tests, and is out of scope for
-this pass.
+A 1024-token context therefore cost 1024 serialised forward passes, each re-streaming
+every weight matrix from DRAM. This was the single largest remaining waste, and it is
+now fixed (§3.4).
 
 ### 2.5 Single-token decode is bandwidth-bound, not compute-bound
 
@@ -197,6 +195,57 @@ apart across CPU dispatch paths. Covered by
 
 ---
 
+### 3.4 P3 — Batched prefill (`csrc/llm_engine.cpp`)
+
+New entry point `llama_forward_chunk(engine, tokens, T, pos_start, out_logits)` runs a
+whole prompt window in one pass. It adds:
+
+- **`matmul_forward_batched`** — a GEMM computing `y[t*d_out + i] = sum_j W[i*n_in+j] * x[t*n_in+j]`
+  over a `[T][n_in]` activation block, keeping `W`'s existing `[d_out][n_in]` layout so the
+  GEMV path is untouched. A 16x64 `(output, batch)` register tile means each weight element
+  is streamed from DRAM roughly `T/64` times instead of `T` times.
+- **`llama_forward_chunk`** — batched QKV, RoPE, WO, W1/W3, SiLU-gating and W2. Attention
+  deliberately stays per-position and causal: position `t` reads keys `0..pos_start+t` out of
+  the very cache this call is filling, so it is not expressible as a single GEMM.
+- **`ensure_prefill_capacity`** — lazily grown `[T][*]` scratch arenas, so the single-token
+  decode path keeps its original allocation and cache behaviour unchanged.
+
+`llama_generate_ex` now prefills via `llama_forward_chunk`, and the Python streaming path in
+`llm.py` does the same. Both fall back to the original serial loop if the window is rejected.
+
+**Measured prefill throughput** (4 threads, best of 2, AVX2 host):
+
+| Tier | Prompt | Serial | Batched | Speedup |
+| :--- | ---: | ---: | ---: | ---: |
+| `chat` (V=32000) | 16 | 125.4 | 584.5 | 4.66x |
+| `chat` | 64 | 123.2 | 1039.2 | 8.44x |
+| `chat` | 256 | 123.8 | 1482.6 | **11.98x** |
+| `chat` | 512 | 120.0 | 1223.3 | 10.20x |
+| `chat-byte` | 64 | 248.8 | 1245.7 | 5.01x |
+| `chat-byte` | 256 | 235.6 | 1466.7 | 6.23x |
+
+Decode speed is unchanged, which is the point: prefill and decode have opposite bottlenecks
+(weight-streaming vs. one-token-at-a-time), so a single mixed TPS figure hides this win.
+
+**Tile tuning.** `IB x TB` was swept empirically at 1T-4T: `(4,8)` gave 3.1x, `(8,64)` gave
+1608 tok/s, `(16,64)` gave 1941, `(32,64)` gave 1987. `(16,64)` was chosen: the 2% extra from
+`(32,64)` costs a 8 KB stack tile instead of 4 KB, which matters given the embedded target in
+`AGENTS.md` Rule 3.
+
+**Scope limit, stated plainly.** The batched GEMM covers the **float32 path only**. Under
+`AGENTS.md` Rule 4 float32 is the reference and lossy INT8/FP16 is opt-in, so a quantized
+engine delegates to the serial loop rather than silently changing its numerics. INT8 here
+quantises *one activation vector per matmul*; a batched equivalent would have to redefine the
+scale granularity, which is a separate accuracy decision and was not taken unilaterally.
+
+**Parity.** The batched path is verified against the serialised path at `atol < 1e-4`
+(`tests/test_prefill_batching.py`, 22 tests) across GQA, MQA, MHA, both RoPE layouts, dims that
+are not multiples of the 16-wide SIMD or the tile widths, non-zero `pos_start`, split-point
+invariance across chunk sizes 1-128, per-position KV-cache write verification, and greedy
+generation determinism. Observed worst-case deviation is ~3e-6.
+
+---
+
 ## 4. What Was Deliberately Not Done
 
 - **P2, hybrid sliding-window attention + MH-RTU.** Paper 14 buys `O(1)` inference
@@ -205,8 +254,11 @@ apart across CPU dispatch paths. Covered by
   The right design is sliding-window attention (local, exact) plus an MH-RTU
   global state (long-range, O(1)), keeping both properties rather than trading one
   away. This is a research-scale addition, not a patch.
-- **P3, batched prefill.** Described in §2.4. Needs a new engine entry point plus
-  NumPy-parity tests under the AGENTS.md `atol < 1e-4` rule.
+- **Batched INT8/FP16 prefill.** See the scope limit in §3.4.
+- **Block-diagonal document masking.** Packing (§3.2b) concatenates documents without
+  masking attention across the boundary, because the native engine has no document
+  mask. A correct implementation needs a per-position segment id threaded into the
+  attention score kernel.
 - **Scaling any tier.** Paper 11 showed parameter scaling on a starved corpus
   *loses*. Fix coverage first.
 
@@ -224,17 +276,22 @@ apart across CPU dispatch paths. Covered by
 3. **Commit the generated 100k decision artifacts** (or the generating script plus
    pinned source hashes) so Paper 13's metrics become reproducible.
 4. **Report parameter counts from `ZexoConfig.parameter_count`**, never from prose.
-5. **Then** tackle batched prefill (§2.4) and the hybrid attention design (§4).
+5. **Batched prefill is already shipped** (§3.4); extend it to the INT8 path and add
+   block-diagonal document masking (§4) rather than re-litigating it.
+6. **Then** tackle the hybrid attention design (§4).
 
 ---
 
 ## 6. Verification
 
 - `doraneural/csrc/libdoraneural.so` rebuilt with `dn.build_cpp_library(force=True)`.
-- `python3 -m pytest` — **176 passed, 2 skipped**, zero failures.
+- `python3 -m pytest` — **198 passed, 2 skipped**, zero failures.
 - New coverage: `tests/test_llm_efficiency.py` (23 tests) covering byte-tokenizer
   round trips across 2-, 3- and 4-byte UTF-8, byte-tier parameter/body invariants,
   `from_tier` alias resolution, EOS-id selection, packing window-count and
   supervised-density invariants, SFT mask preservation under packing, `max_batches`
   capping, packing inertness on non-dialogue text, and an end-to-end byte-tier
   train/generate round trip.
+- `tests/test_prefill_batching.py` (22 tests) covers batched-vs-serial parity, KV-cache
+  equivalence for continued decode, non-zero `pos_start`, split-point invariance, and
+  per-position cache writes (§3.4).

@@ -1015,10 +1015,16 @@ class LlamaLLM:
         def _generator() -> Generator[str, None, None]:
             pos = 0
             if self.cpp_engine is not None:
-                # Fast streaming path via C++ engine (zero logits copying to Python)
-                for tok in prompt_tokens:
-                    self.cpp_engine.forward(tok, pos, copy_logits=False)
-                    pos += 1
+                # Batched prefill: one weight stream for the whole prompt instead of
+                # one per token. Returns None when the native symbol is unavailable
+                # or the engine is on its serial (quantized) fallback.
+                prefilled = self.cpp_engine.forward_chunk(prompt_tokens, 0)
+                if prefilled is not None:
+                    pos = len(prompt_tokens)
+                else:
+                    for tok in prompt_tokens:
+                        self.cpp_engine.forward(tok, pos, copy_logits=False)
+                        pos += 1
 
                 for _ in range(max_tokens):
                     if pos >= self.config.seq_len - 1:

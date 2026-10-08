@@ -43,6 +43,12 @@ void llama_free(LlamaCppEngine* engine);
 // Forward single token with KV-cache
 void llama_forward(LlamaCppEngine* engine, int token, int pos, float* out_logits);
 
+// Batched prefill: run `count` tokens starting at `pos_start` in one pass and fill
+// the KV cache for every one of them. Writes logits only for the final position.
+// Returns the number of tokens written, 0 on validation failure, or -1 if the
+// engine ran the serialised fallback because it is using INT8/FP16 weights.
+int llama_forward_chunk(LlamaCppEngine* engine, const int* tokens, int count, int pos_start, float* out_logits);
+
 // Forward single token with fused classifier argmax (zero logit memory bandwidth, for greedy search)
 int llama_forward_argmax(LlamaCppEngine* engine, int token, int pos);
 

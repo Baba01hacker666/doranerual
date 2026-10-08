@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -475,6 +475,49 @@ class CppLlamaEngine:
             return self._logits_buf.copy() if copy_logits else self._logits_buf
         except Exception as e:
             raise RuntimeError(f"Forward failed at pos {pos}: {e}") from e
+
+    def forward_chunk(self, tokens: Sequence[int], pos_start: int = 0) -> Optional[np.ndarray]:
+        """Prefill several positions in one pass instead of one serialised call each.
+
+        Single-token decode is DRAM-bound on the weight matrices, so feeding a prompt
+        through ``forward`` one position at a time re-streams every weight element once
+        per token. This fills the KV cache for the whole window with one weight stream.
+
+        Returns the logits for the final position, or ``None`` if the native symbol is
+        unavailable (the caller should then fall back to serial ``forward`` calls).
+
+        Raises:
+            ValueError: if any token is out of vocabulary range or the window would
+                run past ``seq_len``.
+            RuntimeError: if the native engine rejects the window.
+        """
+        if not self.handle:
+            raise RuntimeError("Engine handle is null")
+        lib = getattr(self, "lib", None)
+        if lib is None or not hasattr(lib, "llama_forward_chunk"):
+            return None
+
+        toks = [int(t) for t in tokens]
+        if not toks:
+            return None
+        if any(t < 0 or t >= self.vocab_size for t in toks):
+            raise ValueError(f"tokens out of vocab range [0,{self.vocab_size})")
+        pos_start = int(pos_start)
+        if pos_start < 0 or pos_start + len(toks) > self.config_struct.seq_len:
+            raise ValueError(
+                f"window [{pos_start},{pos_start + len(toks)}) exceeds seq_len "
+                f"{self.config_struct.seq_len}"
+            )
+
+        c_toks = (ctypes.c_int * len(toks))(*toks)
+        ptr = self._logits_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        written = int(lib.llama_forward_chunk(self.handle, c_toks, len(toks), pos_start, ptr))
+        if written == 0:
+            raise RuntimeError(
+                f"Batched prefill rejected the window [{pos_start},"
+                f"{pos_start + len(toks)}) of {len(toks)} tokens"
+            )
+        return self._logits_buf.copy()
 
     def forward_argmax(self, token: int, pos: int) -> int:
         """Forward single token with fused classifier argmax (zero logit memory write)."""
