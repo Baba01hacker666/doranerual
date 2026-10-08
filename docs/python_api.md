@@ -29,6 +29,8 @@
 - [Portable Model Serialization Spec (`.dnb` v1.0)](#16-portable-model-serialization-spec-dnb)
 - [Pretrained Hugging Face LLM (Pure NumPy LLaMA)](#17-pretrained-hugging-face-llm-pure-numpy-llama)
 - [Native C++ Acceleration & LLM Fine-Tuning (`CppLlamaEngine`, `llm.train`)](#18-native-c-acceleration--llm-fine-tuning)
+- [Vocabulary-Free Byte Model (`ByteTokenizer`) & Efficiency Levers](#19-vocabulary-free-byte-model-bytetokenizer--efficiency-levers)
+- [Interactive ChatSession & Context Window Management](#20-interactive-chatsession--context-window-management)
 
 ---
 
@@ -695,7 +697,85 @@ doraneural story --prompt "Once upon a time, Sparky the robot"
 
 ---
 
-## 19. Interactive ChatSession & Context Window Management
+---
+
+## 19. Vocabulary-Free Byte Model (`ByteTokenizer`) & Efficiency Levers
+
+`doraneural` ships a **vocabulary-free byte tokenizer** alongside the BPE tokenizers.
+Token ids `0..255` are raw UTF-8 bytes; ids `256` and `257` are BOS and EOS, for a total
+vocabulary of **258**. Encoding is lossless for any input and there is no merge table to
+learn or ship.
+
+This exists because the 32k SentencePiece vocabulary dominates the parameter budget of
+small models. Measured on the shipped `zexo-mini` tier: **89.8%** of 6.8M parameters were
+the embedding matrix, leaving one transformer layer. See
+[`research/15_llm_efficiency_audit.md`](../research/15_llm_efficiency_audit.md).
+
+### Python API
+
+```python
+import doraneural as dn
+
+tok = dn.ByteTokenizer()
+tok.vocab_size            # 258
+ids = tok.encode("naïve") # [256, 110, 97, 195, 175, 118, 101]
+tok.decode(ids[1:])       # 'naïve'
+tok.encode("hi", bos=False)  # [104, 105]
+```
+
+Pass the literal string `"byte"` (or `None`) as `tokenizer_path` to select it:
+
+```python
+from doraneural.llm import LlamaLLM
+llm = LlamaLLM(model_path="model.bin", tokenizer_path="byte")
+```
+
+### Byte-level Zexo tiers
+
+Tiers ending in `-byte` mirror their BPE twins **body for body** — identical `dim`,
+`hidden_dim`, `n_layers`, `n_heads`, `n_kv_heads` — with a 258-token vocabulary:
+
+| Tier | BPE params | Byte params | Throughput (AVX2 CPU) |
+| :--- | ---: | ---: | ---: |
+| `mini-byte` | 6,844,992 | **750,528** | **37.8x** faster |
+| `chat-byte` | 25,270,656 | **13,081,728** | **1.81x** faster |
+| `base-byte` | 109,529,856 | 85,152,000 | 1.29x fewer params |
+
+```python
+from zexo.config import ZexoConfig
+cfg = ZexoConfig.from_tier("chat-byte")
+cfg.is_byte_level      # True
+cfg.vocab_size         # 258
+cfg.llama_config.eos_token_id  # 257 (not the LLaMA default of 2)
+```
+
+Byte tiers consume 1 token per byte, so raise the training sequence length accordingly
+(`--seq-len 1024` for `chat-byte` covers roughly what 256 BPE tokens do).
+
+### Cross-document packing
+
+`llm.train(..., pack_documents=True)` (the default) concatenates all dialogues into one
+EOS-delimited token stream and windows it once, instead of rounding each dialogue up to a
+whole number of windows. On the shipped quality corpus at `seq_len=256` this cuts windows
+per epoch from 172 to 113 (**-34% forward passes**) and lifts supervised-token density
+from 55.8% to 84.4%. Pass `pack_documents=False` (CLI: `--no-pack`) for the old behaviour.
+
+```python
+history = llm.train(corpus, epochs=5, seq_len=256, pack_documents=True)
+```
+
+### Benchmarking
+
+Raw tokens/sec figures are meaningless without the CPU dispatch path, because the INT8
+VNNI kernel only exists on AVX-512 VNNI hosts. Always record `get_cpu_backend()`:
+
+```bash
+python3 scripts/bench_llm.py --tiers chat chat-byte --threads 4 --output bench.json
+```
+
+---
+
+## 20. Interactive ChatSession & Context Window Management
 
 `doraneural.ChatSession` provides full conversational multi-turn dialogue with automatic sliding context window eviction and stop-sequence filtering.
 

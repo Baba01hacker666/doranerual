@@ -16,6 +16,43 @@ Zexo is engineered across five scalable tiers, allowing seamless migration from 
 | **`base`** | **109.5M** | 768 | 2048 | 12 | 12 / 12 | 32,000 | 2,048 | Full reasoning & deep knowledge |
 | **`large`** | **221.5M** | 1024 | 2816 | 16 | 16 / 8 (GQA) | 32,000 | 4,096 | Scaled long-context conversational AI |
 
+### Vocabulary-Free Byte Tiers
+
+Research Paper 15 measured the embedding ("vocabulary") tax on the ladder above and
+shipped parallel **byte-level** tiers that keep the transformer body *identical* while
+using a 258-token vocabulary (raw UTF-8 bytes + BOS/EOS):
+
+| Tier | Parameters | Body vs BPE tier | Embedding share |
+| :--- | ---: | :--- | ---: |
+| `micro-byte` | 264,256 | identical | 6.2% |
+| `mini-byte` | **750,528** | identical to `mini` | 6.6% |
+| `chat-byte` | **13,081,728** | identical to `chat` | 0.8% |
+| `base-byte` | 85,152,000 | identical to `base` | 0.2% |
+
+```bash
+# Byte tiers need no tokenizer file and need a larger --seq-len (1 token per byte)
+python zexo/train.py --tier chat-byte --data zexo/data/zexo_quality_v1_train.txt \
+  --epochs 5 --seq-len 1024
+```
+
+`zexo-mini` spends **89.8%** of its parameters on its 32k embedding matrix; `mini-byte`
+holds the same 700,992 transformer parameters in 750K total. Measured throughput on
+an AVX2 CPU: `mini-byte` is **37.8x** faster and `chat-byte` **1.81x** faster than their
+BPE twins, because single-token decoding is bound by streaming the embedding matrices.
+
+See [`research/15_llm_efficiency_audit.md`](../research/15_llm_efficiency_audit.md).
+
+---
+
+## 🧪 Data Packing
+
+The SFT trainer packs **all dialogues into one EOS-delimited token stream** and windows
+it once, instead of rounding every dialogue up to a whole number of windows. With the
+default `--seq-len 256` this cuts the shipped quality corpus from 172 windows/epoch to
+**113 (-34% forward passes)** and raises supervised-token density from 55.8% to 84.4%.
+
+Pass `--no-pack` to restore the old per-dialogue windowing.
+
 ---
 
 ## 📂 Project Structure

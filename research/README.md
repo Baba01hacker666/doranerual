@@ -20,6 +20,10 @@ Welcome to the **Doraneural Research Lab**. This folder documents the exploratio
 | **10** | **Recurrent Trace Units (RTU)** | `RTULanguageModel` (Research Sandbox) | Tokenizer-free 256-byte vocabulary, $O(1)$ state memory, forward RTRL eligibility traces & JEPA latent prediction | Zero-RAM-Growth Streaming & Representation Non-Collapse | [Read Doc](10_recurrent_trace_units_latent.md) |
 | **11** | **Comparative Study: Dora vs Transformer vs RTU** | Standard Attention vs Bio-Reflective KAN vs RTU | Empirical breakdown of vocabulary tax, $O(1)$ recurrent memory, gradient pathology, and C++ engine dispatch | Loss convergence, memory scaling & generation | [Read Doc](11_comparative_study_dora_transformer_vs_rtu.md) |
 | **12** | **Jev: System-1 Non-Autoregressive AI** | [`JevDecisionModel`](../doraneural/jev.py) | Non-autoregressive parallel evaluation, typed decision primitives (`Choice`, `Score`), and RLCD calibration | Sub-2ms Latency vs Multi-Second LLMs (>200x speedup) | [Read Doc](12_jev_system_one_non_autoregressive_ai.md) |
+| **13** | **Over-Parameterized System-1 Intelligence** | `Zexo-Pulse` / `Zexo-Xtra` | 6-layer `d=512` decision encoder in native C++ with RLCD calibration | 0.180 ms decision latency (100k samples) | [Read Doc](13_overparameterized_system_one_intelligence.md) |
+| **14** | **Dora-X2: Multi-Head Recurrent Trace** | [`dora_x2.py`](../doraneural/dora_x2.py) | 16L `d=768` hybrid MH-RTU with `O(1)` state memory (49 KB at any context) | 123.1M params, $O(1)$ inference memory | [Read Doc](14_dora_x2_multi_head_recurrent_trace_architecture.md) |
+| **15** | **LLM Efficiency Audit** | [`ByteTokenizer`](../doraneural/llm.py), [`zexo/config.py`](../zexo/config.py), [`bench_llm.py`](../scripts/bench_llm.py) | Vocabulary-free byte tiers, EOS-delimited document packing, CPU-dispatch-aware benchmarking | 1.81x–37.8x throughput, 34% fewer SFT forward passes | [Read Doc](15_llm_efficiency_audit.md) |
+| **15** | **LLM Efficiency Audit** | Native C++ Engine / `zexo` tiers | Measured memory-bandwidth analysis: ISA-aware precision policy, vocab tax, prefill traffic, lazy allocation | 4.8x decode (INT8 on AVX2), 5x RAM reduction, 257x prefill traffic cut | [Read Doc](15_llm_efficiency_research.md) |
 
 ---
 
@@ -38,6 +42,7 @@ Every architecture in this research collection:
 ## 📂 Executable Demos
 
 All research experiments can be reproduced immediately using standalone example scripts:
+- `python3 research/bench_efficiency.py --all`: Decode/prefill TPS, native profile breakdown, vocabulary sweep, thread scaling, engine-construction RAM, and `full_train_step` cost for every `zexo` tier (see [Research 15](15_llm_efficiency_research.md)).
 - `python3 examples/explore_novel_neurons.py`: Single-layer XOR and non-linear function discovery.
 - `python3 examples/benchmark_neuron_arena.py`: 3-task parameter-matched arena (Physics, Spirals, Spectral Bias).
 - `python3 examples/explore_novel_transformers.py`: Standard vs Dendritic vs KAN Transformer sequence comparison.
