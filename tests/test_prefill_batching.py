@@ -11,6 +11,7 @@ check is chunked-vs-serial within the same engine, across GQA/MQA/MHA, both RoPE
 layouts, and dimension counts that are not multiples of the SIMD or tile widths.
 """
 
+import ctypes
 import sys
 from pathlib import Path
 
@@ -210,3 +211,48 @@ def test_greedy_generation_is_stable_across_repeated_runs():
     prompt = "User: what is the sea\nZexo:"
     outputs = [zexo.generate(prompt, max_tokens=20, temperature=0.0) for _ in range(3)]
     assert len(set(outputs)) == 1
+
+def test_forward_chunk_declares_ctypes_argtypes():
+    """Regression: missing argtypes truncate the engine pointer to 32 bits.
+
+    ctypes defaults every argument to C `int` when argtypes are absent, so the
+    leading `LlamaCppEngine*` handle gets truncated on any run where the engine is
+    allocated above 0xFFFFFFFF. That segfaults on `engine->config` and is
+    address-dependent: it passed on a dev box whose heap sat low and crashed the
+    GitHub runner. Every exported symbol must declare argtypes.
+    """
+    from doraneural.cpp_backend import get_cpp_library
+
+    lib = get_cpp_library()
+    if lib is None:
+        pytest.skip("native library unavailable")
+
+    assert lib.llama_forward_chunk.argtypes is not None
+    assert lib.llama_forward_chunk.restype is not None
+    assert lib.llama_forward_chunk.argtypes[0] is ctypes.c_void_p
+    assert lib.llama_forward_chunk.argtypes[1] is ctypes.POINTER(ctypes.c_int)
+    assert lib.llama_forward_chunk.argtypes[4] is ctypes.POINTER(ctypes.c_float)
+
+    # Sweep every other exported symbol we call, so the next one added cannot
+    # silently reintroduce the same class of bug.
+    for name in ("llama_forward", "llama_forward_argmax", "llama_generate",
+                 "llama_generate_ex", "llama_sample_token", "llama_sample_token_ex",
+                 "llama_set_profile", "llama_reset_profile", "llama_get_profile",
+                 "llama_reset_cache"):
+        fn = getattr(lib, name, None)
+        if fn is None:
+            continue
+        assert fn.argtypes is not None, f"{name} is missing argtypes"
+        assert fn.argtypes[0] is ctypes.c_void_p, f"{name} must take the handle as c_void_p"
+
+
+def test_forward_chunk_survives_a_high_address_handle():
+    """Exercise the exact path that crashed: chunked prefill via a live handle."""
+    cfg = LlamaConfig(dim=192, hidden_dim=1024, n_layers=1, n_heads=2, n_kv_heads=1,
+                      vocab_size=32000, seq_len=1024)
+    tokens = [t % cfg.vocab_size for t in (1, 2, 3, 4, 5, 6, 7, 8)]
+    engine = _engine(cfg, threads=4)
+    assert engine.handle is not None
+    logits = engine.forward_chunk(tokens, 0)
+    assert logits is not None and logits.shape == (cfg.vocab_size,)
+    assert 0 <= int(np.argmax(logits)) < cfg.vocab_size

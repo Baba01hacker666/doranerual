@@ -250,6 +250,21 @@ def get_cpp_library() -> Optional[ctypes.CDLL]:
             lib.llama_forward_argmax.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
             lib.llama_forward_argmax.restype = ctypes.c_int
 
+        # llama_forward_chunk MUST declare argtypes. Without them ctypes falls back
+        # to C `int` for the leading handle argument and truncates the pointer to
+        # 32 bits, so any engine allocated above 0xFFFFFFFF segfaults on
+        # `engine->config`. That is address-dependent, which is why it passed on
+        # some machines and crashed on the GitHub runner.
+        if hasattr(lib, "llama_forward_chunk"):
+            lib.llama_forward_chunk.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_float),
+            ]
+            lib.llama_forward_chunk.restype = ctypes.c_int
+
         if hasattr(lib, "llama_set_profile"):
             lib.llama_set_profile.argtypes = [ctypes.c_void_p, ctypes.c_int]
             lib.llama_set_profile.restype = None

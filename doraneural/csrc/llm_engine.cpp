@@ -712,7 +712,7 @@ struct LlamaCppEngine {
         bool enabled = false;
     } profile;
     int adam_step; std::mt19937 rng;
-    LlamaCppEngine(const LlamaCppConfig* cfg, LlamaCppWeights* w) : config(*cfg), weights(*w), use_fp16(false), use_i8(false), use_vnni(false), adam_step(0), rng(42), pre_capacity(0) {
+    LlamaCppEngine(const LlamaCppConfig* cfg, LlamaCppWeights* w) : config(*cfg), weights(*w), pre_capacity(0), use_fp16(false), use_i8(false), use_vnni(false), adam_step(0), rng(42) {
         int head_size=config.dim/config.n_heads; int half=head_size/2; int kv_dim=(config.dim*config.n_kv_heads)/config.n_heads;
         key_cache.resize((size_t)config.n_layers*config.seq_len*kv_dim,0.0f); val_cache.resize((size_t)config.n_layers*config.seq_len*kv_dim,0.0f);
         x.resize(config.dim,0.0f); xb.resize(config.dim,0.0f); q.resize(config.dim,0.0f); k.resize(kv_dim,0.0f); v.resize(kv_dim,0.0f);
