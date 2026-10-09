@@ -219,6 +219,35 @@ def test_shared_seed_makes_population_ladder_comparable():
     np.testing.assert_allclose(a.grad, b.grad, atol=0, rtol=0)
 
 
+def test_w3_site_is_injected_before_the_saturating_path():
+    """w3 must be perturbed before the dendritic gate, SiLU gating and KAN.
+
+    If the injection landed after them, the w3 estimate would measure credit that
+    bypasses the saturating path -- which is exactly the effect Paper 18 measures,
+    so getting the ordering wrong would invalidate that study.
+    """
+    np.random.seed(0)
+    model = TransformerDecoderLM(
+        dim=32, hidden_dim=64, n_layers=1, n_heads=4, n_kv_heads=4,
+        vocab_size=64, seq_len=SEQ, novel_neurons=True,
+    )
+    ids, targets = window()
+    clean = dust_forward(model, ids)
+    delta = np.ones_like(clean) * 0.0
+    seen = {}
+
+    def inject(layer_idx, site, y):
+        if site == "w3":
+            seen["called"] = True
+            # Jittering w3's output must change the logits, i.e. it must be upstream.
+            return np.full_like(y, 0.5)
+        return None
+
+    jittered = dust_forward(model, ids, inject=inject)
+    assert seen.get("called"), "w3 injection hook was never called"
+    assert not np.allclose(clean, jittered)
+
+
 def test_backprop_gradient_covers_every_site():
     model = build(layers=3)
     ids, targets = window()

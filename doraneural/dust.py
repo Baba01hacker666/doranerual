@@ -76,14 +76,14 @@ __all__ = [
 
 # Injection sites, in the order the block computes them. Each maps to the linear
 # weight whose gradient that site produces.
-SITES: Tuple[str, ...] = ("wo", "w2")
+SITES: Tuple[str, ...] = ("wo", "w2", "w3")
 
-SITE_PARAMS: Dict[str, str] = {"wo": "wo", "w2": "w2"}
+SITE_PARAMS: Dict[str, str] = {"wo": "wo", "w2": "w2", "w3": "w3"}
 
 # Favour `wo` first: it sits closer to the token loss, so its credit is the
 # cleanest test of the estimator.
-DEFAULT_SIGMA: Dict[str, float] = {"wo": 0.01, "w2": 0.01}
-DEFAULT_GAMMA: Dict[str, float] = {"wo": 0.0, "w2": 0.0}
+DEFAULT_SIGMA: Dict[str, float] = {"wo": 0.01, "w2": 0.01, "w3": 0.01}
+DEFAULT_GAMMA: Dict[str, float] = {"wo": 0.0, "w2": 0.0, "w3": 0.0}
 
 
 @dataclass
@@ -227,6 +227,13 @@ def dust_forward(
         norm_ffn = _rmsnorm(x, np.asarray(layer.rms_ffn.data))
         gate = norm_ffn @ np.asarray(layer.w1.data)
         up = norm_ffn @ np.asarray(layer.w3.data)
+
+        if capture is not None:
+            capture(layer_idx, "w3", norm_ffn, up)
+        if inject is not None:
+            delta = inject(layer_idx, "w3", up)
+            if delta is not None:
+                up = up + delta
 
         if layer.novel_neurons and getattr(layer, "w_dend", None) is not None:
             dend_gate = (norm_ffn @ np.asarray(layer.w_dend.data))
