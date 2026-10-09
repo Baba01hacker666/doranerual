@@ -22,14 +22,10 @@ Welcome to the **Doraneural Research Lab**. This folder documents the exploratio
 | **12** | **Jev: System-1 Non-Autoregressive AI** | [`JevDecisionModel`](../doraneural/jev.py) | Non-autoregressive parallel evaluation, typed decision primitives (`Choice`, `Score`), and RLCD calibration | Sub-2ms Latency vs Multi-Second LLMs (>200x speedup) | [Read Doc](12_jev_system_one_non_autoregressive_ai.md) |
 | **13** | **Over-Parameterized System-1 Intelligence** | `Zexo-Pulse` / `Zexo-Xtra` | 6-layer `d=512` decision encoder in native C++ with RLCD calibration | 0.180 ms decision latency (100k samples) | [Read Doc](13_overparameterized_system_one_intelligence.md) |
 | **14** | **Dora-X2: Multi-Head Recurrent Trace** | [`dora_x2.py`](../doraneural/dora_x2.py) | 16L `d=768` hybrid MH-RTU with `O(1)` state memory (49 KB at any context) | 123.1M params, $O(1)$ inference memory | [Read Doc](14_dora_x2_multi_head_recurrent_trace_architecture.md) |
-| **18** | **Gradient Starvation Audit** | [`dust.py`](../doraneural/dust.py) (w3 site) | Measures Paper 11's unverified saturation claim; finds the collapse is in the shared SwiGLU FFN, not the novel neurons, and that Dust does not escape it | 890x collapse in both models; cosine flat at 0.27 | [Read Doc](18_gradient_starvation_audit.md) |
-| **17** | **Dust: Zeroth-Order Pretraining** | [`dust.py`](../doraneural/dust.py) | Activation-space perturbation with virtual population and per-token credit assignment, no backprop | cos 0.16->0.68 fits Eq. 5 (RMSE 0.02); 177x fewer steps than backprop on CPU | [Read Doc](17_dust_zeroth_order_pretraining.md) |
-| **16** | **BPE vs Byte-Level: Empirical** | [`exp_byte_vs_bpe.py`](../scripts/exp_byte_vs_bpe.py) | Trained-run comparison of BPE and byte tiers at matched optimizer steps across two bodies | 9.1x smaller, 23.5x faster decode, but 46% worse text compression | [Read Doc](16_byte_vs_bpe_empirical.md) |
 | **15** | **LLM Efficiency Audit** | [`ByteTokenizer`](../doraneural/llm.py), [`llama_forward_chunk`](../doraneural/csrc/llm_engine.cpp), [`bench_llm.py`](../scripts/bench_llm.py) | Vocabulary-free byte tiers, EOS-delimited document packing, batched prefill GEMM, CPU-dispatch-aware benchmarking | up to 37.8x decode, 11.98x prefill, -34% SFT passes | [Read Doc](15_llm_efficiency_audit.md) |
-| **18** | **Gradient Starvation Audit** | [`dust.py`](../doraneural/dust.py) (w3 site) | Measures Paper 11's unverified saturation claim; finds the collapse is in the shared SwiGLU FFN, not the novel neurons, and that Dust does not escape it | 890x collapse in both models; cosine flat at 0.27 | [Read Doc](18_gradient_starvation_audit.md) |
-| **17** | **Dust: Zeroth-Order Pretraining** | [`dust.py`](../doraneural/dust.py) | Activation-space perturbation with virtual population and per-token credit assignment, no backprop | cos 0.16->0.68 fits Eq. 5 (RMSE 0.02); 177x fewer steps than backprop on CPU | [Read Doc](17_dust_zeroth_order_pretraining.md) |
 | **16** | **BPE vs Byte-Level: Empirical** | [`exp_byte_vs_bpe.py`](../scripts/exp_byte_vs_bpe.py) | Trained-run comparison of BPE and byte tiers at matched optimizer steps across two bodies | 9.1x smaller, 23.5x faster decode, but 46% worse text compression | [Read Doc](16_byte_vs_bpe_empirical.md) |
-| **15** | **LLM Efficiency Audit** | Native C++ Engine / `zexo` tiers | Measured memory-bandwidth analysis: ISA-aware precision policy, vocab tax, prefill traffic, lazy allocation | 4.8x decode (INT8 on AVX2), 5x RAM reduction, 257x prefill traffic cut | [Read Doc](15_llm_efficiency_research.md) |
+| **17** | **Dust: Zeroth-Order Pretraining** | [`dust.py`](../doraneural/dust.py) | Activation-space perturbation with virtual population and per-token credit assignment, no backprop | cos 0.16->0.68 fits Eq. 5 (RMSE 0.02); 177x fewer steps than backprop on CPU | [Read Doc](17_dust_zeroth_order_pretraining.md) |
+| **18** | **Gradient Starvation Audit** | [`exp_gradient_starvation.py`](../scripts/exp_gradient_starvation.py) | Measures Paper 11's unverified saturation claim; finds the collapse is in the shared SwiGLU FFN, not the novel neurons, and that Dust does not escape it | 890x collapse in both models; cosine flat at 0.27 | [Read Doc](18_gradient_starvation_audit.md) |
 
 ---
 
@@ -48,7 +44,10 @@ Every architecture in this research collection:
 ## 📂 Executable Demos
 
 All research experiments can be reproduced immediately using standalone example scripts:
-- `python3 research/bench_efficiency.py --all`: Decode/prefill TPS, native profile breakdown, vocabulary sweep, thread scaling, engine-construction RAM, and `full_train_step` cost for every `zexo` tier (see [Research 15](15_llm_efficiency_research.md)).
+- `python3 scripts/bench_llm.py`: Decode and prefill TPS separated per tier, with the CPU dispatch signature recorded (see [Research 15](15_llm_efficiency_audit.md)).
+- `python3 scripts/exp_byte_vs_bpe.py --body micro --match-steps 1752`: BPE vs byte tiers trained at matched optimizer steps (see [Research 16](16_byte_vs_bpe_empirical.md)).
+- `python3 scripts/exp_dust_vs_backprop.py`: Dust vs backprop at matched wall-clock (see [Research 17](17_dust_zeroth_order_pretraining.md)).
+- `python3 scripts/exp_gradient_starvation.py`: Saturation, gradient-collapse and Dust-vs-backprop tables (see [Research 18](18_gradient_starvation_audit.md)).
 - `python3 examples/explore_novel_neurons.py`: Single-layer XOR and non-linear function discovery.
 - `python3 examples/benchmark_neuron_arena.py`: 3-task parameter-matched arena (Physics, Spirals, Spectral Bias).
 - `python3 examples/explore_novel_transformers.py`: Standard vs Dendritic vs KAN Transformer sequence comparison.

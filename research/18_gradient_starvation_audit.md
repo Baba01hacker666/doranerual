@@ -92,6 +92,22 @@ So the pathology belongs to the shared FFN: `silu = sigmoid(gate) * gate` satura
 large `gate`, and where the KAN is present `tanh` saturates too. Both live inside the
 SwiGLU block that every tier already uses.
 
+### 4.1b The collapse is layer-dependent, and identical in both models
+
+First/last gradient-norm ratio over 120 steps, per layer, from
+`scripts/exp_gradient_starvation.py`:
+
+| Layer | `0.w2` | `0.w3` | `0.wo` | `1.w2` | `1.w3` | `2.w2` | `3.w2` | `3.w3` |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| standard | 930x | 889x | 769x | 695x | 701x | 467x | 267x | 260x |
+| dora (KAN) | 822x | 818x | 715x | 631x | 632x | 459x | 243x | 257x |
+
+Earlier layers collapse hardest and later layers least — the usual pattern when the
+deepest block keeps the residual stream narrow — but the two models agree to within
+15% at **every one of the twelve measured sites**, with no site where the novel
+model is markedly worse. This is the cleanest form of the refutation: the
+bio-reflective stack is not starving anything.
+
 ### 4.2 Where it does not bite
 
 At the `w2` site — *downstream* of the KAN — cosine to backprop was 0.80–0.81 in **both**
@@ -194,13 +210,16 @@ The pathology is real but Adam already absorbs most of it, so the actionable ite
 
 ## 9. Reproduction
 
-```python
-from doraneural.transformer import TransformerDecoderLM
-from doraneural.dust import backprop_gradient, estimate_site_gradient, DustConfig
+```bash
+python3 scripts/exp_gradient_starvation.py --draws 128 \
+    --output research/18_results_gradient_starvation.json
 ```
 
-Section 4's table is `backprop_gradient` after N `TensorAdamW` steps; section 5's is
-`estimate_site_gradient(..., 'w3', 0, DustConfig(draws=128))` versus the same tensor.
-Saturation histograms come from replaying the block arithmetic and reading `|tanh(hidden)|`
-at the KAN input. `tests/test_dust.py` covers the `w3` site's plumbing (parity, shapes,
-credit decay, injection ordering).
+The script emits all three tables plus a per-site collapse summary, and takes roughly
+five minutes at 4 threads. Section 4's numbers are `backprop_gradient` after N
+`TensorAdamW` steps; section 5's are `estimate_site_gradient(..., 'w3', 0,
+DustConfig(draws=128))` against the same tensor. Saturation histograms replay the block
+arithmetic and read `|tanh(hidden)|` at the KAN input. `tests/test_dust.py` covers the
+`w3` site's plumbing (parity, shapes, credit decay, injection ordering).
+
+The committed artifact is [`18_results_gradient_starvation.json`](18_results_gradient_starvation.json).

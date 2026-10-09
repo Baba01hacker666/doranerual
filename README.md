@@ -148,6 +148,22 @@ Explore cutting-edge architectures created to challenge classical neuron paradig
 - 🌌 **[06. Synaptic Inverters & 4D Spacetime Hyper-Tensors](research/06_synaptic_inversion_and_4d_tensors.md)**: Learnable forward-inverse duality ($+W \leftrightarrow -W$) and 4D tensor manifolds $(B, T, S, C)$.
 - 🧬 **[07. Bio-Reflective KAN Unified Architecture](research/07_bio_reflective_kan_unified.md)**: Synthesizing all 4 novel neuron paradigms into a single unified network (96.4% test accuracy on noisy vision).
 
+### Later Work
+
+- 🌊 **[08. Wave, Chaos & Tunneling](research/08_complex_chaos_and_tunneling.md)**
+- ⚡ **[09. LLM TPS Optimization](research/09_llm_tps_optimization.md)**: Native SIMD/OpenMP engine, INT8 VNNI, >1000 TPS on a VNNI host.
+- 🔄 **[10. Recurrent Trace Units (RTU)](research/10_recurrent_trace_units_latent.md)**: Vocabulary-free byte modelling with `O(1)` recurrent state and forward RTRL.
+- 🧠 **[11. Comparative Study: Dora vs Transformer vs RTU](research/11_comparative_study_dora_transformer_vs_rtu.md)**
+- 🌌 **[12. Jev: Non-Autoregressive System-1](research/12_jev_system_one_non_autoregressive_ai.md)**
+- 🧠 **[13. Over-Parameterized System-1 Intelligence](research/13_overparameterized_system_one_intelligence.md)**: Zexo-Pulse / Zexo-Xtra decision encoders in native C++.
+- 🧠 **[14. Dora-X2: Multi-Head Recurrent Trace](research/14_dora_x2_multi_head_recurrent_trace_architecture.md)**: 16L `d=768` MH-RTU, `O(1)` inference memory at any context length.
+- 📊 **[15. LLM Efficiency Audit](research/15_llm_efficiency_audit.md)**: Vocabulary-free byte tiers, batched prefill GEMM, CPU-dispatch-aware benchmarking.
+- 🧪 **[16. BPE vs Byte-Level: Empirical](research/16_byte_vs_bpe_empirical.md)**: Trained-run comparison. Byte tiers are 9.1x smaller and 23.5x faster to decode, but 46% worse at text compression.
+- 🔬 **[17. Dust: Zeroth-Order Pretraining](research/17_dust_zeroth_order_pretraining.md)**: Activation-space perturbation with virtual population. Gradient estimates converge to backprop's as population grows (cosine 0.16 → 0.68).
+- 🔍 **[18. Gradient Starvation Audit](research/18_gradient_starvation_audit.md)**: Audits Paper 11's unverified saturation claim. The collapse is in the shared SwiGLU FFN, not the novel neurons, and Dust does not escape it.
+
+Each result is reproducible from `scripts/` and committed alongside its raw measurement artifact.
+
 ---
 
 ## 📚 Documentation
