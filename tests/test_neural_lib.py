@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
+import urllib.error
 import numpy as np
 
 from doraneural import (
@@ -1696,8 +1697,11 @@ class TestLlamaLLM(unittest.TestCase):
         if not is_cpp_available():
             self.skipTest("C++ engine not available")
 
-        llm_np = load_pretrained_llm("stories260K", backend="numpy")
-        llm_cpp = load_pretrained_llm("stories260K", backend="cpp")
+        try:
+            llm_np = load_pretrained_llm("stories260K", backend="numpy")
+            llm_cpp = load_pretrained_llm("stories260K", backend="cpp")
+        except urllib.error.URLError as e:
+            self.skipTest(f"Skipping pretrained C++ parity test because the optional Hub download is unavailable: {e}")
 
         llm_np.reset_cache()
         np_logits = llm_np.forward(1, 0)

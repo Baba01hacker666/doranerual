@@ -31,12 +31,15 @@ class TensorAdamW:
         eps: float = 1e-8,
         weight_decay: float = 0.01,
     ) -> None:
-        if lr <= 0.0:
-            raise ValueError(f"lr must be positive, got {lr}")
-        if not 0.0 <= beta1 < 1.0 or not 0.0 <= beta2 < 1.0:
-            raise ValueError("beta1 and beta2 must be in [0, 1)")
-        if weight_decay < 0.0:
-            raise ValueError(f"weight_decay must be non-negative, got {weight_decay}")
+        if not np.isfinite(lr) or lr <= 0.0:
+            raise ValueError(f"lr must be finite and positive, got {lr}")
+        if (not np.isfinite(beta1) or not np.isfinite(beta2)
+                or not 0.0 <= beta1 < 1.0 or not 0.0 <= beta2 < 1.0):
+            raise ValueError("beta1 and beta2 must be finite and in [0, 1)")
+        if not np.isfinite(eps) or eps <= 0.0:
+            raise ValueError(f"eps must be finite and positive, got {eps}")
+        if not np.isfinite(weight_decay) or weight_decay < 0.0:
+            raise ValueError(f"weight_decay must be finite and non-negative, got {weight_decay}")
         self.params = list(params)
         self.lr = float(lr)
         self.beta1 = float(beta1)
@@ -91,8 +94,8 @@ class LoRAAdapter(Module):
         super().__init__()
         if rank <= 0:
             raise ValueError(f"rank must be positive, got {rank}")
-        if alpha <= 0.0:
-            raise ValueError(f"alpha must be positive, got {alpha}")
+        if not np.isfinite(alpha) or alpha <= 0.0:
+            raise ValueError(f"alpha must be finite and positive, got {alpha}")
         self.in_features = int(in_features)
         self.out_features = int(out_features)
         self.rank = int(rank)
@@ -497,12 +500,31 @@ class TransformerDecoderLM(Module):
         nll = (log_norm.reshape(-1) - selected) * Tensor(active, dtype=logits.dtype)
         return nll.sum() / float(max(1, int(active.sum())))
 
-    def train_batch(self, token_ids: Sequence[int], target_ids: Sequence[int], optimizer: TensorAdamW) -> float:
+    def train_batch(
+        self,
+        token_ids: Sequence[int],
+        target_ids: Sequence[int],
+        optimizer: TensorAdamW,
+        grad_clip: Optional[float] = None,
+    ) -> float:
         optimizer.zero_grad()
         loss = self.loss(token_ids, target_ids)
+        loss_value = float(loss.item())
         loss.backward()
+        if grad_clip is not None and grad_clip > 0.0:
+            parameters = optimizer.params
+            grad_norm = float(np.sqrt(sum(
+                float(np.sum(parameter.grad * parameter.grad))
+                for parameter in parameters if parameter.grad is not None
+            )))
+            if grad_norm > grad_clip:
+                scale = grad_clip / max(grad_norm, 1e-12)
+                for parameter in parameters:
+                    if parameter.grad is not None:
+                        parameter.grad *= scale
         optimizer.step()
-        return float(loss.item())
+        del loss
+        return loss_value
 
     def fit_lora_tokens(
         self,
@@ -516,16 +538,26 @@ class TransformerDecoderLM(Module):
         seed: int = 42,
         eval_tokens: Optional[Sequence[int]] = None,
         max_eval_steps: Optional[int] = None,
+        max_batches: Optional[int] = None,
         verbose: int = 1,
         batches: Optional[Sequence[tuple]] = None,
+        grad_clip: float = 0.0,
     ) -> dict:
         """Fine-tune only LoRA parameters while leaving the base checkpoint fixed."""
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
         if lr <= 0.0:
             raise ValueError(f"lr must be positive, got {lr}")
+        if not np.isfinite(grad_clip) or grad_clip < 0.0:
+            raise ValueError(f"grad_clip must be finite and non-negative, got {grad_clip}")
         if not 1 <= seq_len < self.seq_len:
             raise ValueError(f"seq_len must be in [1, {self.seq_len - 1}]")
+        if stride is not None and not 1 <= stride <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {stride}")
+        if max_batches is not None and max_batches <= 0:
+            raise ValueError(f"max_batches must be positive, got {max_batches}")
+        if max_eval_steps is not None and max_eval_steps <= 0:
+            raise ValueError(f"max_eval_steps must be positive, got {max_eval_steps}")
         if batches is not None:
             if not batches:
                 raise ValueError("batches must not be empty")
@@ -541,7 +573,9 @@ class TransformerDecoderLM(Module):
             windows = None
         optimizer = TensorAdamW(self.lora_parameters(), lr=lr, weight_decay=weight_decay)
         rng = np.random.default_rng(seed)
-        history = {"loss": []}
+        total_windows = len(windows) if windows is not None else len(starts)
+        steps_per_epoch = min(total_windows, max_batches) if max_batches is not None else total_windows
+        history = {"loss": [], "windows_per_epoch": steps_per_epoch, "total_steps": steps_per_epoch * epochs}
         if eval_tokens is not None:
             history["val_loss"] = []
         for epoch in range(epochs):
@@ -549,20 +583,27 @@ class TransformerDecoderLM(Module):
                 order_idx = list(range(len(windows)))
                 if shuffle:
                     rng.shuffle(order_idx)
+                if max_batches is not None:
+                    order_idx = order_idx[:max_batches]
                 order = [windows[i] for i in order_idx]
             else:
                 order = starts.copy()
                 if shuffle:
                     rng.shuffle(order)
+                if max_batches is not None:
+                    order = order[:max_batches]
+            if not order:
+                raise ValueError("max_batches selected no LoRA training windows")
             total = 0.0
             for item in order:
                 if windows is not None:
-                    total += self.train_batch(item[0], item[1], optimizer)
+                    total += self.train_batch(item[0], item[1], optimizer, grad_clip=grad_clip)
                 else:
                     total += self.train_batch(
                         tokens[item : item + seq_len],
                         tokens[item + 1 : item + seq_len + 1],
                         optimizer,
+                        grad_clip=grad_clip,
                     )
             history["loss"].append(total / len(order))
             if eval_tokens is not None:
@@ -690,6 +731,7 @@ class TransformerDecoderLM(Module):
         max_batches: Optional[int] = None,
         verbose: int = 1,
         batches: Optional[Sequence[tuple]] = None,
+        grad_clip: float = 0.0,
     ) -> dict:
         """Train all transformer parameters on next-token sequences.
 
@@ -698,12 +740,18 @@ class TransformerDecoderLM(Module):
         """
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
-        if lr <= 0.0:
-            raise ValueError(f"lr must be positive, got {lr}")
+        if not np.isfinite(lr) or lr <= 0.0:
+            raise ValueError(f"lr must be finite and positive, got {lr}")
+        if not np.isfinite(grad_clip) or grad_clip < 0.0:
+            raise ValueError(f"grad_clip must be finite and non-negative, got {grad_clip}")
         if not 1 <= seq_len < self.seq_len:
             raise ValueError(f"seq_len must be in [1, {self.seq_len - 1}]")
         if stride is not None and not 1 <= stride <= seq_len:
             raise ValueError(f"stride must be in [1, seq_len], got {stride}")
+        if max_batches is not None and max_batches <= 0:
+            raise ValueError(f"max_batches must be positive, got {max_batches}")
+        if max_eval_steps is not None and max_eval_steps <= 0:
+            raise ValueError(f"max_eval_steps must be positive, got {max_eval_steps}")
         if batches is not None:
             if not batches:
                 raise ValueError("batches must not be empty")
@@ -720,7 +768,9 @@ class TransformerDecoderLM(Module):
             windows = None
         optimizer = TensorAdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
         rng = np.random.default_rng(seed)
-        history = {"loss": []}
+        total_windows = len(windows) if windows is not None else len(starts)
+        steps_per_epoch = min(total_windows, max_batches) if max_batches is not None else total_windows
+        history = {"loss": [], "windows_per_epoch": steps_per_epoch, "total_steps": steps_per_epoch * epochs}
         if eval_tokens is not None:
             history["val_loss"] = []
         for epoch in range(epochs):
@@ -742,9 +792,14 @@ class TransformerDecoderLM(Module):
             log_interval = max(1, len(order) // 10)
             for b_idx, item in enumerate(order, 1):
                 if windows is not None:
-                    loss_val = self.train_batch(item[0], item[1], optimizer)
+                    loss_val = self.train_batch(item[0], item[1], optimizer, grad_clip=grad_clip)
                 else:
-                    loss_val = self.train_batch(tokens[item : item + seq_len], tokens[item + 1 : item + seq_len + 1], optimizer)
+                    loss_val = self.train_batch(
+                        tokens[item : item + seq_len],
+                        tokens[item + 1 : item + seq_len + 1],
+                        optimizer,
+                        grad_clip=grad_clip,
+                    )
                 total += loss_val
                 if verbose and (b_idx == 1 or b_idx % log_interval == 0 or b_idx == len(order)):
                     elapsed = time.perf_counter() - t_ep_start

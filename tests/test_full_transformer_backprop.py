@@ -17,6 +17,15 @@ from doraneural.llm import LlamaLLM
 from doraneural.transformer import TensorAdamW, TransformerDecoderLM
 
 
+def test_tensor_adamw_rejects_nonfinite_optimizer_settings():
+    with pytest.raises(ValueError, match="finite and positive"):
+        TensorAdamW([], lr=float("nan"))
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        TensorAdamW([], weight_decay=float("inf"))
+    with pytest.raises(ValueError, match="eps must be finite"):
+        TensorAdamW([], eps=float("nan"))
+
+
 def test_concatenate_routes_gradients_to_each_rope_slice():
     left = Tensor(np.ones((2, 2), dtype=np.float32), requires_grad=True)
     right = Tensor(np.full((2, 1), 2.0, dtype=np.float32), requires_grad=True)
@@ -254,6 +263,48 @@ def test_native_cpp_matches_numpy_one_step_on_gqa_checkpoint(tmp_path):
         (native.rms_final, reference.rms_final),
     ):
         np.testing.assert_allclose(native_array, reference_array, rtol=2e-5, atol=2e-5)
+
+
+def test_public_train_apis_use_full_backprop_when_mode_is_omitted():
+    import inspect
+
+    from zexo.model import ZexoModel
+
+    # None is an API sentinel: it resolves to full backprop unless LoRA is
+    # explicitly requested, in which case that mode takes precedence.
+    assert inspect.signature(LlamaLLM.train).parameters["full_backprop"].default is None
+    assert inspect.signature(ZexoModel.train).parameters["full_backprop"].default is None
+
+
+def test_train_max_batches_is_honored_for_full_and_lora_modes(tmp_path):
+    source = TransformerDecoderLM(
+        dim=16, hidden_dim=32, n_layers=1, n_heads=4, n_kv_heads=2,
+        vocab_size=512, seq_len=16,
+    )
+    checkpoint = tmp_path / "max-batches-tiny.bin"
+    _write_tiny_llama_checkpoint(checkpoint, source)
+    tokenizer = REPO_ROOT / "zexo" / "tokenizer" / "tok512.bin"
+    text = "abc def ghi jkl mno pqr stu vwx yz " * 5
+
+    full_model = LlamaLLM(checkpoint, tokenizer, backend="numpy")
+    q_before = full_model.wq.copy()
+    with pytest.raises(ValueError, match="max_batches must be positive"):
+        full_model.train(text, epochs=1, lr=1e-3, seq_len=4, max_batches=0, full_backprop=True, verbose=0)
+    full_history = full_model.train(
+        text, epochs=1, lr=1e-3, seq_len=4, max_batches=1,
+        native_full=False, verbose=0,
+    )
+    assert full_history["windows_per_epoch"] == 1
+    assert full_history["total_steps"] == 1
+    assert not np.array_equal(full_model.wq, q_before), "omitted mode should update attention via full backprop"
+
+    lora_model = LlamaLLM(checkpoint, tokenizer, backend="numpy")
+    lora_history = lora_model.train(
+        text, epochs=1, lr=1e-2, seq_len=4, max_batches=1,
+        lora_rank=2, verbose=0,
+    )
+    assert lora_history["windows_per_epoch"] == 1
+    assert lora_history["total_steps"] == 1
 
 
 def test_native_cpp_full_backprop_reduces_loss_and_updates_attention(tmp_path):
