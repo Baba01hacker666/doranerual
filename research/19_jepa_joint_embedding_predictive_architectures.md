@@ -2,7 +2,7 @@
 
 **Modules:** [`doraneural/jepa.py`](../doraneural/jepa.py) · [`doraneural/jepa_data.py`](../doraneural/jepa_data.py)
 **Scripts:** [`research/train_jepa.py`](train_jepa.py) · [`examples/explore_jepa.py`](../examples/explore_jepa.py)
-**Tests:** [`tests/test_jepa.py`](../tests/test_jepa.py) (27 tests)
+**Tests:** [`tests/test_jepa.py`](../tests/test_jepa.py) (34 tests)
 
 ---
 
@@ -171,7 +171,7 @@ the characteristic function).
 | I-JEPA, 32x32 images, patch 4 (64 tokens) | 0.41M params | 300 | 48 s |
 | V-JEPA, 8x32x32 clips, tubelet 2 (64 tokens) | 0.41M params | 600 | 135 s |
 | World model, 24x24 pixels, 10-step trajectories | 145K params | 600 | 75 s |
-| `pytest tests/test_jepa.py` (27 tests) | - | - | 15 s |
+| `pytest tests/test_jepa.py` (34 tests) | - | - | 13 s |
 
 ---
 
