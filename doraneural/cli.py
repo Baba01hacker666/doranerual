@@ -124,6 +124,7 @@ def cmd_demo(args: argparse.Namespace) -> None:
         "moons": examples_dir / "binary_classification.py",
         "blobs": examples_dir / "multiclass_classification.py",
         "cnn": examples_dir / "cnn_image_classification.py",
+        "jepa": examples_dir / "explore_jepa.py",
     }
 
     if demo_name not in mapping:
@@ -361,7 +362,7 @@ def main() -> None:
 
     # doraneural demo
     sub_demo = subparsers.add_parser("demo", help="Run interactive and visual benchmarks")
-    sub_demo.add_argument("name", choices=["story", "catdog", "interactive", "digits", "moons", "blobs", "cnn"], default="story", nargs="?", help="Demo to run")
+    sub_demo.add_argument("name", choices=["story", "catdog", "interactive", "digits", "moons", "blobs", "cnn", "jepa"], default="story", nargs="?", help="Demo to run")
     sub_demo.set_defaults(func=cmd_demo)
 
     # doraneural test

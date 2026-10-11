@@ -23,6 +23,7 @@ current_model.*
 models/
 checkpoints/*.bin
 checkpoints/jev/
+checkpoints/jepa/
 zexo/checkpoints/*.bin
 zexo/checkpoints/*.json
 zexo/data/.dataset_cache/
