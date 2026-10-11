@@ -89,7 +89,7 @@ class ZexoModel:
         shuffle: bool = True,
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
-        full_backprop: bool = False,
+        full_backprop: Optional[bool] = None,
         native_full: bool = True,
         lora_rank: Optional[int] = None,
         lora_alpha: float = 16.0,

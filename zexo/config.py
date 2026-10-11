@@ -151,7 +151,7 @@ class ZexoConfig:
 
     @classmethod
     def base(cls) -> "ZexoConfig":
-        """Zexo-Base (109.5M parameters): Standard conversational base capable of deep reasoning."""
+        """Zexo-Base (109.5M parameters): LLaMA-style architecture preset for larger pretraining experiments."""
         return cls(
             tier="base",
             dim=768,

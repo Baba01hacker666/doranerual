@@ -26,6 +26,7 @@ checkpoints/jev/
 checkpoints/jepa/
 zexo/checkpoints/*.bin
 zexo/checkpoints/*.json
+zexo/checkpoints/*.npz
 zexo/data/.dataset_cache/
 zexo/data/alpaca_data_cleaned.json
 zexo/data/jev_100k_train.jsonl

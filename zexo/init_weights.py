@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Zexo AI: Base Checkpoint Weight Initializer.
 
-Initializes mathematically calibrated binary weights (.bin) for any Zexo
-architectural tier (micro, mini, chat, base, large) so training can begin
-from a clean, grounded base state.
+Initializes randomly seeded binary weights (.bin) for any Zexo architectural
+tier (micro, mini, chat, base, large). The result is an untrained parameter
+initialization, not a language model; run next-token pretraining before SFT.
 """
 
 import argparse
@@ -25,7 +25,7 @@ def initialize_zexo_checkpoint(
     output_path: Path,
     seed: int = 42,
 ) -> Path:
-    """Generate a clean binary model checkpoint for Zexo."""
+    """Write a randomly initialized checkpoint and its architecture metadata."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
     p = config

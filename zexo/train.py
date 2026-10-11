@@ -36,13 +36,24 @@ def compute_sha256(path: Path) -> str:
 def main():
     expanded_path = REPO_ROOT / "zexo" / "data" / "step1_conversational_expanded.txt"
     quality_train_path = REPO_ROOT / "zexo" / "data" / "zexo_quality_v1_train.txt"
-    default_dataset = str(quality_train_path if quality_train_path.exists() else (expanded_path if expanded_path.exists() else base_path))
+    fallback_path = REPO_ROOT / "data" / "train.txt"
+    default_dataset = str(
+        quality_train_path if quality_train_path.exists()
+        else expanded_path if expanded_path.exists()
+        else fallback_path
+    )
 
-    parser = argparse.ArgumentParser(description="Train and fine-tune Zexo AI on conversational data.")
+    parser = argparse.ArgumentParser(description="Pretrain, instruction-tune, and evaluate Zexo AI.")
+    parser.add_argument(
+        "--stage",
+        choices=["pretrain", "sft"],
+        default="sft",
+        help="Training objective: raw next-token pretraining or masked conversational SFT (default: sft).",
+    )
     parser.add_argument(
         "--data", "-d",
-        default=default_dataset,
-        help=f"Path to training dialogue file or Hugging Face dataset ID (default: {Path(default_dataset).name}).",
+        default=None,
+        help=f"Path to a text/JSONL corpus or Hugging Face dataset ID (SFT default: {Path(default_dataset).name}; required for pretraining).",
     )
     parser.add_argument(
         "--eval-data",
@@ -101,9 +112,9 @@ def main():
     )
     parser.add_argument(
         "--tier", "-t",
-        choices=["micro", "mini", "chat", "base", "large", "dora"],
-        default="mini",
-        help="Zexo tier architecture (default: mini).",
+        choices=["micro", "mini", "chat", "base", "large", "dora", "micro-byte", "mini-byte", "chat-byte", "base-byte"],
+        default="chat",
+        help="Zexo tier architecture (default: chat; use micro/mini for CPU smoke tests).",
     )
     parser.add_argument(
         "--novel-neurons",
@@ -131,9 +142,8 @@ def main():
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=256,
-        help="Sequence chunk length (default: 256). Raise this for byte-level tiers, "
-             "which consume one token per byte.",
+        default=None,
+        help="Sequence chunk length (default: up to 256, constrained by the loaded model context). Raise this for byte-level tiers, which consume one token per byte.",
     )
     parser.add_argument(
         "--no-pack",
@@ -178,7 +188,12 @@ def main():
     parser.add_argument(
         "--full-backprop",
         action="store_true",
-        help="Train all transformer weights with native C++ (NumPy reference remains available via --numpy-full).",
+        help="Explicitly select full-transformer training (the default unless --head-only or --lora-rank is used).",
+    )
+    parser.add_argument(
+        "--head-only",
+        action="store_true",
+        help="Use the legacy faster path that updates only token embeddings/output head; not recommended for a randomly initialized base.",
     )
     parser.add_argument(
         "--numpy-full",
@@ -231,10 +246,34 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.full_backprop and args.lora_rank is not None:
-        parser.error("--full-backprop and --lora-rank are mutually exclusive")
+    if args.data is None and args.stage == "pretrain" and not args.hf_dataset:
+        parser.error("--stage pretrain requires --data or --hf-dataset; do not pretrain on the small conversational SFT default")
+    if args.data is None:
+        args.data = default_dataset
+    if args.full_backprop and args.head_only:
+        parser.error("--full-backprop and --head-only are mutually exclusive")
     if args.lora_rank is not None and args.lora_rank <= 0:
         parser.error("--lora-rank must be positive")
+    if args.stage == "pretrain":
+        if args.lora_rank is not None or args.head_only:
+            parser.error("--stage pretrain requires full-model training; do not pass --lora-rank or --head-only")
+        # A pretraining command must update the decoder, not silently fall back
+        # to the legacy embedding/head-only fine-tuner.
+        args.full_backprop = True
+    elif args.lora_rank is not None:
+        if args.head_only:
+            parser.error("--lora-rank and --head-only are mutually exclusive")
+        if args.full_backprop:
+            parser.error("--full-backprop and --lora-rank are mutually exclusive")
+    elif args.head_only:
+        args.full_backprop = False
+    else:
+        # Full transformer gradients are the safe default for a fresh/random
+        # checkpoint. Users can opt into head-only mode for a deliberate speed
+        # trade-off, or use LoRA when adapting a known pretrained base.
+        args.full_backprop = True
+    if args.max_steps is not None and args.max_steps <= 0:
+        parser.error("--max-steps must be a positive integer")
     if args.threads is not None and args.threads <= 0:
         parser.error("--threads must be a positive integer")
     out_dir = Path(args.output_dir)
@@ -269,6 +308,7 @@ def main():
     print(f"Run ID:         {run_id}")
     is_novel = args.novel_neurons or args.tier.lower() == "dora"
     print(f"Target Tier:    {args.tier.upper()}")
+    print(f"Training Stage: {args.stage.upper()}")
     print(f"Novel Neurons:  {is_novel} (Bio-Reflective KAN)")
     print(f"From Scratch:   {args.from_scratch}")
     mode = "FULL TRANSFORMER BACKPROP" if args.full_backprop else (
@@ -312,8 +352,9 @@ def main():
     if eval_path is not None:
         print(f"🧪 Held-out Evaluation: {eval_path.name} ({len(eval_text):,} chars, {len(eval_text.split()):,} words)")
 
-    # Continual Learning Anchor Replay: Interleave core persona/reasoning dialogues to prevent catastrophic forgetting
-    if args.replay_ratio > 0 and corpus_path.name != "step1_conversational_expanded.txt" and expanded_path.exists():
+    # Replay is useful during supervised adaptation, but contaminates a raw-text
+    # pretraining run with chat data. Keep the stages strictly separated.
+    if args.stage == "sft" and args.replay_ratio > 0 and corpus_path.name != "step1_conversational_expanded.txt" and expanded_path.exists():
         anchor_text = expanded_path.read_text(encoding="utf-8", errors="replace")
         anchor_blocks = [b.strip() for b in anchor_text.split("\n\n") if b.strip()]
         current_blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
@@ -334,8 +375,26 @@ def main():
             print(f"🔄 Continual Learning Anchor Replay: Interleaved {len(sampled_anchors)} core persona dialogues ({args.replay_ratio * 100:.0f}% buffer) to prevent catastrophic forgetting.")
 
     # 2. Load or Initialize Zexo
+    if args.checkpoint and not Path(args.checkpoint).is_file():
+        parser.error(f"checkpoint does not exist: {args.checkpoint}")
+    implicit_latest = REPO_ROOT / "zexo" / "checkpoints" / "latest.bin"
+    implicit_latest_compatible = implicit_latest.exists()
+    implicit_config = implicit_latest.with_suffix(".json")
+    if implicit_latest_compatible and implicit_config.exists():
+        try:
+            implicit_latest_compatible = ZexoConfig.load(implicit_config).tier == args.tier
+        except (OSError, ValueError, json.JSONDecodeError):
+            implicit_latest_compatible = False
+    if args.from_scratch or (not args.checkpoint and not implicit_latest_compatible):
+        print("⚠️ No trained base checkpoint selected; this run starts from random weights. "
+              "Use --stage pretrain with a large general-text corpus before SFT for fluent language.")
     print("\n[1/4] Loading Zexo Model...")
     zexo = load_zexo(checkpoint_path=args.checkpoint, tier=args.tier, from_scratch=args.from_scratch)
+    if args.seq_len is None:
+        default_seq_len = 128 if args.fast else 256
+        args.seq_len = min(default_seq_len, zexo.config.seq_len - 1)
+    elif not 1 <= args.seq_len < zexo.config.seq_len:
+        parser.error(f"--seq-len must be in [1, {zexo.config.seq_len - 1}] for the loaded model")
     if is_novel:
         zexo.config.novel_neurons = True
         zexo.llm.config.novel_neurons = True
@@ -350,23 +409,30 @@ def main():
     print(f"  Backend:      {zexo.llm.backend.upper()}")
     print(f"  Native threads: {zexo.llm.num_threads:,} (effective; NumPy fallback reports 1)")
 
-    # 3. Test Baseline Answer (Continual Retention Probe + Task Probe)
-    print(f"\n[2/4] Baseline Conversational Probes (Before Training):")
-    print("─" * 72)
+    # Conversational probes are meaningful for instruction-tuning, not a
+    # raw-language pretraining checkpoint that has not learned a chat format.
     retention_prompt = "Who are you?"
-    ans_retention_before = zexo.chat(retention_prompt, max_tokens=50)
-    zexo.reset()
-    print(f"  [Retention Probe] User: {retention_prompt}")
-    print(f"                    Zexo: {ans_retention_before}")
-    ans_task_before = zexo.chat(args.test_prompt, max_tokens=50)
-    zexo.reset()
-    print(f"  [Task Probe]      User: {args.test_prompt}")
-    print(f"                    Zexo: {ans_task_before}")
-    print("─" * 72)
+    ans_retention_before = None
+    ans_task_before = None
+    if args.stage == "sft":
+        print(f"\n[2/4] Baseline Conversational Probes (Before Training):")
+        print("─" * 72)
+        ans_retention_before = zexo.chat(retention_prompt, max_tokens=50)
+        zexo.reset()
+        print(f"  [Retention Probe] User: {retention_prompt}")
+        print(f"                    Zexo: {ans_retention_before}")
+        ans_task_before = zexo.chat(args.test_prompt, max_tokens=50)
+        zexo.reset()
+        print(f"  [Task Probe]      User: {args.test_prompt}")
+        print(f"                    Zexo: {ans_task_before}")
+        print("─" * 72)
+    else:
+        print("\n[2/4] Conversational probes skipped: run SFT after language pretraining.")
 
-    # 4. Train Model with SFT instruction masking and Cosine Annealing LR
+    # 4. Train with a stage-specific objective and a cosine LR schedule.
+    mask_prompts = args.stage == "sft" and not args.no_mask_prompts
     steps_str = f", max_steps={args.max_steps}" if args.max_steps else ""
-    print(f"\n[3/4] Fine-tuning Zexo for {args.epochs} epochs (lr={args.lr}, seq_len={args.seq_len}{steps_str}, mask_prompts={not args.no_mask_prompts})...")
+    print(f"\n[3/4] Training Zexo for {args.epochs} epochs (stage={args.stage}, lr={args.lr}, seq_len={args.seq_len}{steps_str}, mask_prompts={mask_prompts})...")
     t0 = time.perf_counter()
     hist = zexo.train(
         text,
@@ -375,7 +441,7 @@ def main():
         weight_decay=args.weight_decay,
         seq_len=args.seq_len,
         verbose=1,
-        mask_prompts=not args.no_mask_prompts,
+        mask_prompts=mask_prompts,
         max_batches=args.max_steps,
         eval_text=eval_text,
         validation_split=args.validation_split if eval_text is None else 0.0,
@@ -397,19 +463,24 @@ def main():
         final_report += f" | Final validation loss: {hist['val_loss'][-1]:.4f}"
     print(f"  Training finished in {duration:.2f}s! {final_report}")
 
-    # 5. Test Fine-Tuned Answer (Continual Retention Probe + Task Probe)
-    zexo.reset()
-    print(f"\n[4/4] Fine-Tuned Conversational Probes (After Training):")
-    print("─" * 72)
-    ans_retention_after = zexo.chat(retention_prompt, max_tokens=50)
-    zexo.reset()
-    print(f"  [Retention Probe] User: {retention_prompt}")
-    print(f"                    Zexo: {ans_retention_after}")
-    ans_task_after = zexo.chat(args.test_prompt, max_tokens=50)
-    zexo.reset()
-    print(f"  [Task Probe]      User: {args.test_prompt}")
-    print(f"                    Zexo: {ans_task_after}")
-    print("─" * 72)
+    ans_retention_after = None
+    ans_task_after = None
+    if args.stage == "sft":
+        # 5. Compare conversational probes after supervised adaptation.
+        zexo.reset()
+        print(f"\n[4/4] Fine-Tuned Conversational Probes (After Training):")
+        print("─" * 72)
+        ans_retention_after = zexo.chat(retention_prompt, max_tokens=50)
+        zexo.reset()
+        print(f"  [Retention Probe] User: {retention_prompt}")
+        print(f"                    Zexo: {ans_retention_after}")
+        ans_task_after = zexo.chat(args.test_prompt, max_tokens=50)
+        zexo.reset()
+        print(f"  [Task Probe]      User: {args.test_prompt}")
+        print(f"                    Zexo: {ans_task_after}")
+        print("─" * 72)
+    else:
+        print("\n[4/4] Conversation probes skipped; this checkpoint is ready for SFT, not general chat.")
 
     # 6. Save Checkpoint
     latest_bin = out_dir / "latest.bin"
@@ -439,10 +510,11 @@ def main():
         "stride": args.stride or args.seq_len,
         "pack_documents": not args.no_pack,
         "seed": args.seed,
+        "stage": args.stage,
         "training_mode": "full_backprop" if args.full_backprop else (
             "lora" if args.lora_rank is not None else "head_only"
         ),
-        "full_backprop_backend": "numpy" if args.numpy_full else "native_cpp",
+        "full_backprop_backend": ("numpy" if args.numpy_full else "native_cpp") if args.full_backprop else None,
         "threads_requested": requested_threads,
         "threads_effective": zexo.llm.num_threads,
         "available_cpus": os.cpu_count(),
@@ -456,8 +528,8 @@ def main():
         "training_tokens": hist.get("tokens"),
         "windows_per_epoch": hist.get("windows_per_epoch"),
         "total_training_steps": hist.get("total_steps"),
-        "mask_prompts": not args.no_mask_prompts,
-        "replay_ratio": args.replay_ratio,
+        "mask_prompts": mask_prompts,
+        "replay_ratio": args.replay_ratio if args.stage == "sft" else 0.0,
         "retention_prompt": retention_prompt,
         "retention_before": ans_retention_before,
         "retention_after": ans_retention_after,
@@ -482,7 +554,10 @@ def main():
 
     print(f"   -> Metadata: {meta_file.name}")
     print("\n" + "═" * 72)
-    print("✨ Zexo conversational training complete! Ready to chat: python zexo/chat.py")
+    if args.stage == "pretrain":
+        print("✨ Language-model pretraining complete. Continue with --stage sft before conversational use.")
+    else:
+        print("✨ Zexo supervised conversational training complete! Try: python zexo/chat.py --checkpoint " + str(latest_bin))
     print("═" * 72 + "\n")
 
 

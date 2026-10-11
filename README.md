@@ -78,6 +78,7 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
 ## ✨ Key Features
 
 - **Native C++ Engine & LLM Fine-Tuning**: Multi-threaded C++ OpenMP kernel (`doraneural/csrc/llm_engine.cpp`) with SIMD vectorization and in-place Cross-Entropy + AdamW training for fine-tuning pretrained LLaMAs on custom text, seamlessly falling back to pure NumPy if a C++ compiler is not present.
+- **Zexo LLM training and research architectures**: full-transformer-by-default pretraining/SFT, LoRA, offline DPO on reviewed preferences, plus a separate small DeepSeek-Flash-inspired CED/SWA/CSA2-lite/MoE reference model (`zexo/flash_lite.py`). These are CPU-scale research implementations, not DeepSeek weights or a reproduction of its production system. See [`zexo/README.md`](zexo/README.md) for limits and recipes.
 - **Pretrained Hugging Face LLM (Pure NumPy / C++ LLaMA)**: Runs real pretrained transformer language models directly from Hugging Face Hub (`karpathy/tinyllamas`) with RoPE, RMSNorm, KV-Cache, SwiGLU FFN, and SentencePiece BPE tokenizer, generating 70–100+ tokens/sec on CPU:
   ```bash
   doraneural story --prompt "Once upon a time, a brave puppy"
@@ -190,7 +191,7 @@ doraneural test
 # or
 python3 -m pytest tests/
 ```
-All tests pass on pure CPU with standard NumPy (`python3 -m pytest`, 232 passed / 15 skipped; the one skipped-by-environment case downloads a Hugging Face checkpoint and needs network access).
+The test suite runs on CPU with NumPy (`python3 -m pytest`). Tests that need optional remote Hugging Face checkpoints skip when the download is unavailable; local transformer and native-engine parity tests remain self-contained.
 
 
 

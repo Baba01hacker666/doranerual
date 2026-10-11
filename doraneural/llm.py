@@ -1334,6 +1334,8 @@ class LlamaLLM:
         """Native C++ full-transformer training loop with LR schedule and gradient clipping."""
         if self.cpp_engine is None:
             raise RuntimeError("Native full backpropagation requires the C++ backend")
+        if max_batches is not None and max_batches <= 0:
+            raise ValueError(f"max_batches must be positive, got {max_batches}")
         if eval_text is not None and validation_split:
             raise ValueError("Pass either eval_text or validation_split, not both")
 
@@ -1510,8 +1512,18 @@ class LlamaLLM:
         """
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
-        if lr <= 0.0:
-            raise ValueError(f"lr must be positive, got {lr}")
+        if not np.isfinite(lr) or lr <= 0.0:
+            raise ValueError(f"lr must be finite and positive, got {lr}")
+        if not np.isfinite(weight_decay) or weight_decay < 0.0:
+            raise ValueError(f"weight_decay must be finite and non-negative, got {weight_decay}")
+        if not np.isfinite(grad_clip) or grad_clip < 0.0:
+            raise ValueError(f"grad_clip must be finite and non-negative, got {grad_clip}")
+        if max_batches is not None and max_batches <= 0:
+            raise ValueError(f"max_batches must be positive, got {max_batches}")
+        if max_eval_steps is not None and max_eval_steps <= 0:
+            raise ValueError(f"max_eval_steps must be positive, got {max_eval_steps}")
+        if stride is not None and not 1 <= stride <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {stride}")
         if not 1 <= seq_len < self.config.seq_len:
             raise ValueError(f"seq_len must be in [1, {self.config.seq_len - 1}], got {seq_len}")
         if not 0.0 <= validation_split < 1.0:
@@ -1575,6 +1587,7 @@ class LlamaLLM:
             eval_tokens=eval_tokens,
             max_eval_steps=max_eval_steps,
             max_batches=max_batches,
+            grad_clip=grad_clip,
             verbose=verbose,
             batches=masked_batches,
         )
@@ -1601,10 +1614,20 @@ class LlamaLLM:
         adapter_path: Optional[Union[str, Path]] = None,
         mask_prompts: bool = True,
         pack_documents: bool = True,
+        max_batches: Optional[int] = None,
+        grad_clip: float = 1.0,
     ) -> dict:
         """Fine-tune a pretrained checkpoint with adapter-only LoRA weights."""
         if not text:
             raise ValueError("training text must not be empty")
+        if max_batches is not None and max_batches <= 0:
+            raise ValueError(f"max_batches must be positive, got {max_batches}")
+        if max_eval_steps is not None and max_eval_steps <= 0:
+            raise ValueError(f"max_eval_steps must be positive, got {max_eval_steps}")
+        if stride is not None and not 1 <= stride <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {stride}")
+        if not np.isfinite(grad_clip) or grad_clip < 0.0:
+            raise ValueError(f"grad_clip must be finite and non-negative, got {grad_clip}")
         if not 0.0 <= validation_split < 1.0:
             raise ValueError("validation_split must be in [0, 1)")
         if eval_text is not None and validation_split:
@@ -1615,7 +1638,7 @@ class LlamaLLM:
         is_dialogue = bool(re.search(r'(?:^|\n)User:\s*', text, re.IGNORECASE))
         if is_dialogue and mask_prompts:
             masked_batches = self._prepare_training_batches(
-                text, seq_len=seq_len, mask_prompts=True, max_batches=None,
+                text, seq_len=seq_len, mask_prompts=True, max_batches=max_batches,
                 pack_documents=pack_documents,
             )
             if not masked_batches:
@@ -1645,6 +1668,8 @@ class LlamaLLM:
             seed=seed,
             eval_tokens=eval_tokens,
             max_eval_steps=max_eval_steps,
+            max_batches=max_batches,
+            grad_clip=grad_clip,
             verbose=verbose,
             batches=masked_batches,
         )
@@ -1686,7 +1711,7 @@ class LlamaLLM:
         shuffle: bool = True,
         seed: int = 42,
         max_eval_steps: Optional[int] = None,
-        full_backprop: bool = False,
+        full_backprop: Optional[bool] = None,
         native_full: bool = True,
         lora_rank: Optional[int] = None,
         lora_alpha: float = 16.0,
@@ -1714,7 +1739,8 @@ class LlamaLLM:
             shuffle: Whether to shuffle sequence windows per epoch.
             seed: Random seed for shuffling.
             max_eval_steps: Maximum evaluation steps.
-            full_backprop: If True, differentiate through all transformer layers.
+            full_backprop: ``None`` (default) selects full-transformer backprop.
+                Set False only to opt into the legacy embedding/output-head-only path.
             native_full: If True and full_backprop, use native C++ full backprop engine.
             lora_rank: If specified, train LoRA adapter of this rank.
             lora_alpha: LoRA scaling factor.
@@ -1724,8 +1750,14 @@ class LlamaLLM:
         Returns:
             Dictionary containing 'loss' and optionally 'val_loss', 'tokens', 'windows_per_epoch', 'total_steps'.
         """
+        if max_batches is not None and max_batches <= 0:
+            raise ValueError(f"max_batches must be positive, got {max_batches}")
+        if max_eval_steps is not None and max_eval_steps <= 0:
+            raise ValueError(f"max_eval_steps must be positive, got {max_eval_steps}")
+        if stride is not None and not 1 <= stride <= seq_len:
+            raise ValueError(f"stride must be in [1, seq_len], got {stride}")
         if lora_rank is not None:
-            if full_backprop:
+            if full_backprop is True:
                 raise ValueError("Choose either lora_rank or full_backprop, not both")
             return self.train_lora(
                 text,
@@ -1743,10 +1775,14 @@ class LlamaLLM:
                 shuffle=shuffle,
                 seed=seed,
                 max_eval_steps=max_eval_steps,
+                max_batches=max_batches,
                 adapter_path=adapter_path,
                 mask_prompts=mask_prompts,
                 pack_documents=pack_documents,
+                grad_clip=grad_clip,
             )
+        if full_backprop is None:
+            full_backprop = True
         if full_backprop:
             return self.train_full(
                 text,
@@ -1761,6 +1797,7 @@ class LlamaLLM:
                 shuffle=shuffle,
                 seed=seed,
                 max_eval_steps=max_eval_steps,
+                max_batches=max_batches,
                 native=native_full,
                 grad_clip=grad_clip,
                 mask_prompts=mask_prompts,
@@ -1775,8 +1812,10 @@ class LlamaLLM:
             )
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
-        if lr <= 0.0:
-            raise ValueError(f"lr must be positive, got {lr}")
+        if not np.isfinite(lr) or lr <= 0.0:
+            raise ValueError(f"lr must be finite and positive, got {lr}")
+        if not np.isfinite(weight_decay) or weight_decay < 0.0:
+            raise ValueError(f"weight_decay must be finite and non-negative, got {weight_decay}")
         if not 1 <= seq_len < self.config.seq_len:
             raise ValueError(f"seq_len must be in [1, {self.config.seq_len - 1}], got {seq_len}")
         if not 0.0 <= validation_split < 1.0:

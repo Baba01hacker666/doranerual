@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from zexo.config import ZexoConfig
 from zexo.model import load_zexo
 
 
@@ -86,9 +87,9 @@ def main():
     )
     parser.add_argument(
         "--tier", "-t",
-        choices=["micro", "mini", "chat", "base", "large", "dora"],
-        default="mini",
-        help="Zexo architectural tier (default: mini).",
+        choices=["micro", "mini", "chat", "base", "large", "dora", "micro-byte", "mini-byte", "chat-byte", "base-byte"],
+        default=None,
+        help="Zexo architectural tier (auto-detected from checkpoint metadata; otherwise mini).",
     )
     parser.add_argument(
         "--temp",
@@ -118,6 +119,29 @@ def main():
     args = parser.parse_args()
     if args.top_k < 0:
         parser.error("--top-k must be non-negative")
+    if args.checkpoint and not Path(args.checkpoint).is_file():
+        parser.error(f"checkpoint does not exist: {args.checkpoint}")
+    latest_checkpoint = REPO_ROOT / "zexo" / "checkpoints" / "latest.bin"
+    if args.tier is None:
+        metadata_checkpoint = Path(args.checkpoint) if args.checkpoint else latest_checkpoint
+        metadata_config = metadata_checkpoint.with_suffix(".json")
+        if metadata_config.exists():
+            try:
+                args.tier = ZexoConfig.load(metadata_config).tier
+            except (OSError, ValueError):
+                parser.error(f"could not read checkpoint metadata: {metadata_config}")
+        else:
+            args.tier = "mini"
+    latest_compatible = latest_checkpoint.exists()
+    latest_config = latest_checkpoint.with_suffix(".json")
+    if latest_compatible and latest_config.exists():
+        try:
+            latest_compatible = ZexoConfig.load(latest_config).tier == args.tier
+        except (OSError, ValueError):
+            latest_compatible = False
+    if not args.checkpoint and not latest_compatible:
+        print("⚠️ No trained Zexo checkpoint found for this tier. A random-initialized model will be loaded; "
+              "it will not produce fluent chat until pretraining and SFT are complete.")
     zexo = load_zexo(checkpoint_path=args.checkpoint, tier=args.tier, backend=args.backend)
     interactive_chat_loop(zexo, temperature=args.temp, max_tokens=args.max_tokens, top_k=args.top_k)
 
