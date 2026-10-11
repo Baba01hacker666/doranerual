@@ -95,6 +95,11 @@ Supports `task="binary"`, `task="multiclass"`, and `task="regression"`.
   ```bash
   doraneural demo catdog
   ```
+- **JEPA: Joint-Embedding Predictive Architectures (Pure NumPy)**: Self-supervised learning by predicting *representations* rather than pixels — I-JEPA multi-block masking with an EMA target encoder, V-JEPA tube masking for video, the LeJEPA **SIGReg** objective that makes collapse impossible by construction, and an action-conditioned **latent world model** you can plan with (cross-entropy method in embedding space, no reward model, no pixel decoding). It ships with the audits a JEPA needs to be believable: `masked_target_baseline` (how much of the loss is a positional lookup table) and `action_utilization` (permuted/zeroed action ablations that separate learned dynamics from shrinkage):
+  ```bash
+  python3 research/train_jepa.py --task all --quick   # images + video + world model
+  doraneural demo jepa                                # guided tour with ASCII visualisations
+  ```
 - **Zero-Dependency CSV Loader**: Load and auto-normalize tabular datasets with pure standard library (no pandas needed):
   ```bash
   doraneural new --data my_dataset.csv
@@ -161,6 +166,7 @@ Explore cutting-edge architectures created to challenge classical neuron paradig
 - 🧪 **[16. BPE vs Byte-Level: Empirical](research/16_byte_vs_bpe_empirical.md)**: Trained-run comparison. Byte tiers are 9.1x smaller and 23.5x faster to decode, but 46% worse at text compression.
 - 🔬 **[17. Dust: Zeroth-Order Pretraining](research/17_dust_zeroth_order_pretraining.md)**: Activation-space perturbation with virtual population. Gradient estimates converge to backprop's as population grows (cosine 0.16 → 0.68).
 - 🔍 **[18. Gradient Starvation Audit](research/18_gradient_starvation_audit.md)**: Audits Paper 11's unverified saturation claim. The collapse is in the shared SwiGLU FFN, not the novel neurons, and Dust does not escape it.
+- 🎯 **[19. JEPA: Joint-Embedding Predictive Architectures](research/19_jepa_joint_embedding_predictive_architectures.md)**: I-JEPA, V-JEPA, SIGReg/LeJEPA and a latent world model with a CEM planner — plus an audit showing a masked-latent loss can hit `1e-4` while the features stay at chance (position alone explains **99.3%** of the target). SIGReg escapes it: **100% vs 58% random on temporal-order video**. The world model gets the same treatment: `action_gain` **0.46** (permuting or zeroing its actions costs 86% and 70% more error), and its CEM planner finished closer to the goal than a random rollout in **79%** of 24 episodes.
 
 Each result is reproducible from `scripts/` and committed alongside its raw measurement artifact.
 
@@ -184,7 +190,7 @@ doraneural test
 # or
 python3 -m pytest tests/
 ```
-All **90 unit tests** pass on pure CPU with standard NumPy.
+All tests pass on pure CPU with standard NumPy (`python3 -m pytest`, 232 passed / 15 skipped; the one skipped-by-environment case downloads a Hugging Face checkpoint and needs network access).
 
 
 

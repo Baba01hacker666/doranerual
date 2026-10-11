@@ -855,3 +855,160 @@ doraneural chat
 
 
 
+
+---
+
+## 21. JEPA: Joint-Embedding Predictive Architectures
+
+Self-supervised learning that predicts **representations** instead of pixels.
+Everything runs on the NumPy autograd engine on CPU; see
+[Research 19](../research/19_jepa_joint_embedding_predictive_architectures.md)
+for the empirical audit that comes with it.
+
+### I-JEPA (images)
+
+```python
+import numpy as np
+from doraneural.jepa import IJEPA, representation_diagnostics, linear_probe
+
+images = np.random.rand(256, 1, 32, 32).astype(np.float32)   # (N, C, H, W)
+
+model = IJEPA(
+    img_size=32, patch_size=8, in_chans=1,
+    dim=64, depth=4, n_heads=4,          # context + EMA target encoder
+    pred_dim=64, pred_depth=2, pred_heads=4,   # narrow predictor ViT
+    n_targets=4, target_scale=(0.15, 0.2), context_scale=(0.85, 1.0),
+    ema_start=0.996, ema_end=1.0,        # lower these for short runs
+)
+stats = model.fit(images, steps=600, batch_size=16, lr=1e-3)
+
+features = model.encode(images)          # frozen features (N, dim)
+print(representation_diagnostics(features)["collapsed"])
+
+# The audit every JEPA run needs: is the loss just a positional lookup table?
+print(model.shortcut_audit(images[:128]))
+```
+
+### V-JEPA (video) and the LeJEPA objective
+
+```python
+from doraneural.jepa import VJEPA
+
+clips = np.random.rand(128, 1, 8, 32, 32).astype(np.float32)   # (N, C, T, H, W)
+video = VJEPA(frames=8, img_size=32, patch_size=8, tubelet=2, dim=64, depth=2, n_heads=4)
+
+# SIGReg replaces the EMA teacher: no stop-gradient, no schedule, one lambda.
+video.fit(clips, steps=600, sigreg=True, sigreg_weight=0.1)
+```
+
+### SIGReg (sketched isotropic Gaussian regularisation)
+
+```python
+from doraneural.jepa import SIGReg, sigreg_loss
+from doraneural.autograd import Tensor
+
+reg = SIGReg(num_slices=64, num_points=17)      # Epps-Pulley characteristic function test
+loss = reg(Tensor(np.random.randn(256, 32).astype(np.float32)))
+loss.backward()
+```
+
+### Latent world model + CEM planner
+
+```python
+from doraneural.jepa import JEPAWorldModel
+from doraneural.jepa_data import PointMassConfig, PointMassEnv, sample_point_mass_trajectories
+
+cfg = PointMassConfig(size=24)                     # pixel observations, velocity-controlled
+data = sample_point_mass_trajectories(n=256, horizon=10, config=cfg, seed=0)
+
+model = JEPAWorldModel(obs_shape=(1, 24, 24), action_dim=2, dim=64,
+                       encoder_depth=2, predictor_depth=2, context_len=4,
+                       residual=True,               # predict the *change* in latent, not the latent
+                       freeze_encoder=False)        # train the encoder end-to-end from pixels
+model.fit(data["obs"], data["actions"], steps=600, sigreg_weight=0.005, rollout_steps=3)
+
+# Plan towards a goal *image* entirely in latent space, then execute.
+env = PointMassEnv(cfg, seed=0)
+z_start = model.encode_np(env.render()[None])
+env.reset(position=[0.8, 0.2], velocity=[0, 0])    # a goal observation
+z_goal = model.encode_np(env.render()[None])
+plan = model.plan(z_start, z_goal, horizon=6, n_samples=192, n_iters=5)
+print(plan["actions"].shape, plan["cost"])         # (6, 2) action sequence
+```
+
+`residual=True` (the default) predicts `z_{t+1} - z_t`. It is not cosmetic: with
+an absolute head the predictor can minimise its MSE by shrinking towards the
+latent marginal and ignoring the action input, which the ablation below
+measures. `predict_delta` is also what makes the k-step rollout loss meaningful,
+since the untrained model starts out as an exact no-change baseline.
+
+**Always run the action ablation.** A world model whose next-latent MSE beats the
+no-change baseline has *not* necessarily learned dynamics:
+
+```python
+report = model.action_utilization(data["obs"][:32], data["actions"][:32])
+# one_step_true_action_mse      0.149   <- the actions it was trained with
+# one_step_shuffled_action_mse  0.216   <- same actions, permuted across the batch
+# one_step_zero_action_mse      0.205   <- no actions at all
+# one_step_action_gain          0.310   <- 1 - true / shuffled
+```
+
+A model that has collapsed onto the marginal scores the same three numbers; on a
+controlled linear latent system the same code path recovers the map and reports
+`action_gain` 0.72 (see `tests/test_jepa.py`).
+
+### Diagnostics, probes and the shortcut audit
+
+```python
+from doraneural.jepa import (
+    representation_diagnostics,   # rank, cosine, signal_ratio, collapsed verdict
+    masked_target_baseline,       # position_r2: how much the loss is a lookup table
+    linear_probe,                 # closed-form ridge probe on frozen features
+)
+
+diag = representation_diagnostics(features)
+audit = masked_target_baseline(model, images[:128])
+probe = linear_probe(features[:192], labels[:192], features[192:], labels[192:], num_classes=4)
+print(diag["effective_rank"], diag["signal_ratio"], audit["position_r2"], probe["accuracy"])
+```
+
+Four knobs exist because the audits above showed they matter, and all four are
+exposed on `IJEPA` / `VJEPA` / `fit`:
+
+| Knob | Default | What it changes |
+| :--- | :--- | :--- |
+| `target_mode` | `"tokens"` | `"global"` predicts one view embedding per image instead of per token — the LeJEPA-style objective where a position lookup cannot help |
+| `sigreg_level` (`fit`) | `"token"` | `"image"` regularises the pooled per-image latents; a position-only encoder has a *constant* pooled latent, so only image-level SIGReg rules it out |
+| `residual` (`JEPAWorldModel`) | `True` | delta head (removes the marginal-shrinkage optimum) vs absolute next-latent head |
+| `pos_scale` | `1.0` | scales the additive positional table, the dominant term at initialisation |
+
+### Synthetic benchmarks
+
+```python
+from doraneural.jepa_data import (
+    make_shape_dataset,            # label = shape identity, position is nuisance
+    make_grating_dataset,          # label = global orientation
+    make_motion_clip_dataset,      # task="order" -> forward vs reversed clips
+    sample_point_mass_trajectories, render_ascii, mask_ascii,
+)
+```
+
+### Full training script
+
+```bash
+python3 research/train_jepa.py --task all --quick          # images + video + world model
+python3 research/train_jepa.py --task video --sigreg --steps 600
+python3 research/train_jepa.py --task worldmodel --sigreg-weight 0.005 \
+    --n-trajectories 128 --horizon 12 --steps 600 --plan-episodes 24
+python3 examples/explore_jepa.py                            # guided demo with ASCII output
+```
+
+| Flag | Purpose |
+| :--- | :--- |
+| `--task images\|video\|worldmodel\|all` | which experiment to run |
+| `--sigreg`, `--sigreg-weight`, `--sigreg-level` | LeJEPA objective and where the distribution penalty acts |
+| `--target-mode tokens\|global` | token latents vs whole-image latent as the prediction target |
+| `--video-task order\|direction` | temporal order is the metric a static encoder cannot solve |
+| `--no-residual` | absolute instead of delta prediction in the world model |
+| `--plan-episodes`, `--rollout-steps` | CEM evaluation budget and multi-step rollout loss |
+| `--json PATH` | write every metric to a machine-readable artifact |

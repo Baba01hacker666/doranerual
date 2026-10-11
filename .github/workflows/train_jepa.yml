@@ -1,0 +1,102 @@
+name: Train JEPA (I-JEPA / V-JEPA / Latent World Model)
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Which experiment to run"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - images
+          - video
+          - worldmodel
+      steps:
+        description: "Optimizer steps for the masked-pretraining tasks"
+        required: false
+        default: "600"
+        type: string
+      sigreg:
+        description: "Use the LeJEPA objective (SIGReg regulariser, no EMA teacher)"
+        required: false
+        default: true
+        type: boolean
+      sigreg_weight:
+        description: "SIGReg weight lambda (0.005 measured best for the world model; higher keeps the encoder healthier but costs prediction quality)"
+        required: false
+        default: "0.005"
+        type: string
+      plan_episodes:
+        description: "Number of CEM planning episodes to evaluate"
+        required: false
+        default: "24"
+        type: string
+      push_checkpoint_to_git:
+        description: "Commit trained JEPA checkpoints back to the branch"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  train-jepa:
+    name: Train JEPA Self-Supervised Models (CPU)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run JEPA Test Suite
+        run: python3 -m pytest tests/test_jepa.py -q
+
+      - name: Train / Evaluate JEPA
+        run: |
+          mkdir -p checkpoints/jepa
+          ARGS="--task ${{ github.event.inputs.task || 'all' }} \
+            --steps ${{ github.event.inputs.steps || '600' }} \
+            --plan-episodes ${{ github.event.inputs.plan_episodes || '24' }} \
+            --sigreg-weight ${{ github.event.inputs.sigreg_weight || '0.005' }} \
+            --json research/19_results_jepa.json"
+          if [ "${{ github.event.inputs.sigreg || 'true' }}" = "true" ]; then
+            ARGS="$ARGS --sigreg"
+          fi
+          python3 research/train_jepa.py $ARGS
+
+      - name: Upload Metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: jepa-results-run-${{ github.run_number }}
+          path: |
+            research/19_results_jepa.json
+            checkpoints/jepa/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Commit Metrics and Checkpoints to Git (Optional)
+        if: ${{ github.event.inputs.push_checkpoint_to_git == 'true' }}
+        run: |
+          git config user.name "baba01hacker666"
+          git config user.email "baba01hacker666@users.noreply.github.com"
+          git add -f research/19_results_jepa.json checkpoints/jepa/
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(jepa): update self-supervised pretraining results [run ${{ github.run_number }}]"
+            git push origin HEAD:${{ github.ref }}
+          fi

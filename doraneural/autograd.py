@@ -359,6 +359,36 @@ class Tensor:
 
         return out
 
+    def sin(self) -> "Tensor":
+        """Elementwise sine (used by RoPE and characteristic-function objectives)."""
+        out_data = np.sin(self.data)
+        req_grad = _GRAD_ENABLED and self.requires_grad
+        out = Tensor(out_data, requires_grad=req_grad, dtype=self.dtype, _children=(self,), _op="sin")
+
+        if req_grad:
+            def _backward():
+                g = np.cos(self.data) * out.grad
+                self.grad = g if self.grad is None else self.grad + g
+
+            out._backward = _backward
+
+        return out
+
+    def cos(self) -> "Tensor":
+        """Elementwise cosine (used by RoPE and characteristic-function objectives)."""
+        out_data = np.cos(self.data)
+        req_grad = _GRAD_ENABLED and self.requires_grad
+        out = Tensor(out_data, requires_grad=req_grad, dtype=self.dtype, _children=(self,), _op="cos")
+
+        if req_grad:
+            def _backward():
+                g = -np.sin(self.data) * out.grad
+                self.grad = g if self.grad is None else self.grad + g
+
+            out._backward = _backward
+
+        return out
+
     def exp(self) -> "Tensor":
         """Elementwise natural exponential."""
         clipped = np.clip(self.data, -88.0, 88.0)

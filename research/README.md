@@ -25,6 +25,7 @@ Welcome to the **Doraneural Research Lab**. This folder documents the exploratio
 | **15** | **LLM Efficiency Audit** | [`ByteTokenizer`](../doraneural/llm.py), [`llama_forward_chunk`](../doraneural/csrc/llm_engine.cpp), [`bench_llm.py`](../scripts/bench_llm.py) | Vocabulary-free byte tiers, EOS-delimited document packing, batched prefill GEMM, CPU-dispatch-aware benchmarking | up to 37.8x decode, 11.98x prefill, -34% SFT passes | [Read Doc](15_llm_efficiency_audit.md) |
 | **16** | **BPE vs Byte-Level: Empirical** | [`exp_byte_vs_bpe.py`](../scripts/exp_byte_vs_bpe.py) | Trained-run comparison of BPE and byte tiers at matched optimizer steps across two bodies | 9.1x smaller, 23.5x faster decode, but 46% worse text compression | [Read Doc](16_byte_vs_bpe_empirical.md) |
 | **17** | **Dust: Zeroth-Order Pretraining** | [`dust.py`](../doraneural/dust.py) | Activation-space perturbation with virtual population and per-token credit assignment, no backprop | cos 0.16->0.68 fits Eq. 5 (RMSE 0.02); 177x fewer steps than backprop on CPU | [Read Doc](17_dust_zeroth_order_pretraining.md) |
+| **19** | **JEPA: Joint-Embedding Predictive Architectures** | [`jepa.py`](../doraneural/jepa.py)<br>[`jepa_data.py`](../doraneural/jepa_data.py) | I-JEPA multi-block masking, V-JEPA tube masking, EMA teacher, **SIGReg/LeJEPA** distribution matching, latent **world model + CEM planner** | Temporal-order video probe **1.00 vs 0.58 random-init**; shortcut audit finds position explains **99.3%** of small-scale latent targets; world-model action audit `action_gain` **0.46**, planner beats random on **79%** of episodes | [Read Doc](19_jepa_joint_embedding_predictive_architectures.md) |
 | **18** | **Gradient Starvation Audit** | [`exp_gradient_starvation.py`](../scripts/exp_gradient_starvation.py) | Measures Paper 11's unverified saturation claim; finds the collapse is in the shared SwiGLU FFN, not the novel neurons, and that Dust does not escape it | 890x collapse in both models; cosine flat at 0.27 | [Read Doc](18_gradient_starvation_audit.md) |
 
 ---
@@ -54,4 +55,6 @@ All research experiments can be reproduced immediately using standalone example 
 - `python3 examples/explore_reflection_and_gating.py`: Bifurcated routing and cortical reflection demos.
 - `python3 examples/explore_4d_and_inverter.py`: 4D Spacetime hyper-tensor networks and synaptic inverters.
 - `python3 examples/train_bio_hybrid_model.py`: End-to-end Bio-Reflective KAN digit classifier.
+- `python3 research/train_jepa.py --task all --quick`: I-JEPA on images, V-JEPA on video, and a latent world model with a CEM planner (see [Research 19](19_jepa_joint_embedding_predictive_architectures.md)).
+- `python3 examples/explore_jepa.py`: Guided JEPA tour - ASCII mask/rollout visualisations, probe-vs-random baselines, and the positional-shortcut audit.
 - `python3 examples/explore_exotic_neurons.py`: Wave interference, chaotic dynamics, and quantum tunneling.
